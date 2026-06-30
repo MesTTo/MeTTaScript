@@ -37,16 +37,28 @@ interface TrieNode<V> {
   readonly child: Map<string, TrieNode<V>>;
 }
 
-/** The worst-case-optimal join (generic join / leapfrog-triejoin family): all bindings of every variable
- *  satisfying all relations. Each relation is indexed once into a trie over its variables in the join
- *  order, so binding a variable intersects the relations' current trie levels by key lookup rather than
- *  rescanning every tuple. That avoids the naive generic join's repeated tuple scans. `key` maps a
- *  value to a comparable string; pass `varOrder` to fix the elimination order (first-seen otherwise). */
-export function wcoJoin<V>(
+/** Hooks for streaming the join: `onDescend`/`onAscend` bracket each variable binding as the search descends
+ *  and backtracks, and `onLeaf` fires at each full solution. The caller keeps whatever state it needs (a
+ *  partial map, or a trail synced to the descent) so the join itself never materializes the answer set. */
+export interface WcoFoldHooks<V> {
+  onDescend(variable: string, value: V): void;
+  onAscend(variable: string): void;
+  onLeaf(): void;
+}
+
+/** The worst-case-optimal join (generic join / leapfrog-triejoin family) as a streaming fold: it drives the
+ *  same trie-cursor intersection as the textbook join but, instead of collecting binding maps, brackets each
+ *  variable binding with `onDescend`/`onAscend` and calls `onLeaf` per solution. Each relation is indexed
+ *  once into a trie over its variables in the join order, so binding a variable intersects the relations'
+ *  current trie levels by key lookup. A consumer that only needs an aggregate (COUNT/EXISTS) keeps a trail
+ *  synced to the descent and never materializes the answer set (MORK's `trie_join_count` kernel). `key` maps
+ *  a value to a comparable string; pass `varOrder` to fix the elimination order (first-seen otherwise). */
+export function wcoJoinFold<V>(
   rels: ReadonlyArray<Relation<V>>,
   key: (v: V) => string,
+  hooks: WcoFoldHooks<V>,
   varOrder?: readonly string[],
-): Array<Map<string, V>> {
+): void {
   const order = varOrder ?? allVars(rels);
   // Index each relation into a trie keyed by its variables in `order`. A tuple that does not bind one of
   // the relation's join variables cannot contribute to a full solution, so it is dropped.
@@ -73,15 +85,12 @@ export function wcoJoin<V>(
   const participants = order.map((v) =>
     relInfos.map((ri, r) => (ri.relVars.includes(v) ? r : -1)).filter((r) => r >= 0),
   );
-
-  const out: Array<Map<string, V>> = [];
-  const partial = new Map<string, V>();
   // cursors[r] = relation r's current trie level (advanced as that relation's variables get bound).
   const cursors: Array<Map<string, TrieNode<V>>> = relInfos.map((ri) => ri.root);
 
   const recurse = (i: number): void => {
     if (i === order.length) {
-      out.push(new Map(partial));
+      hooks.onLeaf();
       return;
     }
     const parts = participants[i]!;
@@ -104,13 +113,33 @@ export function wcoJoin<V>(
       if (!ok) continue;
       const saved = advanced.map(([r]) => [r, cursors[r]!] as [number, Map<string, TrieNode<V>>]);
       for (const [r, child] of advanced) cursors[r] = child;
-      partial.set(v, entry.val);
+      hooks.onDescend(v, entry.val);
       recurse(i + 1);
+      hooks.onAscend(v);
       for (const [r, c] of saved) cursors[r] = c;
     }
-    partial.delete(v);
   };
 
   recurse(0);
+}
+
+/** Collect every join solution as a fresh binding map: a thin materializing wrapper over `wcoJoinFold`. */
+export function wcoJoin<V>(
+  rels: ReadonlyArray<Relation<V>>,
+  key: (v: V) => string,
+  varOrder?: readonly string[],
+): Array<Map<string, V>> {
+  const out: Array<Map<string, V>> = [];
+  const partial = new Map<string, V>();
+  wcoJoinFold(
+    rels,
+    key,
+    {
+      onDescend: (v, val) => partial.set(v, val),
+      onAscend: (v) => partial.delete(v),
+      onLeaf: () => out.push(new Map(partial)),
+    },
+    varOrder,
+  );
   return out;
 }

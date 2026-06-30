@@ -23,5 +23,6 @@ export * from "./runner";
 export * from "./extensions";
 export * from "./stdlib";
 export * from "./flat-kb";
+export * from "./flat-atomspace";
 export * from "./flat-william";
 export { Trail, unifyTrail } from "./trail";

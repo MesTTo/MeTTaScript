@@ -5,7 +5,7 @@
 // Program runner: sequential top-to-bottom evaluation of a MeTTa program, a faithful port of
 // LeaTTa `Stdlib.lean` (`evalSequential`, `oracleReport`). Each `!`-query is evaluated against the
 // prelude plus the KB atoms that precede it; world effects (add-atom, bind!, state) thread forward.
-import { type Atom, gint, gfloat, gbool } from "./atom";
+import { type Atom, createInternTable, gint, gfloat, gbool } from "./atom";
 import { Tokenizer } from "./tokenizer";
 import { parseAll, format } from "./parser";
 import {
@@ -60,12 +60,19 @@ const DEFAULT_TABLING = true;
  *  built-in extension modules (e.g. `concurrency`). The env is built once and extended per non-bang
  *  atom; built-in modules apply only when a program actually `(import! ...)`s them, so the Hyperon
  *  oracle baseline is unaffected. */
-function buildDefaultEnv(imports: Map<string, Atom[]>, tabling: boolean): MinEnv {
+function buildDefaultEnv(
+  imports: Map<string, Atom[]>,
+  tabling: boolean,
+  experimental?: RunOptions["experimental"],
+): MinEnv {
   const env: MinEnv = buildEnv(
     [...preludeAtoms(), ...stdlibAtoms(), ...pettaStdlibAtoms()],
     stdTable(),
   );
   env.imports = withBuiltinModules(imports);
+  if (experimental?.hashCons === true) env.intern = createInternTable();
+  if (experimental?.trail === true) env.useTrail = true;
+  if (experimental?.flatAtomspace === true) env.useFlatAtomspace = true;
   if (tabling) {
     env.table = new Map();
     env.pureFunctors = analyzePurity(env);
@@ -77,6 +84,17 @@ function buildDefaultEnv(imports: Map<string, Atom[]>, tabling: boolean): MinEnv
 
 export interface RunOptions {
   readonly tabling?: boolean;
+  readonly experimental?: {
+    readonly hashCons?: boolean;
+    readonly streamEmit?: boolean;
+    readonly tableBackchain?: boolean;
+    readonly trieSpace?: boolean;
+    // Compact runtime `&self` store. Experimental and off by default.
+    readonly flatAtomspace?: boolean;
+    // Trail-based zero-allocation conjunctive matching (eval.ts matchConjTrail). Byte-identical to the
+    // immutable matcher, differential-gated; off by default.
+    readonly trail?: boolean;
+  };
   // Initial interpreter stack-depth bound; 0 (the default) means unlimited, matching Hyperon. A program can
   // tighten it in-language with `(pragma! max-stack-depth N)`. This is the embedder's knob: it sets the
   // starting bound but is not a hard ceiling; the `fuel` argument is the resource ceiling. Left to the
@@ -104,7 +122,7 @@ export function evalSequential(
   const out: QueryResult[] = [];
   let st: St = initSt();
   if (opts.maxStackDepth !== undefined) st.world.maxStackDepth = opts.maxStackDepth;
-  const env = buildDefaultEnv(imports, opts.tabling ?? DEFAULT_TABLING);
+  const env = buildDefaultEnv(imports, opts.tabling ?? DEFAULT_TABLING, opts.experimental);
   if (opts.parEvalImpl !== undefined) {
     // Re-evaluate a branch in a worker from the program's static (non-`!`) rules; a pure ground branch
     // references only those, so this reproduces the in-line evaluation. Result strings are parsed back.
@@ -148,12 +166,14 @@ export async function runProgramAsync(
   asyncOps: Map<string, AsyncGroundFn> = new Map(),
   fuel = DEFAULT_FUEL,
   imports: Map<string, Atom[]> = new Map(),
+  opts: RunOptions = {},
 ): Promise<QueryResult[]> {
   const parsed = parseAll(src, standardTokenizer());
-  const env = buildDefaultEnv(imports, false);
+  const env = buildDefaultEnv(imports, opts.tabling ?? false, opts.experimental);
   for (const [k, v] of asyncOps) env.agt.set(k, v);
   const out: QueryResult[] = [];
   let st: St = initSt();
+  if (opts.maxStackDepth !== undefined) st.world.maxStackDepth = opts.maxStackDepth;
   for (const { atom, bang } of parsed) {
     if (!bang) {
       addAtomToEnv(env, atom);

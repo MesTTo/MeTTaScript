@@ -8,7 +8,7 @@
 import { parseArgs } from "node:util";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { format } from "@metta-ts/core";
+import { format, type RunOptions } from "@metta-ts/core";
 import { runFile } from "./index";
 
 // Deep effectful MeTTa recursion can exceed V8's default call stack. Re-exec once with a larger stack,
@@ -32,21 +32,43 @@ function main(): void {
     options: {
       "max-steps": { type: "string" },
       "max-stack-depth": { type: "string" },
+      "hash-cons": { type: "boolean" },
+      "flat-atomspace": { type: "boolean" },
     },
   });
   const file = positionals[0];
   if (file === undefined) {
-    process.stderr.write("usage: metta-ts [--max-steps=N] [--max-stack-depth=N] <file.metta>\n");
+    process.stderr.write(
+      "usage: metta-ts [--max-steps=N] [--max-stack-depth=N] [--hash-cons] [--flat-atomspace] <file.metta>\n",
+    );
     process.exit(2);
   }
   const fuel = values["max-steps"] !== undefined ? Number(values["max-steps"]) : undefined;
   const maxStackDepth =
     values["max-stack-depth"] !== undefined ? Number(values["max-stack-depth"]) : undefined;
-  for (const r of runFile(
-    file,
-    fuel,
-    maxStackDepth !== undefined ? { maxStackDepth } : undefined,
-  )) {
+  const hashCons =
+    values["hash-cons"] === true ||
+    process.env.METTA_TS_HASHCONS === "1" ||
+    process.env.METTA_TS_HASHCONS === "true";
+  const flatAtomspace =
+    values["flat-atomspace"] === true ||
+    process.env.METTA_TS_FLAT_ATOMSPACE === "1" ||
+    process.env.METTA_TS_FLAT_ATOMSPACE === "true";
+  const opts: RunOptions | undefined =
+    maxStackDepth !== undefined || hashCons || flatAtomspace
+      ? {
+          ...(maxStackDepth !== undefined ? { maxStackDepth } : {}),
+          ...(hashCons || flatAtomspace
+            ? {
+                experimental: {
+                  ...(hashCons ? { hashCons: true } : {}),
+                  ...(flatAtomspace ? { flatAtomspace: true } : {}),
+                },
+              }
+            : {}),
+        }
+      : undefined;
+  for (const r of runFile(file, fuel, opts)) {
     process.stdout.write("[" + r.results.map(format).join(", ") + "]\n");
   }
 }

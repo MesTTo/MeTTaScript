@@ -9,9 +9,22 @@
 // construction (it reuses the interpreter's own `addInt`/`intDiv`/... so promotion-to-bigint,
 // division-by-zero, and overflow match exactly) and bails to the interpreter for anything outside the
 // proven subset. The internal memo makes overlapping-subproblem recursion (fib) polynomial AND native.
-import { type Atom, expr, gint, gbool } from "./atom";
+import {
+  type Atom,
+  type SymAtom,
+  atomEq,
+  expr,
+  gint,
+  gbool,
+  sym,
+  variable,
+  emptyExpr,
+} from "./atom";
+import { type Bindings, emptyBindings, prependValRaw } from "./bindings";
+import { addVarBinding } from "./match";
 import { type IntVal, addInt, subInt, mulInt, intDiv, intMod, isZero, cmpIntVal } from "./number";
-import { type MinEnv } from "./eval";
+import { callGrounded } from "./builtins";
+import { type MinEnv, type St } from "./eval";
 
 /** Thrown by a compiled node when it meets a case it cannot handle faithfully (division by zero);
  *  the caller catches it (along with a native stack `RangeError`) and re-runs the call in the
@@ -25,22 +38,65 @@ class Tup {
   constructor(readonly v: readonly IntVal[]) {}
 }
 type FrameVal = IntVal | Tup;
-type Ty = "int" | "bool" | `tuple${number}`;
+type Ty = "int" | "bool" | "sym" | `tuple${number}` | `symtuple${number}`;
 type Node = (frame: FrameVal[]) => FrameVal | boolean;
 interface Compiled {
   readonly node: Node;
   readonly type: Ty;
 }
 
-/** A compiled function. `run` is filled after the whole dependency group is compiled, so mutual
+/** A compiled pure function. `run` is filled after the whole dependency group is compiled, so mutual
  *  recursion resolves through the holder object. */
-export interface CompiledHolder {
+interface FunctionalHolder {
+  kind: "functional";
   arity: number;
   retType: Ty;
   paramTypes: Ty[];
   run: (vals: FrameVal[]) => FrameVal | boolean;
 }
+interface CompiledAtomResult {
+  readonly atom: Atom;
+  readonly bnd: Bindings;
+}
+export interface CompiledRunResult {
+  readonly results: readonly CompiledAtomResult[];
+  readonly counterDelta: number;
+  readonly state?: St;
+}
+interface RewriteHolder {
+  kind: "rewrite";
+  arity: number;
+  retType: Ty;
+  paramTypes: Ty[];
+  ruleCount: number;
+  run: (partAtoms: readonly Atom[]) => CompiledRunResult | undefined;
+}
+// A compiled general symbolic constructor function: every static clause is a left-linear constructor
+// rewrite (nested symbol/constructor LHS patterns; an RHS of symbols, ground literals, LHS-bound vars,
+// fresh RHS-only vars, and nested recursive calls). Generalises RewriteHolder (flat symbol tuples) to
+// nested patterns, recursive RHS terms, and surviving fresh variables. `run` is a specialised queryOp:
+// for a GROUND call it replaces the per-application matchAtomsScoped tree-walk + instantiate with a
+// positional match + template build, preserving the interpreter's fresh-variable numbering (clause i
+// freshens with suffix "#"+(counter+i); the counter advances by the clause count) and candidate order.
+interface SymbolicHolder {
+  kind: "symbolic";
+  arity: number;
+  clauseCount: number;
+  run: (partAtoms: readonly Atom[], counter: number) => CompiledRunResult | undefined;
+}
+export interface CompiledImpureOps {
+  readonly addAtom: (env: MinEnv, st: St, space: Atom, atom: Atom) => St | undefined;
+}
+type ImpEval = { readonly value: Atom; readonly st: St } | typeof BAIL;
+interface ImperativeHolder {
+  kind: "imperative";
+  arity: number;
+  clauseCount: number;
+  run: (partAtoms: readonly Atom[], st: St, ops: CompiledImpureOps, discard?: boolean) => ImpEval;
+}
+export type CompiledHolder = FunctionalHolder | RewriteHolder | SymbolicHolder | ImperativeHolder;
 export type CompiledFns = Map<string, CompiledHolder>;
+type FunctionalFns = Map<string, FunctionalHolder>;
 
 // A lexical scope: each in-scope variable maps to how its value is read out of the frame, plus its type.
 // Replaces the old flat `string[]` of int params so a tuple-pattern parameter's elements ($t/$i/$sum) can
@@ -82,7 +138,7 @@ type IntNode = (f: FrameVal[]) => IntVal;
 function binIntArgs(
   args: readonly Atom[],
   scope: Scope,
-  holders: CompiledFns,
+  holders: FunctionalFns,
 ): [IntNode, IntNode] | undefined {
   if (args.length !== 2) return undefined;
   const x = compileBody(args[0]!, scope, holders);
@@ -99,7 +155,7 @@ function compileIf(
   then_: Atom,
   els: Atom,
   scope: Scope,
-  holders: CompiledFns,
+  holders: FunctionalFns,
   branch: (a: Atom) => Compiled | undefined,
 ): Compiled | undefined {
   const c = compileBody(cond, scope, holders);
@@ -113,7 +169,7 @@ function compileIf(
 }
 
 /** Compile a body atom to a typed node, or `undefined` if it falls outside the supported subset. */
-function compileBody(a: Atom, scope: Scope, holders: CompiledFns): Compiled | undefined {
+function compileBody(a: Atom, scope: Scope, holders: FunctionalFns): Compiled | undefined {
   if (a.kind === "var") {
     const v = scope.vars.get(a.name);
     if (v === undefined) return undefined;
@@ -249,7 +305,7 @@ function compileBody(a: Atom, scope: Scope, holders: CompiledFns): Compiled | un
 function compileTail(
   a: Atom,
   scope: Scope,
-  holders: CompiledFns,
+  holders: FunctionalFns,
   self: string,
 ): Compiled | undefined {
   if (a.kind === "expr" && a.items.length > 0 && a.items[0]!.kind === "sym") {
@@ -273,7 +329,7 @@ function compileTail(
   return compileBody(a, scope, holders);
 }
 
-const bailRun = (): IntVal | boolean => {
+const bailRun = (): FrameVal | boolean => {
   throw BAIL;
 };
 
@@ -392,7 +448,7 @@ const paramTypesOf = (params: readonly ParamPat[]): Ty[] =>
 
 /** Infer a plain-var parameter's type from its first use as an argument to a compiled function: if it is
  *  passed where that function expects a tuple, it is that tuple type. Returns undefined if only used as int. */
-function inferVarType(body: Atom, name: string, holders: CompiledFns): Ty | undefined {
+function inferVarType(body: Atom, name: string, holders: FunctionalFns): Ty | undefined {
   let found: Ty | undefined;
   const walk = (a: Atom): void => {
     if (found !== undefined || a.kind !== "expr" || a.items.length === 0) return;
@@ -419,7 +475,7 @@ type Cand = Map<string, { params: ParamPat[]; body: Atom }>;
 function inferType(
   a: Atom,
   varTypes: ReadonlyMap<string, Ty>,
-  holders: CompiledFns,
+  holders: FunctionalFns,
 ): Ty | undefined {
   if (a.kind === "var") return varTypes.get(a.name);
   if (a.kind === "gnd")
@@ -450,6 +506,789 @@ function inferType(
   return holders.get(op)?.retType; // a call: its inferred return type, if known yet
 }
 
+type RewriteCellPat = { tag: "sym"; atom: SymAtom } | { tag: "var"; name: string };
+type RewriteArgPat =
+  | { tag: "sym"; atom: SymAtom }
+  | { tag: "tuple"; items: readonly RewriteCellPat[] };
+type RewriteOut = { tag: "sym"; atom: SymAtom } | { tag: "var"; name: string };
+type RewriteArgVal =
+  | { tag: "sym"; atom: SymAtom }
+  | { tag: "tuple"; items: readonly SymAtom[] }
+  | { tag: "qvar"; name: string };
+interface RewriteRule {
+  readonly args: readonly RewriteArgPat[];
+  readonly out: readonly RewriteOut[];
+  readonly vars: ReadonlyMap<string, { arg: number; cell: number }>;
+}
+
+function compileRewriteCellPat(a: Atom, seen: Set<string>): RewriteCellPat | undefined {
+  if (a.kind === "sym") return { tag: "sym", atom: a };
+  if (a.kind !== "var" || seen.has(a.name)) return undefined;
+  seen.add(a.name);
+  return { tag: "var", name: a.name };
+}
+
+function compileRewriteArgPat(a: Atom, seen: Set<string>): RewriteArgPat | undefined {
+  if (a.kind === "sym") return { tag: "sym", atom: a };
+  if (a.kind !== "expr" || a.items.length === 0) return undefined;
+  const items = a.items.map((it) => compileRewriteCellPat(it, seen));
+  if (items.some((it) => it === undefined)) return undefined;
+  return { tag: "tuple", items: items as RewriteCellPat[] };
+}
+
+function compileRewriteOut(a: Atom, vars: ReadonlySet<string>): RewriteOut[] | undefined {
+  if (a.kind !== "expr" || a.items.length === 0) return undefined;
+  const out: RewriteOut[] = [];
+  for (const it of a.items) {
+    if (it.kind === "sym") out.push({ tag: "sym", atom: it });
+    else if (it.kind === "var" && vars.has(it.name)) out.push({ tag: "var", name: it.name });
+    else return undefined;
+  }
+  return out;
+}
+
+function capturePositions(
+  args: readonly RewriteArgPat[],
+): ReadonlyMap<string, { arg: number; cell: number }> {
+  const vars = new Map<string, { arg: number; cell: number }>();
+  args.forEach((arg, i) => {
+    if (arg.tag === "tuple")
+      arg.items.forEach((cell, j) => {
+        if (cell.tag === "var") vars.set(cell.name, { arg: i, cell: j });
+      });
+  });
+  return vars;
+}
+
+function rewriteParamTypes(args: readonly RewriteArgPat[]): Ty[] {
+  return args.map((arg) => (arg.tag === "sym" ? "sym" : (`symtuple${arg.items.length}` as Ty)));
+}
+
+function sameRewriteParamType(arg: RewriteArgPat, type: Ty): boolean {
+  if (type === "sym") return arg.tag === "sym";
+  if (!type.startsWith("symtuple") || arg.tag !== "tuple") return false;
+  return arg.items.length === Number(type.slice("symtuple".length));
+}
+
+function atomToRewriteArg(a: Atom, type: Ty): RewriteArgVal | undefined {
+  if (type === "sym") {
+    if (a.kind === "sym") return { tag: "sym", atom: a };
+    if (a.kind === "var") return { tag: "qvar", name: a.name };
+    return undefined;
+  }
+  if (!type.startsWith("symtuple") || a.kind !== "expr") return undefined;
+  const width = Number(type.slice("symtuple".length));
+  if (a.items.length !== width) return undefined;
+  const items: SymAtom[] = [];
+  for (const it of a.items) {
+    if (it.kind !== "sym") return undefined;
+    items.push(it);
+  }
+  return { tag: "tuple", items };
+}
+
+function bindQueryVar(b: Bindings, name: string, atom: SymAtom): Bindings | undefined {
+  for (const rel of b) {
+    if (rel.tag === "val" && rel.x === name) return rel.a === atom ? b : undefined;
+  }
+  return prependValRaw(b, name, atom);
+}
+
+function runRewriteRule(
+  rule: RewriteRule,
+  vals: readonly RewriteArgVal[],
+): CompiledAtomResult | undefined {
+  let b = emptyBindings;
+  for (let i = 0; i < rule.args.length; i++) {
+    const pat = rule.args[i]!;
+    const actual = vals[i]!;
+    if (pat.tag === "sym") {
+      if (actual.tag === "sym") {
+        if (actual.atom !== pat.atom) return undefined;
+      } else if (actual.tag === "qvar") {
+        const nb = bindQueryVar(b, actual.name, pat.atom);
+        if (nb === undefined) return undefined;
+        b = nb;
+      } else return undefined;
+      continue;
+    }
+    if (actual.tag !== "tuple" || actual.items.length !== pat.items.length) return undefined;
+    for (let j = 0; j < pat.items.length; j++) {
+      const cell = pat.items[j]!;
+      if (cell.tag === "sym" && actual.items[j] !== cell.atom) return undefined;
+    }
+  }
+  const out = rule.out.map((part) => {
+    if (part.tag === "sym") return part.atom;
+    const pos = rule.vars.get(part.name)!;
+    return (vals[pos.arg] as { items: readonly SymAtom[] }).items[pos.cell]!;
+  });
+  return { atom: expr(out), bnd: b };
+}
+
+function compileRewrite(env: MinEnv, functor: string): RewriteHolder | undefined {
+  const eqs = env.ruleIndex.get(functor);
+  if (eqs === undefined || eqs.length === 0) return undefined;
+  const rules: RewriteRule[] = [];
+  let arity: number | undefined;
+  let retType: Ty | undefined;
+  let paramTypes: Ty[] | undefined;
+  for (const [lhs, rhs] of eqs) {
+    if (lhs.kind !== "expr" || lhs.items.length === 0 || lhs.items[0]!.kind !== "sym")
+      return undefined;
+    if (lhs.items[0]!.name !== functor) return undefined;
+    arity ??= lhs.items.length - 1;
+    if (lhs.items.length - 1 !== arity) return undefined;
+    const seen = new Set<string>();
+    const args = lhs.items.slice(1).map((arg) => compileRewriteArgPat(arg, seen));
+    if (args.some((arg) => arg === undefined)) return undefined;
+    const typedArgs = args as RewriteArgPat[];
+    if (paramTypes === undefined) paramTypes = rewriteParamTypes(typedArgs);
+    else if (
+      typedArgs.length !== paramTypes.length ||
+      typedArgs.some((arg, i) => !sameRewriteParamType(arg, paramTypes![i]!))
+    )
+      return undefined;
+    const vars = capturePositions(typedArgs);
+    const out = compileRewriteOut(rhs, new Set(vars.keys()));
+    if (out === undefined) return undefined;
+    const rt = `symtuple${out.length}` as Ty;
+    if (retType === undefined) retType = rt;
+    else if (retType !== rt) return undefined;
+    rules.push({ args: typedArgs, out, vars });
+  }
+  if (arity === undefined || retType === undefined || paramTypes === undefined) return undefined;
+  const run = (partAtoms: readonly Atom[]): CompiledRunResult | undefined => {
+    const vals: RewriteArgVal[] = [];
+    const qvars = new Set<string>();
+    for (let i = 0; i < partAtoms.length; i++) {
+      const v = atomToRewriteArg(partAtoms[i]!, paramTypes![i]!);
+      if (v === undefined) return undefined;
+      if (v.tag === "qvar") {
+        if (qvars.has(v.name)) return undefined;
+        qvars.add(v.name);
+      }
+      vals.push(v);
+    }
+    const results: CompiledAtomResult[] = [];
+    for (const rule of rules) {
+      const r = runRewriteRule(rule, vals);
+      if (r !== undefined) results.push(r);
+    }
+    return results.length === 0 ? undefined : { results, counterDelta: rules.length };
+  };
+  return { kind: "rewrite", arity, retType, paramTypes, ruleCount: rules.length, run };
+}
+
+// ---------- general symbolic constructor rewrites ----------
+
+// A compiled LHS pattern, matched positionally against a ground argument. A NEW variable takes the next
+// slot (left-linear: a repeated variable bails the whole functor, since slot binding alone cannot enforce
+// the equality the interpreter's matcher would).
+type SymPat =
+  | { readonly tag: "sym"; readonly name: string }
+  | { readonly tag: "slot"; readonly slot: number }
+  | { readonly tag: "lit"; readonly atom: Atom }
+  | { readonly tag: "expr"; readonly items: readonly SymPat[] };
+
+// A compiled RHS template, built directly from the matched slots. A `fresh` is an RHS-only variable that
+// becomes `$name#<suffix>` exactly as `instantiate` would render an unbound suffixed variable.
+type SymTpl =
+  | { readonly tag: "atom"; readonly atom: Atom }
+  | { readonly tag: "slot"; readonly slot: number }
+  | { readonly tag: "fresh"; readonly name: string }
+  | { readonly tag: "expr"; readonly items: readonly SymTpl[] };
+
+interface SymClause {
+  readonly pats: readonly SymPat[];
+  readonly tpl: SymTpl;
+  readonly nslots: number;
+}
+
+/** Compile an LHS pattern, assigning each new variable the next slot. Returns undefined for a repeated
+ *  variable (non-left-linear) so the whole functor falls back to the interpreter. */
+function compileSymPat(a: Atom, slots: Map<string, number>): SymPat | undefined {
+  if (a.kind === "sym") return { tag: "sym", name: a.name };
+  if (a.kind === "var") {
+    if (slots.has(a.name)) return undefined;
+    const slot = slots.size;
+    slots.set(a.name, slot);
+    return { tag: "slot", slot };
+  }
+  if (a.kind === "gnd") return { tag: "lit", atom: a };
+  const items: SymPat[] = [];
+  for (const it of a.items) {
+    const p = compileSymPat(it, slots);
+    if (p === undefined) return undefined;
+    items.push(p);
+  }
+  return { tag: "expr", items };
+}
+
+/** Compile an RHS into a template. A variable bound by the LHS becomes a slot read; an RHS-only variable
+ *  becomes a fresh suffixed variable at build time. Ground leaves are carried as-is. */
+function compileSymTpl(a: Atom, slots: ReadonlyMap<string, number>): SymTpl {
+  if (a.kind === "var") {
+    const slot = slots.get(a.name);
+    return slot === undefined ? { tag: "fresh", name: a.name } : { tag: "slot", slot };
+  }
+  if (a.kind !== "expr") return { tag: "atom", atom: a };
+  return { tag: "expr", items: a.items.map((it) => compileSymTpl(it, slots)) };
+}
+
+/** Match a compiled pattern against a ground argument, filling `slots`. */
+function matchSymPat(pat: SymPat, arg: Atom, slots: Atom[]): boolean {
+  switch (pat.tag) {
+    case "sym":
+      return arg.kind === "sym" && arg.name === pat.name;
+    case "slot":
+      slots[pat.slot] = arg;
+      return true;
+    case "lit":
+      return atomEq(arg, pat.atom);
+    case "expr": {
+      if (arg.kind !== "expr" || arg.items.length !== pat.items.length) return false;
+      for (let i = 0; i < pat.items.length; i++)
+        if (!matchSymPat(pat.items[i]!, arg.items[i]!, slots)) return false;
+      return true;
+    }
+  }
+}
+
+function bindSymQueryVar(bs: readonly Bindings[], name: string, value: Atom): Bindings[] {
+  const out: Bindings[] = [];
+  for (const b of bs) for (const ext of addVarBinding(b, name, value)) out.push(ext);
+  return out;
+}
+
+function matchSymPatQuery(
+  pat: SymPat,
+  arg: Atom,
+  slots: Atom[],
+  bs: readonly Bindings[],
+): Bindings[] | undefined {
+  switch (pat.tag) {
+    case "sym":
+      if (arg.kind === "var") return bindSymQueryVar(bs, arg.name, sym(pat.name));
+      return arg.kind === "sym" && arg.name === pat.name ? [...bs] : [];
+    case "slot":
+      slots[pat.slot] = arg;
+      return [...bs];
+    case "lit":
+      if (arg.kind === "var") return bindSymQueryVar(bs, arg.name, pat.atom);
+      return atomEq(arg, pat.atom) ? [...bs] : [];
+    case "expr": {
+      if (arg.kind === "var") return undefined;
+      if (arg.kind !== "expr" || arg.items.length !== pat.items.length) return [];
+      let cur = [...bs];
+      for (let i = 0; i < pat.items.length; i++) {
+        const next = matchSymPatQuery(pat.items[i]!, arg.items[i]!, slots, cur);
+        if (next === undefined) return undefined;
+        if (next.length === 0) return [];
+        cur = next;
+      }
+      return cur;
+    }
+  }
+}
+
+/** Build an RHS template into an atom. `expr()` recomputes the ground flag exactly as `instantiate`'s
+ *  rebuild does, so a result carrying a fresh variable is correctly non-ground. */
+function buildSymTpl(tpl: SymTpl, slots: readonly Atom[], suffix: string): Atom {
+  switch (tpl.tag) {
+    case "atom":
+      return tpl.atom;
+    case "slot":
+      return slots[tpl.slot]!;
+    case "fresh":
+      return variable(tpl.name + suffix);
+    case "expr":
+      return expr(tpl.items.map((t) => buildSymTpl(t, slots, suffix)));
+  }
+}
+
+/** Compile a pure functor whose every static clause is a left-linear constructor rewrite. Sound only when
+ *  `candidatesW` for a symbol-headed call equals exactly the static clauses: no `($x ...)`-headed catch-all
+ *  rules participate (varRulesVar empty), and the eval call site declines when runtime rules can affect
+ *  the operator. Query variables in call arguments are handled by binding them to the compiled pattern
+ *  leaves, which keeps calls like tilepuzzle's `(move $state $_)` on the compiled path. */
+function compileSymbolic(env: MinEnv, functor: string): SymbolicHolder | undefined {
+  if (env.varRulesVar.length !== 0) return undefined;
+  const eqs = env.ruleIndex.get(functor);
+  if (eqs === undefined || eqs.length === 0) return undefined;
+  const clauses: SymClause[] = [];
+  let arity: number | undefined;
+  for (const [lhs, rhs] of eqs) {
+    if (lhs.kind !== "expr" || lhs.items.length === 0) return undefined;
+    if (lhs.items[0]!.kind !== "sym" || lhs.items[0]!.name !== functor) return undefined;
+    const a = lhs.items.length - 1;
+    if (arity === undefined) arity = a;
+    else if (a !== arity) return undefined;
+    const slots = new Map<string, number>();
+    const pats: SymPat[] = [];
+    for (let i = 1; i < lhs.items.length; i++) {
+      const p = compileSymPat(lhs.items[i]!, slots);
+      if (p === undefined) return undefined;
+      pats.push(p);
+    }
+    clauses.push({ pats, tpl: compileSymTpl(rhs, slots), nslots: slots.size });
+  }
+  if (arity === undefined) return undefined;
+  const clauseCount = clauses.length;
+  const run = (partAtoms: readonly Atom[], counter: number): CompiledRunResult | undefined => {
+    const results: CompiledAtomResult[] = [];
+    for (let i = 0; i < clauseCount; i++) {
+      const clause = clauses[i]!;
+      const slots: Atom[] = new Array(clause.nslots);
+      let bnds: Bindings[] = [emptyBindings];
+      for (let j = 0; j < clause.pats.length; j++) {
+        if (partAtoms[j]!.ground) {
+          if (!matchSymPat(clause.pats[j]!, partAtoms[j]!, slots)) {
+            bnds = [];
+            break;
+          }
+          continue;
+        }
+        const next = matchSymPatQuery(clause.pats[j]!, partAtoms[j]!, slots, bnds);
+        if (next === undefined) return undefined;
+        bnds = next;
+        if (bnds.length === 0) break;
+      }
+      if (bnds.length > 0) {
+        const atom = buildSymTpl(clause.tpl, slots, "#" + (counter + i));
+        for (const bnd of bnds)
+          results.push({
+            atom,
+            bnd,
+          });
+      }
+    }
+    return results.length === 0 ? undefined : { results, counterDelta: clauseCount };
+  };
+  return { kind: "symbolic", arity, clauseCount, run };
+}
+
+// ---------- deterministic impure body compiler ----------
+
+interface ImpScope {
+  readonly vars: ReadonlyMap<string, number>;
+  readonly len: number;
+}
+interface ImpCompiled {
+  readonly node: ImpNode;
+  readonly directEffect: boolean;
+  readonly callees: ReadonlySet<string>;
+}
+// `discard` (the void-context build): the caller throws the value away, so a tuple node may skip building its
+// result (the cons) and run its elements only for their effects. It is forwarded to the result position
+// (if/let body, tuple elements, call result), never to a value the body still needs (a let value, an if
+// condition, call args). Defaults false, so omitting it leaves every node byte-identical to before.
+type ImpNode = (slots: readonly Atom[], st: St, ops: CompiledImpureOps, discard?: boolean) => ImpEval;
+type ImperativeFns = Map<string, ImperativeHolder>;
+
+const IMP_GROUNDED = new Set(["==", "<", ">", "<=", ">=", "+", "-", "*", "%"]);
+const DATA_DENY = new Set([...KNOWN_OPS, "let*", "add-atom"]);
+
+const addCounter = (st: St, n: number): St =>
+  n === 0 ? st : { counter: st.counter + n, world: st.world };
+
+const impBail = (): ImpEval => BAIL;
+
+function impMeta(parts: readonly ImpCompiled[]): Pick<ImpCompiled, "directEffect" | "callees"> {
+  const callees = new Set<string>();
+  let directEffect = false;
+  for (const part of parts) {
+    if (part.directEffect) directEffect = true;
+    for (const c of part.callees) callees.add(c);
+  }
+  return { directEffect, callees };
+}
+
+function impConst(atom: Atom): ImpCompiled {
+  return { node: (_slots, st) => ({ value: atom, st }), directEffect: false, callees: new Set() };
+}
+
+function isDataSymbol(env: MinEnv, name: string): boolean {
+  return !DATA_DENY.has(name) && !env.ruleIndex.has(name) && !env.gt.has(name);
+}
+
+function compileImpStaticAtom(env: MinEnv, a: Atom, scope: ImpScope): ImpCompiled | undefined {
+  if (a.kind === "var") {
+    const slot = scope.vars.get(a.name);
+    if (slot === undefined) return undefined;
+    return {
+      node: (slots, st) => ({ value: slots[slot]!, st }),
+      directEffect: false,
+      callees: new Set(),
+    };
+  }
+  if (a.kind === "sym") return isDataSymbol(env, a.name) ? impConst(a) : undefined;
+  if (a.kind === "gnd") return impConst(a);
+  if (a.items.length === 0) return impConst(a);
+  const head = a.items[0]!;
+  // A variable head may bind to a function symbol, so the term is a reducible application, not inert data
+  // (same hazard as compileImpAtom; keeps the re-reduce-skip invariant that compiled impure results are
+  // already normal form).
+  if (head.kind === "var") return undefined;
+  if (head.kind === "sym" && !isDataSymbol(env, head.name)) return undefined;
+  const items = a.items.map((it) => compileImpStaticAtom(env, it, scope));
+  if (items.some((it) => it === undefined)) return undefined;
+  const parts = items as ImpCompiled[];
+  return {
+    node: (slots, st, ops) => {
+      const out: Atom[] = [];
+      let cur = st;
+      for (const part of parts) {
+        const r = part.node(slots, cur, ops);
+        if (r === BAIL) return BAIL;
+        out.push(r.value);
+        cur = r.st;
+      }
+      return { value: expr(out), st: cur };
+    },
+    ...impMeta(parts),
+  };
+}
+
+function compileImpGrounded(
+  env: MinEnv,
+  op: string,
+  args: readonly Atom[],
+  scope: ImpScope,
+  holders: ImperativeFns,
+): ImpCompiled | undefined {
+  if (env.ruleIndex.has(op)) return undefined;
+  const parts = args.map((arg) => compileImpAtom(env, arg, scope, holders));
+  if (parts.some((part) => part === undefined)) return undefined;
+  const compiled = parts as ImpCompiled[];
+  return {
+    node: (slots, st, ops) => {
+      const vals: Atom[] = [];
+      let cur = st;
+      for (const part of compiled) {
+        const r = part.node(slots, cur, ops);
+        if (r === BAIL) return BAIL;
+        vals.push(r.value);
+        cur = r.st;
+      }
+      const gr = callGrounded(env.gt, op, vals);
+      return gr.tag === "ok" && gr.results.length === 1 ? { value: gr.results[0]!, st: cur } : BAIL;
+    },
+    ...impMeta(compiled),
+  };
+}
+
+function compileImpIf(
+  env: MinEnv,
+  args: readonly Atom[],
+  scope: ImpScope,
+  holders: ImperativeFns,
+): ImpCompiled | undefined {
+  if (args.length !== 3 || (env.ruleIndex.get("if")?.length ?? 0) !== 2) return undefined;
+  const cond = compileImpAtom(env, args[0]!, scope, holders);
+  const then_ = compileImpAtom(env, args[1]!, scope, holders);
+  const els = compileImpAtom(env, args[2]!, scope, holders);
+  if (cond === undefined || then_ === undefined || els === undefined) return undefined;
+  return {
+    node: (slots, st, ops, discard) => {
+      const c = cond.node(slots, st, ops); // the condition is needed, never discarded
+      if (c === BAIL) return BAIL;
+      const stIf = addCounter(c.st, 2);
+      if (c.value.kind !== "gnd" || c.value.value.g !== "bool") return BAIL;
+      return (c.value.value.b ? then_ : els).node(slots, stIf, ops, discard);
+    },
+    ...impMeta([cond, then_, els]),
+  };
+}
+
+function compileImpLet(
+  env: MinEnv,
+  args: readonly Atom[],
+  scope: ImpScope,
+  holders: ImperativeFns,
+): ImpCompiled | undefined {
+  if (args.length !== 3 || args[0]!.kind !== "var" || (env.ruleIndex.get("let")?.length ?? 0) !== 1)
+    return undefined;
+  const value = compileImpAtom(env, args[1]!, scope, holders);
+  if (value === undefined) return undefined;
+  const slot = scope.len;
+  const nextScope: ImpScope = {
+    vars: new Map(scope.vars).set(args[0]!.name, slot),
+    len: slot + 1,
+  };
+  const body = compileImpAtom(env, args[2]!, nextScope, holders);
+  if (body === undefined) return undefined;
+  return {
+    node: (slots, st, ops, discard) => {
+      const v = value.node(slots, st, ops); // the bound value is read by the body, never discarded
+      if (v === BAIL) return BAIL;
+      const local = slots.slice();
+      local[slot] = v.value;
+      return body.node(local, addCounter(v.st, 1), ops, discard);
+    },
+    ...impMeta([value, body]),
+  };
+}
+
+function compileImpLetStar(
+  env: MinEnv,
+  args: readonly Atom[],
+  scope: ImpScope,
+  holders: ImperativeFns,
+): ImpCompiled | undefined {
+  if (
+    args.length !== 2 ||
+    args[0]!.kind !== "expr" ||
+    (env.ruleIndex.get("let*")?.length ?? 0) !== 1 ||
+    (env.ruleIndex.get("let")?.length ?? 0) !== 1
+  )
+    return undefined;
+  let curScope = scope;
+  const bindings: Array<{ readonly slot: number; readonly value: ImpCompiled }> = [];
+  for (const pair of args[0]!.items) {
+    if (pair.kind !== "expr" || pair.items.length !== 2 || pair.items[0]!.kind !== "var")
+      return undefined;
+    const value = compileImpAtom(env, pair.items[1]!, curScope, holders);
+    if (value === undefined) return undefined;
+    const slot = curScope.len;
+    bindings.push({ slot, value });
+    curScope = {
+      vars: new Map(curScope.vars).set(pair.items[0]!.name, slot),
+      len: slot + 1,
+    };
+  }
+  const body = compileImpAtom(env, args[1]!, curScope, holders);
+  if (body === undefined) return undefined;
+  const parts = [...bindings.map((b) => b.value), body];
+  return {
+    node: (slots, st, ops, discard) => {
+      const local = slots.slice();
+      let cur = addCounter(st, 1);
+      for (const binding of bindings) {
+        const v = binding.value.node(local, cur, ops); // each bound value is read later, never discarded
+        if (v === BAIL) return BAIL;
+        local[binding.slot] = v.value;
+        cur = addCounter(addCounter(v.st, 1), 1);
+      }
+      return body.node(local, cur, ops, discard);
+    },
+    ...impMeta(parts),
+  };
+}
+
+function compileImpAddAtom(
+  env: MinEnv,
+  args: readonly Atom[],
+  scope: ImpScope,
+): ImpCompiled | undefined {
+  if (args.length !== 2 || args[0]!.kind !== "sym") return undefined;
+  const added = args[1]!;
+  if (
+    added.kind !== "expr" ||
+    added.items.length === 0 ||
+    added.items[0]!.kind !== "sym" ||
+    added.items[0]!.name === "="
+  )
+    return undefined;
+  const space = compileImpStaticAtom(env, args[0]!, scope);
+  const atom = compileImpStaticAtom(env, added, scope);
+  if (space === undefined || atom === undefined) return undefined;
+  return {
+    node: (slots, st, ops) => {
+      const s = space.node(slots, st, ops);
+      if (s === BAIL) return BAIL;
+      const a = atom.node(slots, s.st, ops);
+      if (a === BAIL) return BAIL;
+      const st2 = ops.addAtom(env, a.st, s.value, a.value);
+      return st2 === undefined ? BAIL : { value: emptyExpr, st: st2 };
+    },
+    directEffect: true,
+    callees: new Set(),
+  };
+}
+
+function compileImpCall(
+  env: MinEnv,
+  op: string,
+  args: readonly Atom[],
+  scope: ImpScope,
+  holders: ImperativeFns,
+): ImpCompiled | undefined {
+  const h = holders.get(op);
+  if (h === undefined || args.length !== h.arity) return undefined;
+  const compiledArgs = args.map((arg) => compileImpAtom(env, arg, scope, holders));
+  if (compiledArgs.some((arg) => arg === undefined)) return undefined;
+  const parts = compiledArgs as ImpCompiled[];
+  const meta = impMeta(parts);
+  return {
+    node: (slots, st, ops, discard) => {
+      const vals: Atom[] = [];
+      let cur = st;
+      for (const part of parts) {
+        const r = part.node(slots, cur, ops); // call args are needed, never discarded
+        if (r === BAIL) return BAIL;
+        vals.push(r.value);
+        cur = r.st;
+      }
+      return h.run(vals, cur, ops, discard);
+    },
+    directEffect: meta.directEffect,
+    callees: new Set([...meta.callees, op]),
+  };
+}
+
+function compileImpTuple(
+  env: MinEnv,
+  items: readonly Atom[],
+  scope: ImpScope,
+  holders: ImperativeFns,
+): ImpCompiled | undefined {
+  const parts = items.map((it) => compileImpAtom(env, it, scope, holders));
+  if (parts.some((part) => part === undefined)) return undefined;
+  const compiled = parts as ImpCompiled[];
+  return {
+    node: (slots, st, ops, discard) => {
+      let cur = st;
+      if (discard === true) {
+        // The result is thrown away (a dead let binding the build never reads). Run each element for its
+        // effects, forwarding discard, so a deeply recursive tuple build (matespace's rewriteK) runs all its
+        // add-atoms without ever allocating the result tree, then return a shared sentinel. Skipping the cons
+        // does not allocate or advance the gensym, so the side effects and the counter are unchanged.
+        for (const part of compiled) {
+          const r = part.node(slots, cur, ops, true);
+          if (r === BAIL) return BAIL;
+          cur = r.st;
+        }
+        return { value: emptyExpr, st: cur };
+      }
+      const out: Atom[] = [];
+      for (const part of compiled) {
+        const r = part.node(slots, cur, ops);
+        if (r === BAIL) return BAIL;
+        out.push(r.value);
+        cur = r.st;
+      }
+      return { value: expr(out), st: cur };
+    },
+    ...impMeta(compiled),
+  };
+}
+
+function compileImpAtom(
+  env: MinEnv,
+  a: Atom,
+  scope: ImpScope,
+  holders: ImperativeFns,
+): ImpCompiled | undefined {
+  if (a.kind !== "expr" || a.items.length === 0) return compileImpStaticAtom(env, a, scope);
+  const head = a.items[0]!;
+  if (head.kind !== "sym") {
+    // A variable head can bind at runtime to a function symbol, so `($f $x)` is a reducible higher-order
+    // application, not inert data. The imperative VM would freeze it as a tuple and the dispatch skips
+    // re-reducing a compiled impure result, so it would never reduce (e.g. `(doit foo 3)` -> `(foo 3)`
+    // instead of `(R 3)`). PeTTa emits a runtime dispatch for a var head (translator.pl: "Unknown head
+    // (var/compound) => runtime dispatch"); we bail so the interpreter dispatches it. A compound (expr) head
+    // is a tuple whose head is itself an evaluated call to a data-returning function (matespace's rewriteK),
+    // which stays compilable.
+    if (head.kind === "var") return undefined;
+    return compileImpTuple(env, a.items, scope, holders);
+  }
+  const op = head.name;
+  const args = a.items.slice(1);
+  if (op === "if") return compileImpIf(env, args, scope, holders);
+  if (op === "let") return compileImpLet(env, args, scope, holders);
+  if (op === "let*") return compileImpLetStar(env, args, scope, holders);
+  if (op === "add-atom") return compileImpAddAtom(env, args, scope);
+  if (IMP_GROUNDED.has(op)) return compileImpGrounded(env, op, args, scope, holders);
+  const call = compileImpCall(env, op, args, scope, holders);
+  if (call !== undefined) return call;
+  return compileImpStaticAtom(env, a, scope);
+}
+
+function buildImpScope(params: readonly ParamPat[]): ImpScope | undefined {
+  const vars = new Map<string, number>();
+  for (let i = 0; i < params.length; i++) {
+    const p = params[i]!;
+    if (typeof p !== "string") return undefined;
+    vars.set(p, i);
+  }
+  return { vars, len: params.length };
+}
+
+function compileImperative(env: MinEnv, compiled: CompiledFns): void {
+  if (env.varRulesVar.length !== 0) return;
+  const cand: Cand = new Map();
+  for (const f of env.ruleIndex.keys()) {
+    if (compiled.has(f)) continue;
+    const h = singleClauseHead(env, f);
+    if (h !== undefined && h.params.every((p) => typeof p === "string")) cand.set(f, h);
+  }
+  const holders: ImperativeFns = new Map();
+  for (const [f, { params }] of cand)
+    holders.set(f, { kind: "imperative", arity: params.length, clauseCount: 1, run: impBail });
+
+  for (;;) {
+    let removed = false;
+    const bodies = new Map<string, ImpCompiled>();
+    for (const [f, h] of [...holders]) {
+      const cd = cand.get(f)!;
+      const scope = buildImpScope(cd.params);
+      const body = scope === undefined ? undefined : compileImpAtom(env, cd.body, scope, holders);
+      if (body === undefined) {
+        holders.delete(f);
+        removed = true;
+      } else {
+        bodies.set(f, body);
+        h.arity = cd.params.length;
+      }
+    }
+    if (removed) continue;
+
+    const effectful = new Set<string>();
+    for (const [f, body] of bodies) if (body.directEffect) effectful.add(f);
+    for (let changed = true; changed; ) {
+      changed = false;
+      for (const [f, body] of bodies) {
+        if (effectful.has(f)) continue;
+        for (const callee of body.callees)
+          if (effectful.has(callee)) {
+            effectful.add(f);
+            changed = true;
+            break;
+          }
+      }
+    }
+    for (const f of [...holders.keys()])
+      if (!effectful.has(f)) {
+        holders.delete(f);
+        removed = true;
+      }
+    if (removed) continue;
+
+    for (const [f, body] of bodies) {
+      const arity = cand.get(f)!.params.length;
+      holders.get(f)!.run = (partAtoms, st, ops, discard) => {
+        if (partAtoms.length !== arity || partAtoms.some((a) => !a.ground)) return BAIL;
+        // A self-call recurses natively (compileImpCall -> h.run -> body.node), so deep recursion grows the
+        // host stack exactly as the interpreter's does. A native stack overflow must PROPAGATE to the
+        // top-level `mettaEval` catch, which turns it into `(Error <query> StackOverflow)` — byte-identical
+        // to the interpreter overflowing on the same call. Returning BAIL on a RangeError instead would fall
+        // back to the interpreter, which re-reduces one level and re-enters the compiled function for the
+        // rest, overflowing again: O(depth^2) bail+overflow that lets a StackOverflow escape. So catch only a
+        // thrown BAIL sentinel and let everything else (RangeError included) unwind.
+        try {
+          return body.node(partAtoms, addCounter(st, 1), ops, discard);
+        } catch (e) {
+          if (e === BAIL) return BAIL;
+          throw e;
+        }
+      };
+    }
+    for (const [f, h] of holders) compiled.set(f, h);
+    return;
+  }
+}
+
 /** Compile every compilable pure single-clause function in `env` to a memoised native closure.
  *  Phase 1 infers return types (fixpoint, optimistic over recursion). Phase 2 compiles bodies with
  *  those types and drops any that fail end-to-end (a call to an uncompilable function fails too). */
@@ -464,9 +1303,10 @@ export function compileEnv(env: MinEnv): CompiledFns {
   // A holder per candidate, types refined below. retType starts undefined (a sentinel that inferType reads
   // back as "not yet known"); the fixpoint refines both each plain-var parameter's type (from how it is used
   // as a tuple argument) and the return type, since either may depend on the other and on callees.
-  const holders: CompiledFns = new Map();
+  const holders: FunctionalFns = new Map();
   for (const [f, { params }] of cand)
     holders.set(f, {
+      kind: "functional",
       arity: params.length,
       retType: undefined as unknown as Ty,
       paramTypes: paramTypesOf(params),
@@ -513,16 +1353,44 @@ export function compileEnv(env: MinEnv): CompiledFns {
     if (!removed) {
       for (const [f, { node, arity }] of result)
         holders.get(f)!.run = makeRun(arity, node, selfCallCount(cand.get(f)!.body, f) >= 2);
-      return holders;
+      const compiled: CompiledFns = new Map(holders);
+      for (const f of pure) {
+        if (compiled.has(f)) continue;
+        const rewrite = compileRewrite(env, f);
+        if (rewrite !== undefined) {
+          compiled.set(f, rewrite);
+          continue;
+        }
+        const symbolic = compileSymbolic(env, f);
+        if (symbolic !== undefined) compiled.set(f, symbolic);
+      }
+      compileImperative(env, compiled);
+      return compiled;
     }
   }
 }
 
-/** Run a compiled function for a ground-int call, returning the result atom, or `undefined` to fall
- *  back to the interpreter (not compiled, non-int args, or a runtime bail). */
-export function runCompiled(env: MinEnv, op: string, partAtoms: readonly Atom[]): Atom | undefined {
+/** Run a compiled function, returning an ordered result bag, or `undefined` to fall back to the interpreter
+ *  when the call falls outside the proven subset. */
+export function runCompiled(
+  env: MinEnv,
+  op: string,
+  partAtoms: readonly Atom[],
+  st: St,
+  ops?: CompiledImpureOps,
+  discard?: boolean,
+): CompiledRunResult | undefined {
   const h = env.compiled?.get(op);
   if (h === undefined || partAtoms.length !== h.arity) return undefined;
+  if (h.kind === "rewrite") return h.run(partAtoms);
+  if (h.kind === "symbolic") return h.run(partAtoms, st.counter);
+  if (h.kind === "imperative") {
+    if (ops === undefined) return undefined;
+    const r = h.run(partAtoms, st, ops, discard);
+    return r === BAIL
+      ? undefined
+      : { results: [{ atom: r.value, bnd: emptyBindings }], counterDelta: 0, state: r.st };
+  }
   // An argument is a ground int, or a flat tuple of ground ints `(i1 i2 ...)` (the iterate/quad-step state).
   const vals: FrameVal[] = [];
   for (const a of partAtoms) {
@@ -537,9 +1405,13 @@ export function runCompiled(env: MinEnv, op: string, partAtoms: readonly Atom[])
   }
   try {
     const r = h.run(vals);
-    if (typeof r === "boolean") return gbool(r);
-    if (r instanceof Tup) return expr(r.v.map((n) => gint(n)));
-    return gint(r);
+    const atom =
+      typeof r === "boolean"
+        ? gbool(r)
+        : r instanceof Tup
+          ? expr(r.v.map((n) => gint(n)))
+          : gint(r);
+    return { results: [{ atom, bnd: emptyBindings }], counterDelta: 0 };
   } catch (e) {
     if (e === BAIL || e instanceof RangeError) return undefined;
     throw e;

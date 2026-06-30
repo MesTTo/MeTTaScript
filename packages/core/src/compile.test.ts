@@ -1,8 +1,10 @@
 // SPDX-FileCopyrightText: 2026 MesTTo
 //
 // SPDX-License-Identifier: MIT
+import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
-import { buildEnv } from "./eval";
+import { buildEnv, initSt, mettaEval } from "./eval";
+import { type Atom, expr, sym, variable } from "./atom";
 import { stdTable } from "./builtins";
 import { parseAll, format } from "./parser";
 import { standardTokenizer, preludeAtoms, runProgram } from "./runner";
@@ -20,13 +22,61 @@ function envWith(src: string) {
   return env;
 }
 
+function runFunctional(c: ReturnType<typeof compileEnv>, name: string, vals: number[]) {
+  const h = c.get(name);
+  expect(h?.kind).toBe("functional");
+  if (h === undefined || h.kind !== "functional") return undefined;
+  return h.run(vals);
+}
+
+function evalQuery(env: ReturnType<typeof envWith>, q: Atom) {
+  const [pairs, st] = mettaEval(env, 10_000_000, initSt(), [], q);
+  return { results: pairs.map((p) => format(p[0])), counter: st.counter };
+}
+
+function compareCompiledAndInterpreted(src: string, fuel = 100_000) {
+  const run = (tabling: boolean) =>
+    runProgram(src, fuel, new Map(), { tabling }).map((r) => r.results.map(format));
+  const on = run(true);
+  const off = run(false);
+  expect(on).toEqual(off);
+  return on;
+}
+
+const tilepuzzleMoveSrc = () =>
+  readFileSync(
+    new URL("../../node/bench/corpus-mettats/tilepuzzle.metta", import.meta.url),
+    "utf8",
+  ).split("!(import!")[0]!;
+
+const tileState = (cells: readonly string[]): Atom => expr(cells.map((cell) => sym(cell)));
+
+function tileSamples(): Atom[] {
+  const base = ["___", "1", "2", "3", "4", "5", "6", "7", "8"];
+  const states: Atom[] = [];
+  for (let blank = 0; blank < base.length; blank++) {
+    const cells = base.slice();
+    [cells[0], cells[blank]] = [cells[blank]!, cells[0]!];
+    states.push(tileState(cells));
+  }
+  for (let seed = 1; seed <= 24; seed++) {
+    const cells = base.slice();
+    for (let i = cells.length - 1; i > 0; i--) {
+      const j = (seed * 17 + i * 31) % (i + 1);
+      [cells[i], cells[j]] = [cells[j]!, cells[i]!];
+    }
+    states.push(tileState(cells));
+  }
+  return states;
+}
+
 describe("deterministic-core compiler", () => {
   it("compiles fib (non-vacuous: the fast path really exists and computes)", () => {
     const c = compileEnv(
       envWith("(= (fib $n) (unify $n 0 0 (unify $n 1 1 (+ (fib (- $n 1)) (fib (- $n 2))))))"),
     );
     expect(c.has("fib")).toBe(true);
-    expect(c.get("fib")!.run([10])).toBe(55); // fib(10) = 55
+    expect(runFunctional(c, "fib", [10])).toBe(55); // fib(10) = 55
   });
 
   it("compiles mutual recursion (even/odd) returning Bool", () => {
@@ -37,8 +87,8 @@ describe("deterministic-core compiler", () => {
       ),
     );
     expect(c.has("even")).toBe(true);
-    expect(c.get("even")!.run([10])).toBe(true);
-    expect(c.get("odd")!.run([10])).toBe(false);
+    expect(runFunctional(c, "even", [10])).toBe(true);
+    expect(runFunctional(c, "odd", [10])).toBe(false);
   });
 
   it("does not compile a function that uses match (outside the pure int/bool core)", () => {
@@ -53,25 +103,13 @@ describe("deterministic-core compiler", () => {
 
   it("division by zero is byte-identical to the interpreter (compiled bails)", () => {
     const src = "(= (q $n) (/ 10 $n))\n!(q 5)\n!(q 0)";
-    const on = runProgram(src, 100_000, new Map(), { tabling: true }).map((r) =>
-      r.results.map(format),
-    );
-    const off = runProgram(src, 100_000, new Map(), { tabling: false }).map((r) =>
-      r.results.map(format),
-    );
-    expect(on).toEqual(off);
+    const on = compareCompiledAndInterpreted(src);
     expect(on[0]).toEqual(["2"]);
   });
 
   it("a float argument falls back to the interpreter (no divergence)", () => {
     const src = "(= (dbl $n) (+ $n $n))\n!(dbl 1.5)\n!(dbl 7)";
-    const on = runProgram(src, 100_000, new Map(), { tabling: true }).map((r) =>
-      r.results.map(format),
-    );
-    const off = runProgram(src, 100_000, new Map(), { tabling: false }).map((r) =>
-      r.results.map(format),
-    );
-    expect(on).toEqual(off);
+    const on = compareCompiledAndInterpreted(src);
     expect(on[0]).toEqual(["3.0"]);
     expect(on[1]).toEqual(["14"]);
   });
@@ -92,7 +130,7 @@ describe("deterministic-core compiler", () => {
   it("compiles let-binding pure functions", () => {
     const c = compileEnv(envWith("(= (g $n) (let $x (* $n 2) (+ $x 1)))"));
     expect(c.has("g")).toBe(true);
-    expect(c.get("g")!.run([10])).toBe(21); // (10*2)+1
+    expect(runFunctional(c, "g", [10])).toBe(21); // (10*2)+1
     expect(
       runProgram("(= (g $n) (let $x (* $n 2) (+ $x 1)))\n!(g 10)")[0]!.results.map(format),
     ).toEqual(["21"]);
@@ -132,5 +170,30 @@ describe("deterministic-core compiler", () => {
     const r = runProgram(`${quad}\n!(quad-sum 1000)`, 2_000_000_000);
     expect(r[r.length - 1]!.results.map(format)).toEqual(["125417041750"]);
     expect(Date.now() - t0).toBeLessThan(5000); // native loop: well under a second, vs >90s interpreted
+  });
+
+  it("compiles tilepuzzle's constructor rewrite move and matches the interpreter", () => {
+    const move = tilepuzzleMoveSrc();
+    const compiledEnv = envWith(move);
+    compiledEnv.compiled = compileEnv(compiledEnv);
+    compiledEnv.compileDirty = false;
+    const interpretedEnv = envWith(move);
+    expect(compiledEnv.compiled.get("move")?.kind).toBe("rewrite");
+
+    const dirs = ["U", "D", "L", "R"];
+    for (const state of tileSamples()) {
+      const generated = expr([
+        sym("let"),
+        variable("Snew"),
+        expr([sym("move"), state, variable("d")]),
+        expr([variable("Snew"), variable("d")]),
+      ]);
+      expect(evalQuery(compiledEnv, generated)).toEqual(evalQuery(interpretedEnv, generated));
+
+      for (const dir of dirs) {
+        const ground = expr([sym("move"), state, sym(dir)]);
+        expect(evalQuery(compiledEnv, ground)).toEqual(evalQuery(interpretedEnv, ground));
+      }
+    }
   });
 });

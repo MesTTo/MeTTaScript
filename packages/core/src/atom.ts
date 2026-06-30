@@ -96,6 +96,11 @@ export function groundEq(a: Ground, b: Ground): boolean {
 }
 
 const SYM_INTERN = new Map<string, SymAtom>();
+const MIN_EXPR_INTERN_ARITY = 64;
+
+export function canInternExprItems(items: readonly Atom[]): boolean {
+  return items.length >= MIN_EXPR_INTERN_ARITY;
+}
 
 /** Interned symbol atom: equal names share one object (reference equality, low allocation). */
 export function sym(name: string): SymAtom {
@@ -147,6 +152,139 @@ export function expr(items: readonly Atom[]): ExprAtom {
     match: undefined,
     ground,
   };
+}
+
+export interface InternTable {
+  readonly buckets: Map<number, Atom | Atom[]>;
+  readonly variables: Map<string, VarAtom>;
+  readonly expressions: WeakSet<ExprAtom>;
+  readonly hasUnsafeGrounded: WeakMap<ExprAtom, boolean>;
+}
+
+export function createInternTable(): InternTable {
+  return {
+    buckets: new Map(),
+    variables: new Map(),
+    expressions: new WeakSet(),
+    hasUnsafeGrounded: new WeakMap(),
+  };
+}
+
+function bucketIntern(table: InternTable, a: Atom): Atom {
+  const h = hashOf(a);
+  const entry = table.buckets.get(h);
+  if (entry === undefined) {
+    table.buckets.set(h, a);
+    if (a.kind === "expr") table.expressions.add(a);
+    return a;
+  }
+  if (!Array.isArray(entry)) {
+    if (atomEq(entry, a)) return entry;
+    table.buckets.set(h, [entry, a]);
+    if (a.kind === "expr") table.expressions.add(a);
+    return a;
+  }
+  for (const existing of entry) {
+    if (atomEq(existing, a)) return existing;
+  }
+  entry.push(a);
+  if (a.kind === "expr") table.expressions.add(a);
+  return a;
+}
+
+function isStateExpression(a: ExprAtom): boolean {
+  const head = a.items[0];
+  return head?.kind === "sym" && (head.name === "State" || head.name === "StateValue");
+}
+
+function hasUnsafeGrounded(table: InternTable, a: Atom): boolean {
+  if (a.kind === "gnd") return true;
+  if (a.kind !== "expr") return false;
+  if (isStateExpression(a)) return true;
+  const cached = table.hasUnsafeGrounded.get(a);
+  if (cached !== undefined) return cached;
+  for (const it of a.items) {
+    if (hasUnsafeGrounded(table, it)) {
+      table.hasUnsafeGrounded.set(a, true);
+      return true;
+    }
+  }
+  table.hasUnsafeGrounded.set(a, false);
+  return false;
+}
+
+function internVariable(table: InternTable, a: VarAtom): VarAtom {
+  let v = table.variables.get(a.name);
+  if (v === undefined) {
+    v = a;
+    table.variables.set(a.name, v);
+  }
+  return v;
+}
+
+export function internAtom(table: InternTable | undefined, a: Atom): Atom {
+  if (table === undefined) return a;
+  switch (a.kind) {
+    case "sym":
+      return sym(a.name);
+    case "var":
+      return internVariable(table, a);
+    case "expr":
+      return internExpr(table, a);
+    case "gnd":
+      return a;
+  }
+}
+
+export function internExpr(table: InternTable | undefined, a: ExprAtom): ExprAtom {
+  if (
+    table === undefined ||
+    table.expressions.has(a) ||
+    !a.ground ||
+    !canInternExprItems(a.items) ||
+    hasUnsafeGrounded(table, a)
+  ) {
+    return a;
+  }
+  const its = a.items;
+  let items: Atom[] | null = null;
+  let ground = true;
+  for (let i = 0; i < its.length; i++) {
+    const it = its[i]!;
+    const r = internAtom(table, it);
+    if (!r.ground) ground = false;
+    if (items !== null) items.push(r);
+    else if (r !== it) {
+      items = its.slice(0, i);
+      items.push(r);
+    }
+  }
+  const candidate = items === null && ground === a.ground ? a : expr(items ?? its);
+  return bucketIntern(table, candidate) as ExprAtom;
+}
+
+export function internBuiltExpr(table: InternTable | undefined, a: ExprAtom): ExprAtom {
+  if (
+    table === undefined ||
+    table.expressions.has(a) ||
+    !a.ground ||
+    !canInternExprItems(a.items) ||
+    hasUnsafeGrounded(table, a)
+  ) {
+    return a;
+  }
+  const its = a.items;
+  let items: Atom[] | null = null;
+  for (let i = 0; i < its.length; i++) {
+    const it = its[i]!;
+    const r = it.kind === "var" ? internVariable(table, it) : it.kind === "sym" ? sym(it.name) : it;
+    if (items !== null) items.push(r);
+    else if (r !== it) {
+      items = its.slice(0, i);
+      items.push(r);
+    }
+  }
+  return bucketIntern(table, items === null ? a : expr(items)) as ExprAtom;
 }
 
 /** The built-in type atom for a grounded value (LeaTTa `getTypes` on grounded). */
@@ -201,11 +339,11 @@ export function metaType(a: Atom): MetaType {
 // possible (32 bits), so every consumer MUST verify a hit with `atomEq` rather than trust the hash alone.
 const exprHashCache = new WeakMap<ExprAtom, number>();
 
-const mixHash = (h: number, x: number): number => {
+export const mixHash = (h: number, x: number): number => {
   h = Math.imul(h ^ x, 0x9e3779b1);
   return (h ^ (h >>> 15)) >>> 0;
 };
-const strHash = (s: string): number => {
+export const strHash = (s: string): number => {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
   return h >>> 0;

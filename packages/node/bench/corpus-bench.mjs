@@ -22,6 +22,7 @@
 //     --quick              a small fixed subset, for a fast sanity sweep
 //     --out=<file>         Markdown output path (default bench/RESULTS-corpus.md)
 //     --engine=ts|petta    run only one engine (timing without the head-to-head)
+//     --hash-cons          run the MeTTa-TS CLI with experimental hash-consing enabled
 
 import { spawnSync } from "node:child_process";
 import { readdirSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
@@ -49,6 +50,8 @@ const QUICK_SET = [
   "fib", "fact", "ackermann", "peano", "peanofast", "permutations",
   "he_minimalmetta", "nars_tuffy", "pln_tuffy", "matespace",
 ];
+const HASH_CONS =
+  flag("hash-cons") || process.env.METTA_TS_HASHCONS === "1" || process.env.METTA_TS_HASHCONS === "true";
 
 // Examples that exercise a host capability outside a pure-TypeScript engine's scope. @metta-ts is
 // deliberately dependency-free (its whole value is pure TS, no native/runtime FFI), so these are not part
@@ -154,7 +157,13 @@ const runPetta = (name) => timeCmd("sh", [RUN_SH, join(EXAMPLES, name + ".metta"
 const runTs = (name) =>
   timeCmd(
     process.execPath,
-    ["--stack-size=8000", CLI, `--max-steps=${MAX_STEPS}`, join(TS_CORPUS, name + ".metta")],
+    [
+      "--stack-size=8000",
+      CLI,
+      `--max-steps=${MAX_STEPS}`,
+      ...(HASH_CONS ? ["--hash-cons"] : []),
+      join(TS_CORPUS, name + ".metta"),
+    ],
     { METTA_TS_STACK: "1" },
   );
 
@@ -167,7 +176,9 @@ if (FILTER) files = files.filter((f) => f.includes(FILTER));
 
 console.log(`MeTTa-TS vs PeTTa on ${files.length} examples`);
 console.log(`  PeTTa:    ${PETTA_DIR}`);
-console.log(`  timeout=${TIMEOUT_MS / 1000}s runs=${RUNS} max-steps=${MAX_STEPS} engine=${ENGINE}\n`);
+console.log(
+  `  timeout=${TIMEOUT_MS / 1000}s runs=${RUNS} max-steps=${MAX_STEPS} engine=${ENGINE} hash-cons=${HASH_CONS}\n`,
+);
 const pad = (s, n) => String(s).padEnd(n);
 const padL = (s, n) => String(s).padStart(n);
 console.log(pad("example", 26), padL("petta", 9), padL("metta-ts", 10), padL("speedup", 9), " result");

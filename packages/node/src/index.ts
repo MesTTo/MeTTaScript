@@ -18,13 +18,15 @@ import {
 import { makeParEvalImpl } from "./par-hyperpose";
 
 /** Pre-read every `import!` target referenced in `src`, resolving names against `baseDir`. */
-export function readImports(src: string, baseDir: string): Map<string, Atom[]> {
+export function readImports(src: string, baseDir: string, importRoot = baseDir): Map<string, Atom[]> {
   const m = new Map<string, Atom[]>();
   const base = resolve(baseDir);
+  const root = resolve(importRoot);
   for (const name of collectImports(src)) {
     const p = resolve(base, name.endsWith(".metta") ? name : name + ".metta");
-    // Confine imports to baseDir: reject `import!` targets that escape it via `..` (path traversal).
-    if (p !== base && !p.startsWith(base + sep)) continue;
+    // Keep imports inside the chosen root. `runFile` uses the file directory's parent so a corpus file can
+    // share a sibling `../lib` directory without allowing imports above that tree.
+    if (p !== root && !p.startsWith(root + sep)) continue;
     if (existsSync(p))
       m.set(
         name,
@@ -41,13 +43,14 @@ export function readImports(src: string, baseDir: string): Map<string, Atom[]> {
 export function runFile(path: string, fuel?: number, opts?: RunOptions): QueryResult[] {
   const src = readFileSync(path, "utf8");
   const tops = parseAll(src, standardTokenizer());
+  const fileDir = dirname(resolve(path));
   // Node hosts `(once (hyperpose …))` on a worker_threads pool by default (the browser cannot, and falls
   // back to sequential). A caller can override by passing its own `parEvalImpl` (or `null` to disable).
   const withPar: RunOptions =
     opts?.parEvalImpl === undefined
       ? { ...opts, parEvalImpl: makeParEvalImpl(fuel ?? DEFAULT_FUEL) }
       : opts;
-  return evalSequential(tops, fuel, readImports(src, dirname(resolve(path))), withPar);
+  return evalSequential(tops, fuel, readImports(src, fileDir, dirname(fileDir)), withPar);
 }
 
 export * from "@metta-ts/core";

@@ -5,7 +5,16 @@
 // Nondeterministic pattern matching and binding-set merge, a faithful port of
 // LeaTTa `Core/Matching.lean`. Matching follows the official left/right style.
 import { type Atom, atomEq, variable } from "./atom";
-import { type Bindings, type BindingRel, lookupVal, addValRaw, addEqRaw } from "./bindings";
+import {
+  type Bindings,
+  type BindingRel,
+  emptyBindings,
+  lookupVal,
+  prependValRaw,
+  addEqRaw,
+  relations,
+  someVal,
+} from "./bindings";
 
 // Rename every variable in `a` by appending `suffix`, sharing closed subterms (ground short-circuit, no
 // clone). Used to scope a rule's variables WITHOUT cloning the whole rule upfront: the matcher applies the
@@ -66,8 +75,7 @@ function occursThrough(
 function reconcile(b: Bindings, l: Atom, r: Atom): Bindings[] {
   const out: Bindings[] = [];
   for (const mb of matchAtoms(l, r)) {
-    if (mb.some((rel) => rel.tag === "val" && occursThrough(rel.x, rel.a, mb, b, new Set())))
-      continue;
+    if (someVal(mb, (x, a) => occursThrough(x, a, mb, b, new Set()))) continue;
     for (const m of merge(b, mb)) out.push(m);
   }
   return out;
@@ -78,7 +86,7 @@ function reconcile(b: Bindings, l: Atom, r: Atom): Bindings[] {
  *  `add_var_binding` with LeaTTa's occurs check. */
 export function addVarBinding(b: Bindings, x: string, v: Atom): Bindings[] {
   const prev = lookupVal(b, x);
-  if (prev === undefined) return [addValRaw(b, x, v)];
+  if (prev === undefined) return [prependValRaw(b, x, v)];
   if (atomEq(prev, v)) return [b];
   return reconcile(b, prev, v);
 }
@@ -86,6 +94,7 @@ export function addVarBinding(b: Bindings, x: string, v: Atom): Bindings[] {
 /** Add the alias `$x = $y` to `b` consistently. If both are already value-bound to different values,
  *  reconcile those values (mirrors hyperon's `add_var_equality`); otherwise record the equality. */
 export function addVarEquality(b: Bindings, x: string, y: string): Bindings[] {
+  if (x === y) return [b];
   const vx = lookupVal(b, x);
   const vy = lookupVal(b, y);
   if (vx === undefined || vy === undefined || atomEq(vx, vy)) return [addEqRaw(b, x, y)];
@@ -94,6 +103,7 @@ export function addVarEquality(b: Bindings, x: string, y: string): Bindings[] {
 
 /** Fold one relation into every candidate set, keeping consistent extensions (LeaTTa `mergeOne`). */
 function mergeOne(bs: Bindings[], r: BindingRel): Bindings[] {
+  if (r.tag === "eq" && r.x === r.y) return bs;
   const out: Bindings[] = [];
   for (const b of bs) {
     const ext = r.tag === "val" ? addVarBinding(b, r.x, r.a) : addVarEquality(b, r.x, r.y);
@@ -105,7 +115,7 @@ function mergeOne(bs: Bindings[], r: BindingRel): Bindings[] {
 /** Combine two binding sets into all their consistent unions (LeaTTa `merge`). */
 export function merge(a: Bindings, b: Bindings): Bindings[] {
   let acc: Bindings[] = [a];
-  for (const r of b) acc = mergeOne(acc, r);
+  for (const r of relations(b)) acc = mergeOne(acc, r);
   return acc;
 }
 
@@ -118,35 +128,28 @@ export function matchAtomsWith(
   r: Atom,
   leftSuffix = "",
 ): Bindings[] {
-  if (l.kind === "sym" && r.kind === "sym") return l.name === r.name ? [[]] : [];
+  if (l.kind === "sym" && r.kind === "sym") return l.name === r.name ? [emptyBindings] : [];
   if (l.kind === "var" && r.kind === "var") {
     const lx = l.name + leftSuffix;
-    return lx === r.name ? [[]] : [[{ tag: "val", x: lx, a: r, y: undefined }]];
+    return lx === r.name ? [emptyBindings] : [prependValRaw(emptyBindings, lx, r)];
   }
-  if (l.kind === "var") return [[{ tag: "val", x: l.name + leftSuffix, a: r, y: undefined }]];
+  if (l.kind === "var") return [prependValRaw(emptyBindings, l.name + leftSuffix, r)];
   // a right (query) variable binds to the left (rule) subterm; scope that subterm's variables too.
   if (r.kind === "var")
     return [
-      [
-        {
-          tag: "val",
-          x: r.name,
-          a: leftSuffix === "" ? l : suffixVars(l, leftSuffix),
-          y: undefined,
-        },
-      ],
+      prependValRaw(emptyBindings, r.name, leftSuffix === "" ? l : suffixVars(l, leftSuffix)),
     ];
   if (l.kind === "expr" && r.kind === "expr")
-    return matchAll(custom, [[]], l.items, r.items, leftSuffix);
+    return matchAll(custom, [emptyBindings], l.items, r.items, leftSuffix);
   if (l.kind === "gnd") return matchGrounded(custom, l, r);
   if (r.kind === "gnd") return matchGrounded(custom, r, l);
-  return atomEq(l, r) ? [[]] : [];
+  return atomEq(l, r) ? [emptyBindings] : [];
 }
 
 function matchGrounded(custom: GroundMatcher | undefined, g: Atom, other: Atom): Bindings[] {
   if (g.kind === "gnd" && g.match !== undefined) return g.match(other) as Bindings[];
   if (custom !== undefined) return custom(g, other);
-  return atomEq(g, other) ? [[]] : [];
+  return atomEq(g, other) ? [emptyBindings] : [];
 }
 
 /** Pointwise-match two atom lists, threading the accumulated binding sets (LeaTTa `matchAll`). */

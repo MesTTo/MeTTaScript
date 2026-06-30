@@ -45,6 +45,11 @@ export class Trail {
     return cur;
   }
 
+  /** The atom currently bound to `$name`, if any (the direct binding, not dereferenced). */
+  get(name: string): Atom | undefined {
+    return this.binds.get(name);
+  }
+
   /** Resolve `a` against the current bindings, one pass (the same discipline as the immutable
    *  `instantiate`/`applySubst`): a variable becomes its bound value as-is; the value's own variables are
    *  not re-resolved, and an expression's children are resolved. This matches the evaluator exactly,

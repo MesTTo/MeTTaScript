@@ -16,8 +16,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm build # build first so cross-package type declarations resolve
       - run: pnpm lint
       - run: pnpm format:check
       - run: pnpm typecheck
       - run: pnpm test # includes the 270/270 Hyperon oracle gate
-      - run: pnpm build

@@ -11,13 +11,19 @@
 // structural sharing; iteration is O(n) (already unavoidable for a full scan) and reconstructs insertion
 // order. The node carries a running `size` so length is O(1).
 //
-// Each node also carries a persistent EXACT-MATCH INDEX over the ground atoms appended so far: a map from
+// A node can answer an EXACT-MATCH query over the ground atoms appended so far: a map from
 // `String(hashOf(atom))` to the bucket of distinct ground atoms (with counts) at that hash. This lets an
 // exact ground-membership `match` answer in O(1) instead of scanning the whole log (the cost that made the
-// peano benchmark O(K^3)). The index is persistent too, so it shares structure across snapshots and
-// transaction rollback exactly like the log. `nonGround` counts the non-ground atoms, so the fast path is
-// only valid when every runtime atom is ground (otherwise a ground pattern could also unify a non-ground
-// atom and must fall back to the scan).
+// peano benchmark O(K^3)). The index is built LAZILY, the first time a node is queried, and cached per node
+// (`idxCache`): most programs add atoms and never do an exact ground-membership query — matespacefast adds
+// ~1.5M atoms and only matches the variable pattern `(num $1)`, so maintaining the index per append would
+// cost ~1-2GB and O(n log n) inserts it never reads. The lazy build walks from the nearest already-cached
+// ancestor up to the queried node, so an incremental query pattern (tilepuzzle: add, check, add, check)
+// stays O(1) per node and a one-shot query on a deep log is a single iterative O(n) pass (no recursion on a
+// 1.5M-deep chain). The cached PMaps still share structure across snapshots and transaction rollback exactly
+// like the log, because nodes are immutable and a node's index is a function of its prefix. `nonGround`
+// counts the non-ground atoms, so the fast path is only valid when every runtime atom is ground (otherwise a
+// ground pattern could also unify a non-ground atom and must fall back to the scan).
 
 import { type Atom, hashOf, atomEq } from "./atom";
 import { type PMap, emptyPMap, pmGet, pmSet } from "./pmap";
@@ -48,8 +54,6 @@ export interface LogNode {
   readonly atom: Atom;
   readonly prev: AtomLog;
   readonly size: number;
-  /** Exact-match index over the ground atoms in this log (and all earlier nodes). */
-  readonly groundIdx: PMap<Bucket>;
   /** Count of non-ground atoms in this log; the index fast path is valid only when this is 0. */
   readonly nonGround: number;
 }
@@ -60,18 +64,39 @@ export const emptyLog: AtomLog = null;
 
 export const logSize = (log: AtomLog): number => (log === null ? 0 : log.size);
 
-/** The ground-atom exact-match index for a log (empty when the log is). */
-export const logGroundIdx = (log: AtomLog): PMap<Bucket> =>
-  log === null ? emptyPMap : log.groundIdx;
+// The exact-match index over a node's ground atoms, built lazily and cached per node (see the file header).
+const idxCache = new WeakMap<LogNode, PMap<Bucket>>();
+
+/** The ground-atom exact-match index for a log (empty when the log is). Built on first query and cached;
+ *  a node never appears here until something does an exact ground-membership query against it. */
+export const logGroundIdx = (log: AtomLog): PMap<Bucket> => {
+  if (log === null) return emptyPMap;
+  const hit = idxCache.get(log);
+  if (hit !== undefined) return hit;
+  // Collect the uncached suffix down to the nearest cached ancestor (or the empty tail), then fold the
+  // index back up newest-last, caching each node. Iterative, so a deep first query does not recurse.
+  const chain: LogNode[] = [];
+  let node: AtomLog = log;
+  while (node !== null && !idxCache.has(node)) {
+    chain.push(node);
+    node = node.prev;
+  }
+  let idx = node === null ? emptyPMap : idxCache.get(node)!;
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const n = chain[i]!;
+    if (n.atom.ground) idx = idxAdd(idx, n.atom);
+    idxCache.set(n, idx);
+  }
+  return idx;
+};
 /** Number of non-ground atoms in a log. */
 export const logNonGround = (log: AtomLog): number => (log === null ? 0 : log.nonGround);
 
-/** Append one atom (O(log n), shares the existing log and index). */
+/** Append one atom (O(1): only the running size and non-ground count; the index is built lazily on query). */
 export const logAppend = (log: AtomLog, atom: Atom): AtomLog => ({
   atom,
   prev: log,
   size: (log === null ? 0 : log.size) + 1,
-  groundIdx: atom.ground ? idxAdd(logGroundIdx(log), atom) : logGroundIdx(log),
   nonGround: (log === null ? 0 : log.nonGround) + (atom.ground ? 0 : 1),
 });
 
