@@ -52,8 +52,12 @@ PeTTa (see Done and Remaining 2). The remaining non-passing split into PLN/NARS 
    (roman_test). The truth arithmetic ports cleanly, but the example files use PeTTa execution-model
    primitives (`cut`, `reduce`, `(cons , $args)`, `progn`), so a faithful pass needs the examples rewritten
    in Hyperon style, not just a lib port.
-2. **Perf outliers.** nilbc / permutations / peano pass but trail PeTTa; the allocation-floor and
-   case-match-emit passes above narrowed the margins. **tilepuzzle now PASSES and beats PeTTa**: 1.03s vs
+2. **Perf outliers: NONE LEFT.** Every shared passing program is faster than PeTTa (median ~2x).
+   The last three crossings: permutations via the conjunctive worst-case-optimal collapse-count;
+   nilbc via the compiled nondeterministic let*-chain search (0.40s vs 0.71s, alpha-equivalent
+   fresh naming); peano via the compiled add-atom saturation loop, the add-if-absent idiom as one
+   exact-membership probe and the single-branch case-over-match as a snapshot-and-thread loop
+   (0.22s vs 1.69s, byte-identical). **tilepuzzle now PASSES and beats PeTTa**: 1.03s vs
    1564ms, byte-identical (181441). Its BFS visited-set is a NAMED space, and named spaces were stored as an
    unindexed `Atom[]` (O(n) copy-on-write per `add-atom`, O(n) linear scan per `match`) while `&self` had an
    append-only log + ground index, so the search was O(n²). Storing each named space as the same `AtomLog`

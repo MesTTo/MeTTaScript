@@ -89,6 +89,12 @@ export function canCompactAtom(a: Atom): boolean {
   }
 }
 
+// Thrown by the insert walk on a non-compactable grounded atom and caught in `appendAll`, which
+// reports the batch as not flat-storable. Checking compactability inside the one insert walk saves
+// the separate canCompactAtom pre-walk every append paid. Terms and facts interned before the bail
+// stay in the table but no version's ranges cover the facts, so they are never visible.
+const NOT_COMPACT = new Error("flat-atomspace: atom has an executor or custom matcher");
+
 class FlatAtomSpaceTable {
   readonly termKind = new Int32Chunks();
   readonly termStart = new Int32Chunks();
@@ -99,7 +105,17 @@ class FlatAtomSpaceTable {
   readonly factRoot = new Int32Chunks();
   readonly factHeadSym = new Int32Chunks();
 
-  private readonly hashBuckets = new Map<number, TermId[]>();
+  // Open-addressing intern table (linear probing over a power-of-two Int32Array; a slot holds
+  // termId + 1, 0 means empty; append-only, so no tombstones). Replaces a Map<number, TermId[]>
+  // whose per-hash bucket arrays were the dominant insert allocation on bulk loads.
+  private slots = new Int32Array(1 << 12);
+  private slotCount = 0;
+  // The empty slot where the last failed lookup probe for `missHash` ended. intern* runs
+  // lookup-then-push, so pushTerm claims this slot instead of re-probing the chain. Slots only ever
+  // fill (append-only), so a chain never shortens and the recorded slot stays on its hash's chain;
+  // pushTerm still re-checks the hash matches and the slot is still empty before trusting it.
+  private missSlot = -1;
+  private missHash = 0;
   private readonly symByName = new Map<string, number>();
   private readonly groundByKey = new Map<string, number>();
   private readonly varByName = new Map<string, number>();
@@ -107,6 +123,15 @@ class FlatAtomSpaceTable {
   private readonly symbols: string[] = [];
   private readonly grounds: Ground[] = [];
   private readonly vars: string[] = [];
+  // One canonical Atom per term, filled on first decode. Terms are interned and append-only, so a
+  // decoded atom is valid forever; without this, candidate enumeration rebuilt a fresh tree per fact
+  // per match, which on deep terms (peano's S^n numerals) made matching O(n^3) instead of O(n^2).
+  // Children resolve through the cache too, so the cached forest is maximally shared (hash-consed).
+  private readonly decoded: Atom[] = [];
+  // Reverse intern: an Atom object to its TermId. Weak, so the cache never pins an atom. Match
+  // bindings hold decoded (canonical) subterms, so an atom derived from them re-interns in O(new
+  // nodes) instead of O(depth), and a ground membership lookup is O(1) after its first walk.
+  private readonly termIdOf = new WeakMap<Atom, TermId>();
 
   get factCount(): number {
     return this.factRoot.length;
@@ -127,6 +152,20 @@ class FlatAtomSpaceTable {
   }
 
   insertAtom(atom: Atom): TermId {
+    // The reverse intern makes repeat encounters of the same object O(1): derived facts structure-share
+    // subtrees (instantiate reuses unchanged subterms), so the same subterm object is inserted over and
+    // over across facts, and a derived atom built over decoded (canonical) subterms re-interns in
+    // O(new nodes). Exprs only: a leaf re-interns in one Map probe anyway, and WeakMap.set installs an
+    // identity hash on the key (a per-object shape mutation), which cost more than it saved on leaves.
+    if (atom.kind !== "expr") return this.insertAtomUncached(atom);
+    const known = this.termIdOf.get(atom);
+    if (known !== undefined) return known;
+    const term = this.insertAtomUncached(atom);
+    this.termIdOf.set(atom, term);
+    return term;
+  }
+
+  private insertAtomUncached(atom: Atom): TermId {
     switch (atom.kind) {
       case "sym":
         return this.internLeaf(
@@ -136,6 +175,7 @@ class FlatAtomSpaceTable {
           true,
         );
       case "gnd": {
+        if (atom.exec !== undefined || atom.match !== undefined) throw NOT_COMPACT;
         const key = groundKey(atom.value);
         return this.internLeaf(
           TERM_GND,
@@ -159,6 +199,14 @@ class FlatAtomSpaceTable {
   }
 
   lookupAtom(atom: Atom): TermId | undefined {
+    const known = this.termIdOf.get(atom);
+    if (known !== undefined) return known;
+    const term = this.lookupAtomUncached(atom);
+    if (term !== undefined) this.termIdOf.set(atom, term);
+    return term;
+  }
+
+  private lookupAtomUncached(atom: Atom): TermId | undefined {
     switch (atom.kind) {
       case "sym": {
         const leaf = this.symByName.get(atom.name);
@@ -193,6 +241,15 @@ class FlatAtomSpaceTable {
   }
 
   decodeTerm(term: TermId): Atom {
+    const hit = this.decoded[term];
+    if (hit !== undefined) return hit;
+    const atom = this.decodeTermUncached(term);
+    this.decoded[term] = atom;
+    this.termIdOf.set(atom, term);
+    return atom;
+  }
+
+  private decodeTermUncached(term: TermId): Atom {
     const kind = this.termKind.get(term);
     const start = this.termStart.get(term);
     switch (kind) {
@@ -265,11 +322,27 @@ class FlatAtomSpaceTable {
   }
 
   private lookupLeaf(kind: number, leaf: number, hash: number): TermId | undefined {
-    const bucket = this.hashBuckets.get(hash);
-    if (bucket === undefined) return undefined;
-    for (const term of bucket)
-      if (this.termKind.get(term) === kind && this.termStart.get(term) === leaf) return term;
-    return undefined;
+    // strHash/mixHash are unsigned 32-bit; the termHash column stores signed int32. Compare in int32.
+    hash |= 0;
+    const slots = this.slots;
+    const mask = slots.length - 1;
+    let i = hash & mask;
+    for (;;) {
+      const s = slots[i]!;
+      if (s === 0) {
+        this.missSlot = i;
+        this.missHash = hash;
+        return undefined;
+      }
+      const term = s - 1;
+      if (
+        this.termHash.get(term) === hash &&
+        this.termKind.get(term) === kind &&
+        this.termStart.get(term) === leaf
+      )
+        return term;
+      i = (i + 1) & mask;
+    }
   }
 
   private internExpr(children: readonly TermId[]): TermId {
@@ -286,20 +359,38 @@ class FlatAtomSpaceTable {
     return this.pushTerm(TERM_EXPR, start, children.length, hash, ground);
   }
 
+  // The probe skeleton repeats lookupLeaf's on purpose: sharing it would take a per-call equality
+  // closure, and avoiding that allocation on the intern path is why the open table exists.
   private lookupExpr(children: readonly TermId[]): TermId | undefined {
     let hash = mixHash(0x45585052, children.length);
     for (const child of children) hash = mixHash(hash, child);
-    const bucket = this.hashBuckets.get(hash);
-    if (bucket === undefined) return undefined;
-    termLoop: for (const term of bucket) {
-      if (this.termKind.get(term) !== TERM_EXPR || this.termLen.get(term) !== children.length)
-        continue;
-      const start = this.termStart.get(term);
-      for (let i = 0; i < children.length; i++)
-        if (this.termData.get(start + i) !== children[i]) continue termLoop;
-      return term;
+    hash |= 0;
+    const slots = this.slots;
+    const mask = slots.length - 1;
+    let i = hash & mask;
+    probe: for (;;) {
+      const s = slots[i]!;
+      if (s === 0) {
+        this.missSlot = i;
+        this.missHash = hash;
+        return undefined;
+      }
+      const term = s - 1;
+      if (
+        this.termHash.get(term) === hash &&
+        this.termKind.get(term) === TERM_EXPR &&
+        this.termLen.get(term) === children.length
+      ) {
+        const start = this.termStart.get(term);
+        for (let j = 0; j < children.length; j++)
+          if (this.termData.get(start + j) !== children[j]) {
+            i = (i + 1) & mask;
+            continue probe;
+          }
+        return term;
+      }
+      i = (i + 1) & mask;
     }
-    return undefined;
   }
 
   private pushTerm(
@@ -309,20 +400,47 @@ class FlatAtomSpaceTable {
     hash: number,
     ground: boolean,
   ): TermId {
+    hash |= 0;
     const term = this.termKind.length;
     this.termKind.push(kind);
     this.termStart.push(start);
     this.termLen.push(len);
     this.termHash.push(hash);
     this.termGround.push(ground ? 1 : 0);
-    const bucket = this.hashBuckets.get(hash);
-    if (bucket === undefined) this.hashBuckets.set(hash, [term]);
-    else bucket.push(term);
+    // Grow at 3/4 load, then claim the slot the failed lookup already found (or re-probe).
+    if ((this.slotCount + 1) * 4 > this.slots.length * 3) {
+      this.growSlots();
+      this.missSlot = -1;
+    }
+    let i = this.missSlot;
+    this.missSlot = -1;
+    if (i < 0 || this.missHash !== hash || this.slots[i] !== 0) {
+      const mask = this.slots.length - 1;
+      i = hash & mask;
+      while (this.slots[i] !== 0) i = (i + 1) & mask;
+    }
+    this.slots[i] = term + 1;
+    this.slotCount += 1;
     return term;
+  }
+
+  private growSlots(): void {
+    const next = new Int32Array(this.slots.length * 2);
+    const mask = next.length - 1;
+    for (const s of this.slots) {
+      if (s === 0) continue;
+      let i = this.termHash.get(s - 1) & mask;
+      while (next[i] !== 0) i = (i + 1) & mask;
+      next[i] = s;
+    }
+    this.slots = next;
   }
 }
 
 export class FlatAtomSpace {
+  // toArray memo for this version (see toArray).
+  private arr: Atom[] | undefined;
+
   private constructor(
     private readonly table: FlatAtomSpaceTable,
     private readonly ranges: readonly FactRange[],
@@ -336,7 +454,6 @@ export class FlatAtomSpace {
   }
 
   static fromAtoms(atoms: readonly Atom[]): FlatAtomSpace | undefined {
-    if (!atoms.every(canCompactAtom)) return undefined;
     return FlatAtomSpace.empty().appendAll(atoms);
   }
 
@@ -344,13 +461,20 @@ export class FlatAtomSpace {
     return this.liveCount;
   }
 
-  appendAll(atoms: readonly Atom[]): FlatAtomSpace {
+  /** Append a batch as new visible facts. Returns undefined when some atom is not flat-storable (a
+   *  grounded executor/matcher); the caller keeps such a batch on the plain log instead. */
+  appendAll(atoms: readonly Atom[]): FlatAtomSpace | undefined {
     if (atoms.length === 0) return this;
     const start = this.table.factCount;
     let nonGround = this.nonGroundCount;
-    for (const atom of atoms) {
-      const fact = this.table.insertFact(atom);
-      if (!this.table.isTermGround(this.table.factRoot.get(fact))) nonGround += 1;
+    try {
+      for (const atom of atoms) {
+        const fact = this.table.insertFact(atom);
+        if (!this.table.isTermGround(this.table.factRoot.get(fact))) nonGround += 1;
+      }
+    } catch (e) {
+      if (e === NOT_COMPACT) return undefined;
+      throw e;
     }
     const end = this.table.factCount;
     return new FlatAtomSpace(
@@ -365,8 +489,10 @@ export class FlatAtomSpace {
   removeOne(atom: Atom): FlatAtomSpace {
     const term = this.table.lookupAtom(atom);
     if (term === undefined) return this;
-    for (const fact of this.visibleFactIds()) {
-      if (this.table.factRoot.get(fact) !== term) continue;
+    // The per-term fact index lists this term's fact ids in insertion order, so the first visible
+    // live one is the same fact a front-to-back scan of the whole space would remove.
+    for (const fact of this.table.factsForTerm(term)) {
+      if (!this.factVisible(fact) || this.dead.has(fact)) continue;
       const dead = new Set(this.dead);
       dead.add(fact);
       const nonGround = this.table.isTermGround(term)
@@ -405,9 +531,45 @@ export class FlatAtomSpace {
   }
 
   toArray(): Atom[] {
-    const out: Atom[] = [];
-    for (const fact of this.visibleFactIds()) out.push(this.decodeFact(fact));
-    return out;
+    // Memoized per version: `&self` enumeration (selfAtoms) can ask for the same snapshot's atoms on
+    // every type/candidate lookup, and a version's visible facts never change. Callers must not
+    // mutate the result (the same contract as selfAtoms).
+    if (this.arr === undefined) {
+      const out: Atom[] = [];
+      for (const fact of this.visibleFactIds()) out.push(this.decodeFact(fact));
+      this.arr = out;
+    }
+    return this.arr;
+  }
+
+  /** Columnar mirror of the `&self` direct tally in eval.ts: over the visible facts the head filter
+   *  admits (head symbol `patternHead` or no symbol head, same filter as `candidatesFor`), count the
+   *  ones an all-distinct-variable pattern `(k $v..)` of `arity` items unifies with, without decoding
+   *  any fact. `iterated` is the admitted total (it advances the candidate counter). */
+  countHeadArity(patternHead: string, arity: number): { count: number; iterated: number } {
+    const t = this.table;
+    // Unknown head symbol: no fact can have it as head, so only ABSENT-headed facts are admitted,
+    // which the `fh !== headId` test below gets right (a number is never equal to undefined).
+    const headId = t.lookupHeadSym(patternHead);
+    let count = 0;
+    let iterated = 0;
+    for (const fact of this.visibleFactIds()) {
+      const fh = t.factHeadSym.get(fact);
+      if (fh !== ABSENT && fh !== headId) continue;
+      iterated += 1;
+      const root = t.factRoot.get(fact);
+      const kind = t.termKind.get(root);
+      if (kind === TERM_VAR) {
+        count += 1;
+        continue;
+      }
+      if (kind !== TERM_EXPR || t.termLen.get(root) !== arity) continue;
+      // A same-arity expr unifies iff its head is the pattern's symbol or a variable.
+      if (fh !== ABSENT) count += 1;
+      else if (arity > 0 && t.termKind.get(t.termData.get(t.termStart.get(root))) === TERM_VAR)
+        count += 1;
+    }
+    return { count, iterated };
   }
 
   roundTrip(atom: Atom): Atom {

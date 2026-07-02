@@ -91,20 +91,122 @@ describe("deterministic-core compiler", () => {
     expect(runFunctional(c, "odd", [10])).toBe(false);
   });
 
-  it("does not compile a function that uses match (outside the pure int/bool core)", () => {
-    expect(compileEnv(envWith("(= (q $x) (match &self ($x) $x))")).has("q")).toBe(false);
+  it("a match-using function is outside the pure int/bool core but compiles as nondet", () => {
+    const c = compileEnv(envWith("(= (q $x) (match &self ($x) $x))"));
+    expect(c.get("q")?.kind).toBe("nondet");
   });
 
   it("does not compile a function calling an uncompilable one (fixpoint drop)", () => {
     const c = compileEnv(envWith("(= (a $n) (+ 1 (b $n)))\n(= (b $n) (match &self ($n) $n))"));
     expect(c.has("a")).toBe(false);
-    expect(c.has("b")).toBe(false);
+    // `b` itself is a terminal-match clause, which the nondet layer takes.
+    expect(c.get("b")?.kind).toBe("nondet");
   });
 
   it("division by zero is byte-identical to the interpreter (compiled bails)", () => {
     const src = "(= (q $n) (/ 10 $n))\n!(q 5)\n!(q 0)";
     const on = compareCompiledAndInterpreted(src);
     expect(on[0]).toEqual(["2"]);
+  });
+
+  describe("impure saturation compiler (case-over-match + add-if-absent)", () => {
+    const SATURATION = `
+(= (add-atom-no-duplicate $Space $Atom)
+   (if (== () (collapse (once (match $Space $Atom $Atom))))
+       (add-atom $Space $Atom)
+       (empty)))
+(= (expand-once)
+   (case (match &self (num $t) $t)
+         (($x (add-atom-no-duplicate &self (num (S $x)))))))
+(= (expandK $n)
+   (if (== $n 0)
+       done
+       (let $temp1 (expand-once)
+            (expandK (- $n 1)))))
+(= (demo-peano $K)
+   (let* (($s (add-atom &self (num Z)))
+          ($g (expandK $K)))
+         (match &self (num $1) $1)))
+`;
+
+    it("compiles the peano saturation loop imperatively", () => {
+      const c = compileEnv(envWith(SATURATION));
+      expect(c.get("add-atom-no-duplicate")?.kind).toBe("imperative");
+      expect(c.get("expand-once")?.kind).toBe("imperative");
+      expect(c.get("expandK")?.kind).toBe("imperative");
+    });
+
+    it("peano slice is byte-identical to the interpreter", () => {
+      const on = compareCompiledAndInterpreted(
+        `${SATURATION}\n!(length (collapse (demo-peano 25)))`,
+        10_000_000,
+      );
+      expect(on[0]).toEqual(["26"]);
+    });
+
+    it("a duplicate add prunes to nothing, identically", () => {
+      compareCompiledAndInterpreted(`
+(= (add-atom-no-duplicate $Space $Atom)
+   (if (== () (collapse (once (match $Space $Atom $Atom))))
+       (add-atom $Space $Atom)
+       (empty)))
+(= (seed) (add-atom &self (k a)))
+(= (try) (add-atom-no-duplicate &self (k a)))
+!(seed)
+!(try)
+!(try)
+!(match &self (k $x) $x)
+`);
+    });
+
+    it("a case whose every branch prunes yields nothing, identically", () => {
+      compareCompiledAndInterpreted(`
+(= (add-atom-no-duplicate $Space $Atom)
+   (if (== () (collapse (once (match $Space $Atom $Atom))))
+       (add-atom $Space $Atom)
+       (empty)))
+(= (grow)
+   (case (match &self (k $t) $t)
+         (($x (add-atom-no-duplicate &self (k $x))))))
+!(add-atom &self (k a))
+!(add-atom &self (k b))
+!(grow)
+!(match &self (k $x) $x)
+`);
+    });
+
+    it("two surviving branches fall back to the interpreter unchanged", () => {
+      // The compiled case is single-valued and BAILs on >1 survivor; effects are on immutable
+      // worlds, so the interpreter re-runs from the untouched state and the outputs agree.
+      compareCompiledAndInterpreted(`
+(= (add-atom-no-duplicate $Space $Atom)
+   (if (== () (collapse (once (match $Space $Atom $Atom))))
+       (add-atom $Space $Atom)
+       (empty)))
+(= (grow)
+   (case (match &self (num $t) $t)
+         (($x (add-atom-no-duplicate &self (num (S $x)))))))
+!(add-atom &self (num Z))
+!(add-atom &self (num (S (S Z))))
+!(grow)
+!(match &self (num $y) $y)
+`);
+    });
+
+    it("add-if-absent on a named space, identically", () => {
+      compareCompiledAndInterpreted(`
+(= (add-atom-no-duplicate $Space $Atom)
+   (if (== () (collapse (once (match $Space $Atom $Atom))))
+       (add-atom $Space $Atom)
+       (empty)))
+(= (put $s $a) (let $r (add-atom-no-duplicate $s $a) done))
+!(bind! &box (new-space))
+!(put &box (p 1))
+!(put &box (p 1))
+!(put &box (p 2))
+!(match &box (p $x) $x)
+`);
+    });
   });
 
   it("a float argument falls back to the interpreter (no divergence)", () => {

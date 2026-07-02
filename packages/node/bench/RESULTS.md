@@ -129,6 +129,8 @@ So tabling is about **1000x** on `fib(25)` and makes `fib(90)` feasible at all.
 
 ### Versus PeTTa (MeTTa-on-SWI-Prolog/WAM)
 
+Current standing (2026-07-02): MeTTa TS is faster than PeTTa on **all 97** shared corpus programs both engines pass, median ~2x; the full per-program table is in [`RESULTS-corpus.md`](RESULTS-corpus.md). The measurements and readings below are from June, before the compiled nondeterministic-search and saturation-loop phases landed; the third reading's "naive versus naive" gap is closed (nilbc 1.8x, peano 7.7x in MeTTa TS's favour).
+
 PeTTa numbers are full wall-clock (`time sh run.sh`, including its MeTTa-to-Prolog translation). Startup baselines: swipl 6 ms, node 45 ms.
 
 | benchmark | PeTTa | ours |

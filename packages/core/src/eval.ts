@@ -52,7 +52,7 @@ import {
   logGroundIdx,
   idxCount,
 } from "./atomlog";
-import { FlatAtomSpace, canCompactAtom } from "./flat-atomspace";
+import { FlatAtomSpace } from "./flat-atomspace";
 import { type Relation, wcoJoin, wcoJoinFold } from "./wcojoin";
 import { type GroundingTable, type ReduceResult, callGrounded, pettaOpNames } from "./builtins";
 import { tableKey, keyWellFormed, analyzePurity as analyzePurityRef, IMPURE_OPS } from "./tabling";
@@ -1505,7 +1505,9 @@ function* matchCandidates(env: MinEnv, w: World, pInst: Atom): CandidateSource {
     (w.flatSelfExtra?.nonGroundCount ?? 0) === 0 &&
     w.store.size === 0
   ) {
-    const c = idxCount(logGroundIdx(w.selfExtra), pInst);
+    // An empty log holds nothing, so skip idxCount there: it would hash the whole (deep) pattern
+    // just to probe an empty index, and under the flat store the log stays empty for the run.
+    const c = w.selfExtra === null ? 0 : idxCount(logGroundIdx(w.selfExtra), pInst);
     for (const atom of cands) yield atom;
     const flatCount = w.flatSelfExtra?.exactCount(pInst) ?? 0;
     for (let i = 0; i < c + flatCount; i++) yield pInst;
@@ -2253,9 +2255,12 @@ function appendSpace(env: MinEnv, w0: World, name: string, atoms: Atom[]): World
     if (env.useFlatAtomspace === true) {
       if (flatSelfExtra !== undefined || logSize(selfExtra) === 0) {
         const base = flatSelfExtra ?? FlatAtomSpace.empty();
-        if (atoms.every(canCompactAtom)) {
-          flatSelfExtra = base.appendAll(atoms);
+        const appended = base.appendAll(atoms);
+        if (appended !== undefined) {
+          flatSelfExtra = appended;
         } else {
+          // The batch is not flat-storable: move everything to the plain log, permanently, so the
+          // candidate order stays the insertion order (flat facts first would interleave otherwise).
           selfExtra = logFromArray([...base.toArray(), ...logToArray(selfExtra), ...atoms]);
           flatSelfExtra = undefined;
         }
@@ -2320,7 +2325,77 @@ function compiledAddAtom(env: MinEnv, st: St, space: Atom, added: Atom): St | un
   return { counter: st.counter, world: appendSpace(env, st.world, name, [added]) };
 }
 
-const COMPILED_IMPURE_OPS: CompiledImpureOps = { addAtom: compiledAddAtom };
+/** The `(match space pattern template)` solutions a compiled nondet body consumes: the same
+ *  candidate source, per-candidate freshening, and counter accounting as the interpreted match
+ *  (matchSetup + matchSingleSolutions/EndState), returning each instantiated template with its
+ *  solution bindings. Undefined when the pattern splits into a conjunction (outside the compiled
+ *  subset; the holder bails to the interpreter). */
+function compiledMatchSolutions(
+  env: MinEnv,
+  st: St,
+  space: Atom,
+  pattern: Atom,
+  template: Atom,
+): { pairs: ReadonlyArray<readonly [Atom, Bindings]>; counterDelta: number } | undefined {
+  const { getCandidates, patterns } = matchSetup(env, st, space, pattern, emptyBindings);
+  if (patterns.length !== 1) return undefined;
+  const pat = patterns[0]!;
+  const { endState } = matchSingleEndState(env, getCandidates, pat, template, st, emptyBindings);
+  const pairs: Array<readonly [Atom, Bindings]> = [];
+  for (const m of matchSingleSolutions(env, getCandidates, pat, st, emptyBindings))
+    pairs.push([inst(env, m, template), m]);
+  return { pairs, counterDelta: endState.counter - st.counter };
+}
+
+/** The compiled add-if-absent: an exact ground-membership probe, then append when absent. Covers
+ *  `&self` (which tryFastNamedAddIfAbsent leaves to the interpreter) under the same guards as the
+ *  exact-count candidate path: every runtime fact ground, no static or variable-headed facts of this
+ *  head that could also unify, no state handles. The counter advances by the space size, the same
+ *  convention as the named-space fast path (the interpreted collapse-once-match iterates the
+ *  candidates); compiled callers are on the alpha-equivalent naming contract anyway. */
+function compiledAddIfAbsent(
+  env: MinEnv,
+  st: St,
+  space: Atom,
+  atom: Atom,
+): { added: boolean; state: St } | undefined {
+  if (!atom.ground || opOf(atom) === "=") return undefined;
+  const w = st.world;
+  if (w.store.size !== 0) return undefined;
+  const name = spaceName(w, space);
+  if (name === undefined) return undefined;
+  if (name === "&self") {
+    const k = headKey(atom);
+    if (k === undefined) return undefined;
+    if (env.varHeadedFacts.length !== 0 || (env.factIndex.get(k)?.length ?? 0) !== 0)
+      return undefined;
+    if (logNonGround(w.selfExtra) !== 0 || (w.flatSelfExtra?.nonGroundCount ?? 0) !== 0)
+      return undefined;
+    const size = logSize(w.selfExtra) + (w.flatSelfExtra?.size ?? 0);
+    const checked: St = { counter: st.counter + size, world: w };
+    const present =
+      idxCount(logGroundIdx(w.selfExtra), atom) + (w.flatSelfExtra?.exactCount(atom) ?? 0);
+    if (present !== 0) return { added: false, state: checked };
+    return {
+      added: true,
+      state: { counter: checked.counter, world: appendSpace(env, w, "&self", [atom]) },
+    };
+  }
+  const log = w.spaces.get(name) ?? emptyLog;
+  if (logNonGround(log) !== 0) return undefined;
+  const checked: St = { counter: st.counter + logSize(log), world: w };
+  if (idxCount(logGroundIdx(log), atom) !== 0) return { added: false, state: checked };
+  return {
+    added: true,
+    state: { counter: checked.counter, world: appendSpace(env, w, name, [atom]) },
+  };
+}
+
+const COMPILED_IMPURE_OPS: CompiledImpureOps = {
+  addAtom: compiledAddAtom,
+  matchSolutions: compiledMatchSolutions,
+  addIfAbsent: compiledAddIfAbsent,
+};
 
 function* getTypeOpG(
   env: MinEnv,
@@ -3489,17 +3564,18 @@ function tryCountAggregate(
       a.items.length === arity &&
       (headKey(a) === k || a.items[0]!.kind === "var"));
   const w = st.world;
-  // Direct tally over the persistent &self log, skipping the `logToArray` materialisation of a ~1.5M-element
-  // candidate array, when the candidate set IS exactly that log: a &self match with no state to resolve, no
-  // flat space, and no static or variable-headed facts of this head, so `matchCandidates` would yield only
-  // the runtime log atoms whose head is `k` (or which are variable-headed). Counting is order-independent, so
-  // the newest-first walk is fine. Same head filter as `runtimeCandidates`, so `iterated` (and thus the
-  // counter) is identical.
+  // Direct tally over the runtime &self store, skipping the materialisation (and, for the flat space, the
+  // decoding) of a ~1.5M-element candidate array, when the candidate set IS exactly that store: a &self match
+  // with no state to resolve and no static or variable-headed facts of this head, so `matchCandidates` would
+  // yield only the runtime atoms whose head is `k` (or which are variable-headed). Counting is
+  // order-independent, so the newest-first log walk is fine. Same head filter as `runtimeCandidates`, so
+  // `iterated` (and thus the counter) is identical. The flat store tallies columnar-ly (countHeadArity
+  // mirrors `unifies` exactly); at most one of the two stores is non-empty, and summing keeps the tally
+  // right either way.
   const sn = spaceName(w, inst(env, bnd, match.items[1]!));
   if (
     (sn === undefined || sn === "&self") &&
     w.store.size === 0 &&
-    w.flatSelfExtra === undefined &&
     env.varHeadedFacts.length === 0 &&
     (env.factIndex.get(k)?.length ?? 0) === 0
   ) {
@@ -3511,6 +3587,11 @@ function tryCountAggregate(
         iterated += 1;
         if (unifies(p.atom)) count += 1;
       }
+    }
+    if (w.flatSelfExtra !== undefined) {
+      const flat = w.flatSelfExtra.countHeadArity(k, arity);
+      count += flat.count;
+      iterated += flat.iterated;
     }
     return { count, iterated };
   }
@@ -3912,7 +3993,15 @@ function* mettaEvalG(
           out.push([errFound, partB]);
           continue;
         }
-        const wApp = makeExpr(env, [sym(op), ...partAtoms]);
+        // Reuse `lw` when every evaluated argument came back as the very object that went in, instead of
+        // rebuilding an equal copy. The no-reduce exits below mark and return `wApp`, so preserving the
+        // input's identity is what lets the evaluated-mark short-circuit hit on a later revisit of this
+        // object. The plain log stores the rebuilt copy (so either object works there), but the flat
+        // store re-decodes one canonical object per term: marking a fresh copy per visit while the
+        // canonical object stays unmarked re-descended peano's whole S^n spine every round, O(K^3).
+        const wApp = partAtoms.every((p, i) => p === args[i])
+          ? lw
+          : makeExpr(env, [sym(op), ...partAtoms]);
         // opt-in currying: a known function applied to fewer arguments than its arity becomes a
         // `(partial fn (args))` closure (PeTTa's build_call_or_partial), checked before evaluation so a
         // grounded op is not called with the wrong arity. Requires at least one argument, so a nullary

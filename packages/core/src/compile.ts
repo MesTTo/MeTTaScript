@@ -12,6 +12,7 @@
 import {
   type Atom,
   type SymAtom,
+  type ExprAtom,
   atomEq,
   expr,
   gint,
@@ -20,8 +21,10 @@ import {
   variable,
   emptyExpr,
 } from "./atom";
-import { type Bindings, emptyBindings, prependValRaw } from "./bindings";
-import { addVarBinding } from "./match";
+import { type Bindings, emptyBindings, prependValRaw, hasLoop, lookupVal } from "./bindings";
+import { addVarBinding, matchAtoms, matchAtomsScoped, merge } from "./match";
+import { instantiate } from "./instantiate";
+import { IMPURE_OPS } from "./tabling";
 import { type IntVal, addInt, subInt, mulInt, intDiv, intMod, isZero, cmpIntVal } from "./number";
 import { callGrounded } from "./builtins";
 import { type MinEnv, type St } from "./eval";
@@ -86,6 +89,27 @@ interface SymbolicHolder {
 }
 export interface CompiledImpureOps {
   readonly addAtom: (env: MinEnv, st: St, space: Atom, atom: Atom) => St | undefined;
+  /** Solutions of a `(match space pattern template)` under the current world: the instantiated
+   *  template plus that solution's bindings, in the interpreter's own candidate order, and the
+   *  fresh-variable counter advance the interpreted match would have cost. Undefined = not a space. */
+  readonly matchSolutions?: (
+    env: MinEnv,
+    st: St,
+    space: Atom,
+    pattern: Atom,
+    template: Atom,
+  ) =>
+    | { readonly pairs: ReadonlyArray<readonly [Atom, Bindings]>; readonly counterDelta: number }
+    | undefined;
+  /** The add-if-absent idiom on a ground atom: exact-membership probe, then append when absent.
+   *  Undefined when the fast probe is unsound for this space (non-ground facts, static facts of the
+   *  same head, state handles), sending the caller back to the interpreter. */
+  readonly addIfAbsent?: (
+    env: MinEnv,
+    st: St,
+    space: Atom,
+    atom: Atom,
+  ) => { readonly added: boolean; readonly state: St } | undefined;
 }
 type ImpEval = { readonly value: Atom; readonly st: St } | typeof BAIL;
 interface ImperativeHolder {
@@ -94,7 +118,26 @@ interface ImperativeHolder {
   clauseCount: number;
   run: (partAtoms: readonly Atom[], st: St, ops: CompiledImpureOps, discard?: boolean) => ImpEval;
 }
-export type CompiledHolder = FunctionalHolder | RewriteHolder | SymbolicHolder | ImperativeHolder;
+// A compiled nondeterministic let*-chain functor (the backward-chainer class); see the section
+// header above compileNondet. `run` returns every solution in clause-major depth-first order, or
+// undefined to fall back (out of subset, over budget, or native stack exhaustion).
+interface NondetHolder {
+  kind: "nondet";
+  arity: number;
+  clauseCount: number;
+  run: (
+    env: MinEnv,
+    partAtoms: readonly Atom[],
+    st: St,
+    ops: CompiledImpureOps,
+  ) => CompiledRunResult | undefined;
+}
+export type CompiledHolder =
+  | FunctionalHolder
+  | RewriteHolder
+  | SymbolicHolder
+  | ImperativeHolder
+  | NondetHolder;
 export type CompiledFns = Map<string, CompiledHolder>;
 type FunctionalFns = Map<string, FunctionalHolder>;
 
@@ -868,6 +911,277 @@ function compileSymbolic(env: MinEnv, functor: string): SymbolicHolder | undefin
   return { kind: "symbolic", arity, clauseCount, run };
 }
 
+// ---------- nondeterministic let*-chain rewrites (the backward-chainer class) ----------
+//
+// PeTTa compiles a multi-equation MeTTa function to Prolog clauses and lets the WAM enumerate:
+// clause alternatives are choice points, a `let`/`let*` binding is a unification goal against the
+// value's solution stream, and `match` is a goal against a space. This compiles the same fragment to
+// a collect-all JS search (clause-major, depth-first: success pushes and continues, failure falls
+// through), replacing the interpreter's per-step machinery (atomToStack/interpretLoopG frames,
+// per-reduction type checks, queryVarsOf, whole-body instantiate) while reusing its meaning-bearing
+// primitives unchanged: matchAtomsScoped for the freshened head unification (which also binds a
+// caller's free variable to the clause's freshened skeleton), instantiate for goal arguments and
+// templates, matchAtoms/merge/hasLoop for destructuring solutions, and the injected matchSolutions
+// (the interpreter's own match plan) for space goals. Fresh-variable NAMES can differ from the
+// interpreted path (one monotonic counter threads the search instead of the stack machine's
+// interleaving); that is the impure-VM precedent: results stay deterministic and alpha-equivalent,
+// the equality the oracle and LeaTTa check.
+
+// A compiled search that exceeds this many clause dispatches bails to the interpreter, whose fuel
+// budget then governs: the collect-all loop itself has no fuel, and compiled code must never turn a
+// fuel-bounded divergence into a hang.
+const NONDET_CALL_CAP = 4_000_000;
+
+type NondetCall =
+  | { readonly tag: "self"; readonly args: readonly Atom[] }
+  | {
+      readonly tag: "match";
+      readonly space: Atom;
+      readonly pattern: Atom;
+      readonly template: Atom;
+    };
+
+interface NondetGoal {
+  readonly pat: Atom;
+  readonly call: NondetCall;
+}
+
+type NondetTail = { readonly tag: "tpl"; readonly atom: Atom } | NondetCall;
+
+interface NondetClause {
+  readonly lhs: Atom;
+  readonly goals: readonly NondetGoal[];
+  readonly tail: NondetTail;
+}
+
+/** Data under evaluation: contains no rule-defined or grounded-op head anywhere, so the type-directed
+ *  argument evaluation would return it unchanged (constructors, vars, and ground leaves only). */
+function nondetIsData(env: MinEnv, a: Atom): boolean {
+  if (a.kind !== "expr" || a.items.length === 0) return true;
+  const h = a.items[0]!;
+  if (h.kind === "expr" && h.items.length > 0) return false;
+  if (
+    h.kind === "sym" &&
+    (env.ruleIndex.has(h.name) || env.gt.has(h.name) || IMPURE_OPS.has(h.name))
+  )
+    return false;
+  return a.items.every((x) => nondetIsData(env, x));
+}
+
+function nondetCall(env: MinEnv, functor: string, val: Atom): NondetCall | undefined {
+  if (val.kind !== "expr" || val.items.length === 0 || val.items[0]!.kind !== "sym")
+    return undefined;
+  const op = (val.items[0] as SymAtom).name;
+  if (op === "match" && val.items.length === 4) {
+    if (!nondetIsData(env, val.items[2]!) || !nondetIsData(env, val.items[3]!)) return undefined;
+    return {
+      tag: "match",
+      space: val.items[1]!,
+      pattern: val.items[2]!,
+      template: val.items[3]!,
+    };
+  }
+  if (op === functor) {
+    const args = val.items.slice(1);
+    if (!args.every((x) => nondetIsData(env, x))) return undefined;
+    return { tag: "self", args };
+  }
+  return undefined;
+}
+
+/** Unwrap a clause RHS into let/let* goals and a tail (a plain template or a terminal call). */
+function nondetUnwrap(
+  env: MinEnv,
+  functor: string,
+  rhs: Atom,
+): { goals: NondetGoal[]; tail: NondetTail } | undefined {
+  const goals: NondetGoal[] = [];
+  let cur = rhs;
+  for (;;) {
+    if (cur.kind !== "expr" || cur.items.length === 0 || cur.items[0]!.kind !== "sym") break;
+    const op = (cur.items[0] as SymAtom).name;
+    if (op === "let*" && cur.items.length === 3 && cur.items[1]!.kind === "expr") {
+      for (const pv of cur.items[1]!.items) {
+        if (pv.kind !== "expr" || pv.items.length !== 2) return undefined;
+        if (!nondetIsData(env, pv.items[0]!)) return undefined;
+        const call = nondetCall(env, functor, pv.items[1]!);
+        if (call === undefined) return undefined;
+        goals.push({ pat: pv.items[0]!, call });
+      }
+      cur = cur.items[2]!;
+      continue;
+    }
+    if (op === "let" && cur.items.length === 4) {
+      if (!nondetIsData(env, cur.items[1]!)) return undefined;
+      const call = nondetCall(env, functor, cur.items[2]!);
+      if (call === undefined) return undefined;
+      goals.push({ pat: cur.items[1]!, call });
+      cur = cur.items[3]!;
+      continue;
+    }
+    break;
+  }
+  const tailCall = nondetCall(env, functor, cur);
+  if (tailCall !== undefined) return { goals, tail: tailCall };
+  if (!nondetIsData(env, cur)) return undefined;
+  return { goals, tail: { tag: "tpl", atom: cur } };
+}
+
+/** Compile a functor whose every clause is a let/let* chain of self-calls and space matches over a
+ *  data template. Sound only when `candidatesW` for the call equals exactly the static clauses (the
+ *  eval call site declines when runtime rules can affect the operator; variable-headed catch-alls
+ *  disable compilation entirely). */
+function compileNondet(env: MinEnv, functor: string): NondetHolder | undefined {
+  if (env.varRulesVar.length !== 0) return undefined;
+  const eqs = env.ruleIndex.get(functor);
+  if (eqs === undefined || eqs.length === 0) return undefined;
+  const clauses: NondetClause[] = [];
+  let arity: number | undefined;
+  let hasCalls = false;
+  for (const [lhs, rhs] of eqs) {
+    if (lhs.kind !== "expr" || lhs.items.length === 0) return undefined;
+    const h = lhs.items[0]!;
+    if (h.kind !== "sym" || h.name !== functor) return undefined;
+    const a = lhs.items.length - 1;
+    if (arity === undefined) arity = a;
+    else if (a !== arity) return undefined;
+    if (!lhs.items.slice(1).every((x) => nondetIsData(env, x))) return undefined;
+    const un = nondetUnwrap(env, functor, rhs);
+    if (un === undefined) return undefined;
+    if (un.goals.length > 0 || un.tail.tag !== "tpl") hasCalls = true;
+    clauses.push({ lhs, goals: un.goals, tail: un.tail });
+  }
+  // A functor with template-only clauses is compileSymbolic's job; this holder earns its keep only
+  // when bodies actually search.
+  if (arity === undefined || !hasCalls) return undefined;
+  const clauseCount = clauses.length;
+
+  const run = (
+    envR: MinEnv,
+    partAtoms: readonly Atom[],
+    st: St,
+    ops: CompiledImpureOps,
+  ): CompiledRunResult | undefined => {
+    const matchSolutions = ops.matchSolutions;
+    if (matchSolutions === undefined) return undefined;
+    const ctr = { c: st.counter };
+    let dispatches = 0;
+    const world = st.world;
+
+    // Deep resolution through the accumulated bindings (miniKanren's walk*): a goal can bind a
+    // variable that an earlier goal already stored INSIDE a bound value, so a shallow instantiate
+    // would emit the stale intermediate variable. The interpreter never sees such chains because its
+    // `chain` plumbing substitutes each concrete value structurally; here the bindings thread instead,
+    // so emitted terms and goal inputs resolve through value chains to their final form.
+    const walk = (b: Bindings, a: Atom): Atom => {
+      let v = a;
+      let hops = 0;
+      while (v.kind === "var") {
+        const next = lookupVal(b, v.name);
+        if (next === undefined) return v;
+        v = next;
+        if (++hops > 10_000) throw BAIL; // a cyclic chain escaped the loop checks: not our subset
+      }
+      return v;
+    };
+    const walkStar = (b: Bindings, a: Atom): Atom => {
+      const v = walk(b, a);
+      if (v.ground || v.kind !== "expr") return v;
+      const its = v.items;
+      let items: Atom[] | null = null;
+      for (let i = 0; i < its.length; i++) {
+        const it = its[i]!;
+        const r = walkStar(b, it);
+        if (items !== null) items.push(r);
+        else if (r !== it) {
+          items = its.slice(0, i);
+          items.push(r);
+        }
+      }
+      return items === null ? v : expr(items);
+    };
+    const resolve = (b: Bindings, a: Atom, suffix: string): Atom =>
+      walkStar(b, instantiate(b, a, suffix));
+
+    const runMatch = (
+      b: Bindings,
+      suffix: string,
+      call: { space: Atom; pattern: Atom; template: Atom },
+    ): ReadonlyArray<readonly [Atom, Bindings]> => {
+      const m = matchSolutions(
+        envR,
+        { counter: ctr.c, world },
+        resolve(b, call.space, suffix),
+        resolve(b, call.pattern, suffix),
+        resolve(b, call.template, suffix),
+      );
+      if (m === undefined) throw BAIL;
+      ctr.c += m.counterDelta;
+      return m.pairs;
+    };
+
+    const solve = (
+      clause: NondetClause,
+      gi: number,
+      b: Bindings,
+      suffix: string,
+      out: Array<readonly [Atom, Bindings]>,
+    ): void => {
+      if (gi === clause.goals.length) {
+        if (clause.tail.tag === "tpl") {
+          out.push([resolve(b, clause.tail.atom, suffix), b]);
+          return;
+        }
+        const pairs =
+          clause.tail.tag === "match"
+            ? runMatch(b, suffix, clause.tail)
+            : runCall(clause.tail.args.map((x) => resolve(b, x, suffix)));
+        for (const [atom, vb] of pairs)
+          for (const mm of merge(b, vb)) if (!hasLoop(mm)) out.push([atom, mm]);
+        return;
+      }
+      const goal = clause.goals[gi]!;
+      const pat = resolve(b, goal.pat, suffix);
+      const pairs =
+        goal.call.tag === "match"
+          ? runMatch(b, suffix, goal.call)
+          : runCall(goal.call.args.map((x) => resolve(b, x, suffix)));
+      for (const [atom, vb] of pairs)
+        for (const withVal of merge(b, vb)) {
+          if (hasLoop(withVal)) continue;
+          for (const pm of matchAtoms(pat, atom))
+            for (const mm of merge(withVal, pm))
+              if (!hasLoop(mm)) solve(clause, gi + 1, mm, suffix, out);
+        }
+    };
+
+    const runCall = (args: readonly Atom[]): Array<readonly [Atom, Bindings]> => {
+      if (++dispatches > NONDET_CALL_CAP) throw BAIL;
+      const app = expr([sym(functor), ...args]);
+      const out: Array<readonly [Atom, Bindings]> = [];
+      for (const clause of clauses) {
+        const suffix = "#" + ctr.c;
+        ctr.c += 1;
+        for (const b0 of matchAtomsScoped(clause.lhs, app, suffix))
+          if (!hasLoop(b0)) solve(clause, 0, b0, suffix, out);
+      }
+      return out;
+    };
+
+    try {
+      const top = runCall(partAtoms);
+      const results: CompiledAtomResult[] = top.map(([atom, bnd]) => ({ atom, bnd }));
+      return { results, counterDelta: ctr.c - st.counter };
+    } catch (e) {
+      // BAIL: outside the proven subset (or over budget); RangeError: native stack exhaustion. The
+      // search mutated nothing, so re-running interpreted is sound.
+      if (e === BAIL || e instanceof RangeError) return undefined;
+      throw e;
+    }
+  };
+  return { kind: "nondet", arity, clauseCount, run };
+}
+
 // ---------- deterministic impure body compiler ----------
 
 interface ImpScope {
@@ -892,7 +1206,24 @@ type ImpNode = (
 type ImperativeFns = Map<string, ImperativeHolder>;
 
 const IMP_GROUNDED = new Set(["==", "<", ">", "<=", ">=", "+", "-", "*", "%"]);
-const DATA_DENY = new Set([...KNOWN_OPS, "let*", "add-atom"]);
+// Heads that are never inert data: the compiled language's own constructs, plus every evaluation
+// op (IMPURE_OPS: match, collapse, once, superpose, metta, ...). Without the latter, a body like
+// `(match &self p t)` whose head happens to have no rule and no grounding would freeze as a tuple,
+// and compiled impure results skip re-reduction, so it would never run. Before the case/add-if-absent
+// nodes below this was masked by `collapse` being rule-defined; it must hold on its own.
+// Built lazily: the bundle's module order initializes this file before tabling.ts in the
+// eval/builtins cycle, so a top-level spread of IMPURE_OPS would read it uninitialized.
+let DATA_DENY_CACHE: Set<string> | undefined;
+function dataDeny(): Set<string> {
+  DATA_DENY_CACHE ??= new Set([...KNOWN_OPS, ...IMPURE_OPS, "let*", "add-atom"]);
+  return DATA_DENY_CACHE;
+}
+
+// The value of a pruned branch: `(empty)` reduces to nothing, so a node yielding this sentinel has
+// no result. It propagates through let/let* values, if conditions, and case branches (which prune
+// it); any other consumer BAILs. At the holder boundary runCompiled maps it to zero results.
+// Reference-compared, so no real `Empty` symbol a program builds can collide with it.
+const EMPTY_VALUE: Atom = sym("Empty");
 
 const addCounter = (st: St, n: number): St =>
   n === 0 ? st : { counter: st.counter + n, world: st.world };
@@ -913,8 +1244,48 @@ function impConst(atom: Atom): ImpCompiled {
   return { node: (_slots, st) => ({ value: atom, st }), directEffect: false, callees: new Set() };
 }
 
+/** Assemble an expression from part nodes, threading state (the shared shape of the static-data and
+ *  match-pattern builders; neither can yield an Empty part). */
+function impAssembleExpr(parts: readonly ImpCompiled[]): ImpCompiled {
+  return {
+    node: (slots, st, ops) => {
+      const out: Atom[] = [];
+      let cur = st;
+      for (const part of parts) {
+        const r = part.node(slots, cur, ops);
+        if (r === BAIL) return BAIL;
+        out.push(r.value);
+        cur = r.st;
+      }
+      return { value: expr(out), st: cur };
+    },
+    ...impMeta(parts),
+  };
+}
+
+/** Evaluate argument nodes left to right, threading state. Every argument runs (its effects count)
+ *  even when an earlier one came back Empty; an Empty anywhere makes the whole application empty. */
+function impEvalArgs(
+  parts: readonly ImpCompiled[],
+  slots: readonly Atom[],
+  st: St,
+  ops: CompiledImpureOps,
+): { vals: Atom[]; st: St; empty: boolean } | typeof BAIL {
+  const vals: Atom[] = [];
+  let cur = st;
+  let empty = false;
+  for (const part of parts) {
+    const r = part.node(slots, cur, ops);
+    if (r === BAIL) return BAIL;
+    if (r.value === EMPTY_VALUE) empty = true;
+    vals.push(r.value);
+    cur = r.st;
+  }
+  return { vals, st: cur, empty };
+}
+
 function isDataSymbol(env: MinEnv, name: string): boolean {
-  return !DATA_DENY.has(name) && !env.ruleIndex.has(name) && !env.gt.has(name);
+  return !dataDeny().has(name) && !env.ruleIndex.has(name) && !env.gt.has(name);
 }
 
 function compileImpStaticAtom(env: MinEnv, a: Atom, scope: ImpScope): ImpCompiled | undefined {
@@ -938,21 +1309,7 @@ function compileImpStaticAtom(env: MinEnv, a: Atom, scope: ImpScope): ImpCompile
   if (head.kind === "sym" && !isDataSymbol(env, head.name)) return undefined;
   const items = a.items.map((it) => compileImpStaticAtom(env, it, scope));
   if (items.some((it) => it === undefined)) return undefined;
-  const parts = items as ImpCompiled[];
-  return {
-    node: (slots, st, ops) => {
-      const out: Atom[] = [];
-      let cur = st;
-      for (const part of parts) {
-        const r = part.node(slots, cur, ops);
-        if (r === BAIL) return BAIL;
-        out.push(r.value);
-        cur = r.st;
-      }
-      return { value: expr(out), st: cur };
-    },
-    ...impMeta(parts),
-  };
+  return impAssembleExpr(items as ImpCompiled[]);
 }
 
 function compileImpGrounded(
@@ -968,18 +1325,86 @@ function compileImpGrounded(
   const compiled = parts as ImpCompiled[];
   return {
     node: (slots, st, ops) => {
-      const vals: Atom[] = [];
-      let cur = st;
-      for (const part of compiled) {
-        const r = part.node(slots, cur, ops);
-        if (r === BAIL) return BAIL;
-        vals.push(r.value);
-        cur = r.st;
-      }
-      const gr = callGrounded(env.gt, op, vals);
-      return gr.tag === "ok" && gr.results.length === 1 ? { value: gr.results[0]!, st: cur } : BAIL;
+      const r = impEvalArgs(compiled, slots, st, ops);
+      if (r === BAIL) return BAIL;
+      // An Empty argument makes the whole application empty; the remaining args still ran (effects).
+      if (r.empty) return { value: EMPTY_VALUE, st: r.st };
+      const gr = callGrounded(env.gt, op, r.vals);
+      return gr.tag === "ok" && gr.results.length === 1
+        ? { value: gr.results[0]!, st: r.st }
+        : BAIL;
     },
     ...impMeta(compiled),
+  };
+}
+
+// Structural pieces of the add-if-absent idiom, matched over the RULE's atoms (variables in place):
+// `(if (== () (collapse (once (match S A A)))) (add-atom S A) (empty))`. The same shape the
+// interpreter's tryFastNamedAddIfAbsent recognises at runtime; compiled it becomes one ops call.
+function impMatchInsideOnce(a: Atom): ExprAtom | undefined {
+  if (a.kind !== "expr" || a.items.length !== 2) return undefined;
+  const h = a.items[0]!;
+  if (h.kind !== "sym" || h.name !== "once") return undefined;
+  const inner = a.items[1]!;
+  if (inner.kind !== "expr" || inner.items.length !== 4) return undefined;
+  const ih = inner.items[0]!;
+  return ih.kind === "sym" && ih.name === "match" ? inner : undefined;
+}
+
+function impEmptyCollapseMatch(a: Atom): ExprAtom | undefined {
+  if (a.kind !== "expr" || a.items.length !== 3) return undefined;
+  const h = a.items[0]!;
+  if (h.kind !== "sym" || h.name !== "==") return undefined;
+  const fromCollapse = (x: Atom): ExprAtom | undefined => {
+    if (x.kind !== "expr" || x.items.length !== 2) return undefined;
+    const ch = x.items[0]!;
+    return ch.kind === "sym" && ch.name === "collapse"
+      ? impMatchInsideOnce(x.items[1]!)
+      : undefined;
+  };
+  if (atomEq(a.items[1]!, emptyExpr)) return fromCollapse(a.items[2]!);
+  if (atomEq(a.items[2]!, emptyExpr)) return fromCollapse(a.items[1]!);
+  return undefined;
+}
+
+function compileImpAddIfAbsent(
+  env: MinEnv,
+  args: readonly Atom[],
+  scope: ImpScope,
+): ImpCompiled | undefined {
+  const match = impEmptyCollapseMatch(args[0]!);
+  if (match === undefined) return undefined;
+  const add = args[1]!;
+  const otherwise = args[2]!;
+  if (add.kind !== "expr" || add.items.length !== 3) return undefined;
+  const addHead = add.items[0]!;
+  if (addHead.kind !== "sym" || addHead.name !== "add-atom") return undefined;
+  if (otherwise.kind !== "expr" || otherwise.items.length !== 1) return undefined;
+  const oh = otherwise.items[0]!;
+  if (oh.kind !== "sym" || oh.name !== "empty") return undefined;
+  if (
+    !atomEq(match.items[1]!, add.items[1]!) ||
+    !atomEq(match.items[2]!, match.items[3]!) ||
+    !atomEq(match.items[2]!, add.items[2]!)
+  )
+    return undefined;
+  const space = compileImpStaticAtom(env, add.items[1]!, scope);
+  const atom = compileImpStaticAtom(env, add.items[2]!, scope);
+  if (space === undefined || atom === undefined) return undefined;
+  return {
+    node: (slots, st, ops) => {
+      const addIfAbsent = ops.addIfAbsent;
+      if (addIfAbsent === undefined) return BAIL;
+      const s = space.node(slots, st, ops);
+      if (s === BAIL) return BAIL;
+      const a = atom.node(slots, s.st, ops);
+      if (a === BAIL) return BAIL;
+      const r = addIfAbsent(env, a.st, s.value, a.value);
+      if (r === undefined) return BAIL;
+      return { value: r.added ? emptyExpr : EMPTY_VALUE, st: r.state };
+    },
+    directEffect: true,
+    callees: new Set(),
   };
 }
 
@@ -990,6 +1415,8 @@ function compileImpIf(
   holders: ImperativeFns,
 ): ImpCompiled | undefined {
   if (args.length !== 3 || (env.ruleIndex.get("if")?.length ?? 0) !== 2) return undefined;
+  const addIfAbsent = compileImpAddIfAbsent(env, args, scope);
+  if (addIfAbsent !== undefined) return addIfAbsent;
   const cond = compileImpAtom(env, args[0]!, scope, holders);
   const then_ = compileImpAtom(env, args[1]!, scope, holders);
   const els = compileImpAtom(env, args[2]!, scope, holders);
@@ -998,6 +1425,7 @@ function compileImpIf(
     node: (slots, st, ops, discard) => {
       const c = cond.node(slots, st, ops); // the condition is needed, never discarded
       if (c === BAIL) return BAIL;
+      if (c.value === EMPTY_VALUE) return { value: EMPTY_VALUE, st: c.st };
       const stIf = addCounter(c.st, 2);
       if (c.value.kind !== "gnd" || c.value.value.g !== "bool") return BAIL;
       return (c.value.value.b ? then_ : els).node(slots, stIf, ops, discard);
@@ -1027,6 +1455,8 @@ function compileImpLet(
     node: (slots, st, ops, discard) => {
       const v = value.node(slots, st, ops); // the bound value is read by the body, never discarded
       if (v === BAIL) return BAIL;
+      // An Empty value has no results, so the let yields nothing: skip the body.
+      if (v.value === EMPTY_VALUE) return { value: EMPTY_VALUE, st: v.st };
       const local = slots.slice();
       local[slot] = v.value;
       return body.node(local, addCounter(v.st, 1), ops, discard);
@@ -1072,6 +1502,8 @@ function compileImpLetStar(
       for (const binding of bindings) {
         const v = binding.value.node(local, cur, ops); // each bound value is read later, never discarded
         if (v === BAIL) return BAIL;
+        // An Empty value has no results, so the whole let* yields nothing.
+        if (v.value === EMPTY_VALUE) return { value: EMPTY_VALUE, st: v.st };
         local[binding.slot] = v.value;
         cur = addCounter(addCounter(v.st, 1), 1);
       }
@@ -1112,6 +1544,88 @@ function compileImpAddAtom(
   };
 }
 
+/** Build a match pattern/template with in-scope variables substituted from slots and everything else
+ *  (including free match variables like the `$t` in `(num $t)`) carried literally. Patterns are
+ *  structural data by definition, so no head is denied and this always compiles. */
+function compileImpPatternAtom(a: Atom, scope: ImpScope): ImpCompiled {
+  if (a.kind === "var") {
+    const slot = scope.vars.get(a.name);
+    if (slot === undefined) return impConst(a);
+    return {
+      node: (slots, st) => ({ value: slots[slot]!, st }),
+      directEffect: false,
+      callees: new Set(),
+    };
+  }
+  if (a.kind !== "expr" || a.items.length === 0) return impConst(a);
+  return impAssembleExpr(a.items.map((it) => compileImpPatternAtom(it, scope)));
+}
+
+// `(case (match SP PAT TPL) ((V BODY)))` with a single bare-variable branch: the saturation step
+// (peano's expand-once). The match solutions are a snapshot of the space at entry; each branch runs
+// BODY with V bound to one solution, threading effects into the next branch, exactly the streamed
+// case's order. A branch whose value is Empty is pruned; the imperative contract is single-valued,
+// so more than one surviving branch BAILs (sound: worlds are immutable, so the interpreter re-runs
+// from the untouched input state).
+function compileImpCaseMatch(
+  env: MinEnv,
+  args: readonly Atom[],
+  scope: ImpScope,
+  holders: ImperativeFns,
+): ImpCompiled | undefined {
+  if (args.length !== 2 || (env.ruleIndex.get("case")?.length ?? 0) !== 1) return undefined;
+  const scrut = args[0]!;
+  if (scrut.kind !== "expr" || scrut.items.length !== 4) return undefined;
+  const sh = scrut.items[0]!;
+  if (sh.kind !== "sym" || sh.name !== "match") return undefined;
+  const pairs = args[1]!;
+  if (pairs.kind !== "expr" || pairs.items.length !== 1) return undefined;
+  const branch = pairs.items[0]!;
+  if (branch.kind !== "expr" || branch.items.length !== 2 || branch.items[0]!.kind !== "var")
+    return undefined;
+  const space = compileImpStaticAtom(env, scrut.items[1]!, scope);
+  if (space === undefined) return undefined;
+  const pattern = compileImpPatternAtom(scrut.items[2]!, scope);
+  const template = compileImpPatternAtom(scrut.items[3]!, scope);
+  const slot = scope.len;
+  const branchScope: ImpScope = {
+    vars: new Map(scope.vars).set(branch.items[0]!.name, slot),
+    len: slot + 1,
+  };
+  const body = compileImpAtom(env, branch.items[1]!, branchScope, holders);
+  if (body === undefined) return undefined;
+  return {
+    node: (slots, st, ops, discard) => {
+      const matchSolutions = ops.matchSolutions;
+      if (matchSolutions === undefined) return BAIL;
+      const s = space.node(slots, st, ops);
+      if (s === BAIL) return BAIL;
+      const p = pattern.node(slots, s.st, ops);
+      if (p === BAIL) return BAIL;
+      const t = template.node(slots, p.st, ops);
+      if (t === BAIL) return BAIL;
+      const m = matchSolutions(env, t.st, s.value, p.value, t.value);
+      if (m === undefined) return BAIL;
+      let cur = addCounter(t.st, m.counterDelta);
+      const local = slots.slice();
+      let survived: Atom | undefined;
+      for (const [value] of m.pairs) {
+        local[slot] = value;
+        const r = body.node(local, cur, ops, discard);
+        if (r === BAIL) return BAIL;
+        cur = r.st;
+        if (r.value !== EMPTY_VALUE) {
+          if (survived !== undefined) return BAIL;
+          survived = r.value;
+        }
+      }
+      return { value: survived ?? EMPTY_VALUE, st: cur };
+    },
+    directEffect: true,
+    callees: body.callees,
+  };
+}
+
 function compileImpCall(
   env: MinEnv,
   op: string,
@@ -1127,15 +1641,11 @@ function compileImpCall(
   const meta = impMeta(parts);
   return {
     node: (slots, st, ops, discard) => {
-      const vals: Atom[] = [];
-      let cur = st;
-      for (const part of parts) {
-        const r = part.node(slots, cur, ops); // call args are needed, never discarded
-        if (r === BAIL) return BAIL;
-        vals.push(r.value);
-        cur = r.st;
-      }
-      return h.run(vals, cur, ops, discard);
+      const r = impEvalArgs(parts, slots, st, ops); // call args are needed, never discarded
+      if (r === BAIL) return BAIL;
+      // An Empty argument makes the call empty without invoking it (args already ran for effects).
+      if (r.empty) return { value: EMPTY_VALUE, st: r.st };
+      return h.run(r.vals, r.st, ops, discard);
     },
     directEffect: meta.directEffect,
     callees: new Set([...meta.callees, op]),
@@ -1167,12 +1677,17 @@ function compileImpTuple(
         return { value: emptyExpr, st: cur };
       }
       const out: Atom[] = [];
+      let empty = false;
       for (const part of compiled) {
         const r = part.node(slots, cur, ops);
         if (r === BAIL) return BAIL;
+        if (r.value === EMPTY_VALUE) empty = true;
         out.push(r.value);
         cur = r.st;
       }
+      // An Empty element makes the whole tuple empty (the cross-product with nothing); the other
+      // elements still ran for their effects.
+      if (empty) return { value: EMPTY_VALUE, st: cur };
       return { value: expr(out), st: cur };
     },
     ...impMeta(compiled),
@@ -1204,6 +1719,7 @@ function compileImpAtom(
   if (op === "let") return compileImpLet(env, args, scope, holders);
   if (op === "let*") return compileImpLetStar(env, args, scope, holders);
   if (op === "add-atom") return compileImpAddAtom(env, args, scope);
+  if (op === "case") return compileImpCaseMatch(env, args, scope, holders);
   if (IMP_GROUNDED.has(op)) return compileImpGrounded(env, op, args, scope, holders);
   const call = compileImpCall(env, op, args, scope, holders);
   if (call !== undefined) return call;
@@ -1370,6 +1886,12 @@ export function compileEnv(env: MinEnv): CompiledFns {
         if (symbolic !== undefined) compiled.set(f, symbolic);
       }
       compileImperative(env, compiled);
+      // Nondeterministic let*-chain functors (impure via `match`, so outside the pure set).
+      for (const f of env.ruleIndex.keys()) {
+        if (compiled.has(f)) continue;
+        const nondet = compileNondet(env, f);
+        if (nondet !== undefined) compiled.set(f, nondet);
+      }
       return compiled;
     }
   }
@@ -1389,12 +1911,17 @@ export function runCompiled(
   if (h === undefined || partAtoms.length !== h.arity) return undefined;
   if (h.kind === "rewrite") return h.run(partAtoms);
   if (h.kind === "symbolic") return h.run(partAtoms, st.counter);
+  if (h.kind === "nondet") {
+    if (ops === undefined) return undefined;
+    return h.run(env, partAtoms, st, ops);
+  }
   if (h.kind === "imperative") {
     if (ops === undefined) return undefined;
     const r = h.run(partAtoms, st, ops, discard);
-    return r === BAIL
-      ? undefined
-      : { results: [{ atom: r.value, bnd: emptyBindings }], counterDelta: 0, state: r.st };
+    if (r === BAIL) return undefined;
+    // An Empty value is a pruned computation: the call vanishes (zero results), effects kept.
+    if (r.value === EMPTY_VALUE) return { results: [], counterDelta: 0, state: r.st };
+    return { results: [{ atom: r.value, bnd: emptyBindings }], counterDelta: 0, state: r.st };
   }
   // An argument is a ground int, or a flat tuple of ground ints `(i1 i2 ...)` (the iterate/quad-step state).
   const vals: FrameVal[] = [];

@@ -16,6 +16,13 @@ const BENCH_CORPUS = resolve(process.cwd(), "packages/node/bench/corpus-mettats"
 
 const A = (...items: Atom[]): Atom => expr(items);
 
+// All-compactable appends in these tests must succeed; fail loudly if one bails.
+function mustAppend(store: FlatAtomSpace, atoms: Atom[]): FlatAtomSpace {
+  const next = store.appendAll(atoms);
+  if (next === undefined) throw new Error("appendAll unexpectedly bailed");
+  return next;
+}
+
 const atomArb: fc.Arbitrary<Atom> = fc.letrec<{ atom: Atom }>((tie) => ({
   atom: fc.oneof(
     { depthSize: "small", withCrossShrink: true },
@@ -59,7 +66,7 @@ describe("FlatAtomSpace runtime store", () => {
   it("preserves multiplicity and tombstones one live fact", () => {
     const fact = A(sym("p"), sym("a"));
     const other = A(sym("p"), sym("b"));
-    const store = FlatAtomSpace.empty().appendAll([fact, fact, other]);
+    const store = mustAppend(FlatAtomSpace.empty(), [fact, fact, other]);
 
     expect(store.exactCount(fact)).toBe(2);
     const removed = store.removeOne(fact);
@@ -68,16 +75,16 @@ describe("FlatAtomSpace runtime store", () => {
   });
 
   it("keeps aborted append gaps invisible to later roots", () => {
-    const base = FlatAtomSpace.empty().appendAll([A(sym("p"), sym("base"))]);
-    const branch = base.appendAll([A(sym("p"), sym("aborted"))]);
-    const resumed = base.appendAll([A(sym("p"), sym("kept"))]);
+    const base = mustAppend(FlatAtomSpace.empty(), [A(sym("p"), sym("base"))]);
+    const branch = mustAppend(base, [A(sym("p"), sym("aborted"))]);
+    const resumed = mustAppend(base, [A(sym("p"), sym("kept"))]);
 
     expect(branch.toArray().map(format)).toEqual(["(p base)", "(p aborted)"]);
     expect(resumed.toArray().map(format)).toEqual(["(p base)", "(p kept)"]);
   });
 
   it("streams candidates in insertion order with variable-headed facts included", () => {
-    const store = FlatAtomSpace.empty().appendAll([
+    const store = mustAppend(FlatAtomSpace.empty(), [
       A(sym("p"), sym("a")),
       A(variable("h"), sym("wild")),
       A(sym("q"), sym("b")),
@@ -85,5 +92,15 @@ describe("FlatAtomSpace runtime store", () => {
     ]);
 
     expect([...store.candidatesFor("p")].map(format)).toEqual(["(p a)", "($h wild)", "(p c)"]);
+  });
+
+  it("bails on a grounded executor and leaves the store usable", () => {
+    const fact = A(sym("p"), sym("a"));
+    const store = mustAppend(FlatAtomSpace.empty(), [fact]);
+    const op = { ...gint(1), exec: () => [] } as unknown as Atom;
+    expect(store.appendAll([A(sym("q"), op)])).toBeUndefined();
+    // The aborted batch stays invisible; the store keeps working.
+    expect(store.toArray().map(format)).toEqual(["(p a)"]);
+    expect(mustAppend(store, [A(sym("p"), sym("b"))]).size).toBe(2);
   });
 });

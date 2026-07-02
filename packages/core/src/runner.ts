@@ -89,7 +89,11 @@ export interface RunOptions {
     readonly streamEmit?: boolean;
     readonly tableBackchain?: boolean;
     readonly trieSpace?: boolean;
-    // Compact runtime `&self` store. Experimental and off by default.
+    // Compact interned runtime `&self` store (typed-array term columns + a decode cache): about 3x
+    // lower peak RSS on add-heavy runs (matespacefast ~1.2GB -> ~0.4GB) for about 1.6x the wall time
+    // there, at parity elsewhere (peano). Byte-identical, differential-gated over the whole corpus.
+    // Off by default: the plain log is faster whenever memory fits. Atoms that cannot be encoded (a
+    // grounded executor/matcher) fall back to the log automatically.
     readonly flatAtomspace?: boolean;
     // Trail-based zero-allocation conjunctive matching (eval.ts matchConjTrail). Byte-identical to the
     // immutable matcher, differential-gated; off by default.

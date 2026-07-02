@@ -1,6 +1,6 @@
 {
   "name": "@metta-ts/edsl",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "author": "MesTTo",
   "license": "MIT",
   "description": "Ergonomic, typed TypeScript eDSL for MeTTa: typed term builders, rewrite rules, a tagged-template surface, and auto-grounding of TypeScript values.",
