@@ -171,11 +171,13 @@ export class MatchableObject extends ValueObject {
   }
 }
 
-/** A grounded operation: a named function callable as a grounded atom. */
+/** A grounded operation: a named function callable as a grounded atom. The operation may return its
+ *  result atoms directly, or a Promise of them (async), which makes the atom applicable only under
+ *  the async runner (an applied `py-atom`, for instance). */
 export class OperationObject extends GroundedObject {
   constructor(
     readonly opName: string,
-    readonly op: (...args: Atom[]) => Atom[],
+    readonly op: (...args: Atom[]) => Atom[] | Promise<Atom[]>,
     // Source-compatible with Python Hyperon's `OperationAtom(name, fn, unwrap)`. Ignored because a
     // TypeScript operation always receives argument atoms (`Atom[]`), never unwrapped JS values.
     readonly unwrap = true,
@@ -183,7 +185,7 @@ export class OperationObject extends GroundedObject {
     super(op, opName);
   }
   /** Run the operation over the argument atoms. */
-  execute(...args: Atom[]): Atom[] {
+  execute(...args: Atom[]): Atom[] | Promise<Atom[]> {
     return this.op(...args);
   }
 }
@@ -284,8 +286,12 @@ export function G(obj: GroundedObject, type?: Atom): GroundedAtom {
   const typ = type?.catom ?? core.sym("%Undefined%");
   const exec =
     obj instanceof OperationObject
-      ? (args: readonly core.Atom[]): readonly core.Atom[] =>
-          obj.execute(...args.map(Atom.fromCAtom)).map((a) => a.catom)
+      ? (args: readonly core.Atom[]): readonly core.Atom[] | Promise<readonly core.Atom[]> => {
+          const r = obj.execute(...args.map(Atom.fromCAtom));
+          return r instanceof Promise
+            ? r.then((atoms) => atoms.map((a) => a.catom))
+            : r.map((a) => a.catom);
+        }
       : undefined;
   // A MatchableObject defines custom unification via core grounded matching.
   const match =

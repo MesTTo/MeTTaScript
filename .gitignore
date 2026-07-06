@@ -11,3 +11,6 @@ packages/*/docs/
 website/.vitepress/dist/
 website/.vitepress/cache/
 packages/node/bench/lib
+
+# Local hyperon venv for the @metta-ts/py differential oracle (HYPERON_LIVE=1)
+.venv-hyperon/

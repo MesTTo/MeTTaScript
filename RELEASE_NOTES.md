@@ -1,4 +1,4 @@
-# MeTTa TS 1.0.9
+# MeTTa TS 1.1.0
 
 A pure-TypeScript implementation of [MeTTa](https://metta-lang.dev) (Meta Type Talk), the OpenCog Hyperon language. It runs anywhere TypeScript runs: the browser, Node, Deno, Bun, and edge or serverless functions. No native addons, no WASM, no Rust.
 
@@ -6,24 +6,35 @@ A pure-TypeScript implementation of [MeTTa](https://metta-lang.dev) (Meta Type T
 
 This release is tested on Linux (Node 20, the CI matrix): lint, format, typecheck, the full test suite, and the build all run there. Because the engine is pure TypeScript with no native addon and no WASM, it is meant to be cross-platform and should run unchanged on any JavaScript runtime. Other operating systems are not yet part of the tested matrix.
 
-## What's new: a recovering CST for editors and language servers
+## What's new: Python interop
 
-1.0.8 added a span-tracking parse for the static analyzer. This release turns it into a concrete syntax tree an editor can build on. `parseCst` never throws, so a language server can keep offering features while a document is mid-edit: an unclosed `(` closes at end of input, an unexpected `)` and an unterminated string each become a diagnostic instead of an exception, and deep nesting is bounded without a recursive overflow. The tree also carries what an editor needs and the analyzer did not: the comments, a syntactic kind per node, the paren spans, and the span of a top-level `!` query.
+This release adds `@metta-ts/py`, an optional package that lets a MeTTa program call into Python. It carries two surfaces over one bridge: PeTTa's `py-call` and Hyperon's `py-atom` family.
 
-Leaf atoms still come from the interpreter's own reader primitives, so on valid input the CST is byte-identical to `parseAll`. A 1000-run differential checks the atoms and bang flags against the plain reader, and a 2000-run fuzz checks that the parser never throws on arbitrary input. The diagnostics are shaped as Language Server Protocol `Diagnostic`s with a range, a severity, and a stable code, so an editor consumes them directly. The static analyzer and `metta-ts --check` from 1.0.8 are unchanged and still read the interpreter's own signature table:
+`py-call` dispatches on the head of its argument, the way PeTTa does. A bare name is a builtin, a dotted name is a module function, and a leading-dot name is a method on a live object. `py-eval` runs a Python expression string and `py-str` folds a MeTTa list into a Python string:
 
-```
-error[arity-mismatch]: prog.metta:1:2
-  |
-1 | !(car-atom 1 2)
-  |  ^^^^^^^^^^^^^^ car-atom expects 1 argument, got 2
+```metta
+!(py-call (math.gcd 12 18))   ; 6
+!(py-eval "2 ** 10")          ; 1024
 ```
 
-None of this touches the evaluator. `parseCst` is off the `runFile` hot path; the only change to shared code is that `readStringAt` now reports whether a string was terminated instead of throwing, and the plain parser re-throws exactly as before. The 270-assertion Hyperon oracle and every byte-identical experimental suite still pass, and a parse/eval microbench is within noise of 1.0.8.
+The `py-atom` family is Hyperon's surface over the same bridge. `py-atom` resolves a dotted path into an atom you can apply or read as a value, and `py-dot`, `py-list`, `py-tuple`, `py-dict`, and `py-chain` round it out:
+
+```metta
+!((py-atom operator.add) 40 2)   ; 42
+!(py-atom math.pi)               ; 3.141592653589793
+```
+
+Python runs in a separate CPython process and MeTTa talks to it over IPC, so the interpreter stays pure TypeScript and as fast as before. The package ships no Python dependency of its own: you pass in a bridge, the way `MeTTaGrapher` takes a GIF encoder. The reference bridge wraps [pythonia](https://www.npmjs.com/package/pythonia). Because a call crosses a process boundary the ops are asynchronous, so you run with `runAsync`, or from the command line with `metta-ts --py program.metta`.
+
+Value conversions follow PeTTa and its `janus` bridge: numbers both ways, a Python string to a Symbol, `True`/`False`/`None` to `(@ true)`/`(@ false)`/`(@ none)`, a list to an expression, and anything else to a live handle. A raised Python error becomes an `(Error <expr> <message>)` atom carrying the real Python message, and evaluation continues, where PeTTa aborts. Enabling this grants the program the host's Python, so it is opt-in and meant for trusted source only.
+
+Two differential oracles pin the behaviour. A byte-parity suite runs the same corpus through a live PeTTa checkout and through this package, comparing the result lines exactly. A second suite runs the `py-atom` surface through pip `hyperon`, comparing results on the numeric surface where the two marshallings coincide. Both are gated behind environment flags so the default suite needs no Python.
+
+The one change to the engine is that a grounded atom's executor may now return a `Promise`, which is what lets an applied `py-atom` run asynchronously. Nothing returned a Promise from that path before, so the synchronous behaviour is unchanged: the 270-assertion Hyperon oracle is byte-identical and the corpus microbench is within noise of 1.0.9.
 
 ## Corpus benchmark
 
-The engine is unchanged in this release, so the PeTTa-corpus benchmark (107 shared programs, 97 both engines pass, median 2.01x, geomean 2.06x) is identical to 1.0.7. See [`packages/node/bench/RESULTS-corpus.md`](packages/node/bench/RESULTS-corpus.md) for the full per-program table.
+The engine is unchanged for pure-MeTTa programs, so the PeTTa-corpus benchmark (107 shared programs, 97 both engines pass, median 2.01x, geomean 2.06x) is identical to 1.0.9. See [`packages/node/bench/RESULTS-corpus.md`](packages/node/bench/RESULTS-corpus.md) for the full per-program table.
 
 ## Major performance gains (since 1.0.0)
 
@@ -36,16 +47,17 @@ The speed comes from general engine work:
 - automatic tabling of pure functions, including ones defined at runtime, and moded (variant) tabling for non-ground pure calls;
 - a native-code compiler for the pure deterministic int/bool/tuple subset, with tail-recursion compiled to loops and higher-order specialisation;
 - worker-thread parallelism: `(once (hyperpose ...))` races branches across CPU cores on Node, and a `SharedArrayBuffer` flat matcher scans large knowledge bases in parallel;
-- the compiled clause-skeleton and JavaScript-codegen search for match-free nondeterministic groups, added in 1.0.7.
+- the compiled clause-skeleton and JavaScript-codegen search for match-free nondeterministic groups.
 
 Every optimisation is verified byte-identical against the 270-assertion Hyperon oracle.
 
 ## What is in this release
 
-- `@metta-ts/core` is the interpreter, parser, type system, pattern matching, and standard library, as a single ESM bundle. It now also carries the static analyzer and its diagnostic model, described above. It passes all 270 assertions of Hyperon's oracle corpus (the full dependent-type tier, spaces and mutable state, nondeterminism, grounded operations, and documentation), cross-checked against [LeaTTa](https://github.com/MesTTo/LeaTTa), the machine-checked (Lean 4) MeTTa semantics pinned to the same commit.
+- `@metta-ts/core` is the interpreter, parser, type system, pattern matching, standard library, and static analyzer, as a single ESM bundle. It passes all 270 assertions of Hyperon's oracle corpus, cross-checked against [LeaTTa](https://github.com/MesTTo/LeaTTa), the machine-checked (Lean 4) MeTTa semantics pinned to the same commit.
 - `@metta-ts/hyperon` is a TypeScript class API modeled on Python's `hyperon`, with a JavaScript interop layer (`js-atom`, `js-dot`, `js-list`, `js-dict`) that calls into the host runtime directly.
 - `@metta-ts/edsl` is a typed eDSL with term builders, special-form combinators, and a tagged-template surface.
-- `@metta-ts/node` has the `metta-ts` CLI, now with `--check` for static analysis, plus file `import!` and the worker-thread parallel matcher.
+- `@metta-ts/py` is the new Python interop package, described above: `py-call` and the `py-atom` family over a caller-supplied pythonia bridge, opt-in and asynchronous.
+- `@metta-ts/node` has the `metta-ts` CLI, with `--check` for static analysis and `--py` for Python interop, plus file `import!` and the worker-thread parallel matcher.
 - `@metta-ts/browser` is a browser entry with an in-memory virtual file system for `import!`.
 - `@metta-ts/grapher` renders a MeTTa reduction as a node graph or a nested-block view, as static SVGs or an animated GIF, with a data-driven stylesheet for node size and colour.
 - `@metta-ts/das-client` and `@metta-ts/das-gateway` are an optional client to SingularityNET's Distributed AtomSpace, run end to end against a live cluster, with atom handles matching the AtomDB byte for byte.
@@ -55,19 +67,19 @@ Every optimisation is verified byte-identical against the 270-assertion Hyperon 
 ```bash
 npm install @metta-ts/core        # the interpreter (works in any JS runtime)
 npm install -g @metta-ts/node     # the metta-ts CLI
+npm install @metta-ts/py pythonia # optional: call Python from MeTTa
 ```
 
-Check a file without running it:
+Run a Python-using program from the command line:
 
 ```bash
-metta-ts --check program.metta                       # arity errors, rustc-style
-metta-ts --check --undefined-symbols program.metta   # also "did you mean" on unknown heads
-metta-ts --check --json program.metta                # diagnostics as an LSP Diagnostic[]
+metta-ts --py program.metta       # needs pythonia installed and python3 on PATH
 ```
 
 ## Provenance
 
 - Semantics: [hyperon-experimental](https://github.com/trueagi-io/hyperon-experimental), pinned to commit `3f76dc4`.
+- Python interop surface: PeTTa's `py-call` and Hyperon's [`py-atom`](https://trueagi-io.github.io/hyperon-experimental/reference/atoms/) family, over [pythonia](https://www.npmjs.com/package/pythonia).
 - Verified spec and differential oracle: [LeaTTa](https://github.com/MesTTo/LeaTTa) (Lean 4).
 - Formal models: [Alloy](https://alloytools.org) specs in [`spec/`](spec/) for the matcher's deep loop rejection and the compiled search's occurs check.
 - License: [MIT](LICENSE).

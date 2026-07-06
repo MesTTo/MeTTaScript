@@ -4,6 +4,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  Atom,
   S,
   V,
   E,
@@ -96,7 +97,8 @@ describe("grounded objects", () => {
 
   it("OperationObject executes over atoms", () => {
     const op = new OperationObject("dup", (a) => [a, a]);
-    expect(op.execute(S("x")).map((x) => x.toString())).toEqual(["x", "x"]);
+    // A sync operation returns Atom[] directly (the union's Promise arm is for async ops).
+    expect((op.execute(S("x")) as Atom[]).map((x) => x.toString())).toEqual(["x", "x"]);
   });
 
   it("GroundedObject keeps content and id", () => {

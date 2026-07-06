@@ -1220,6 +1220,18 @@ function* evalOpG(env: MinEnv, st: St, prev: Stack, x: Atom, b: Bindings): Gen<[
         .map((a) => resolveStates(st.world, subTokens(st.world, a, env.intern)));
       try {
         const results = head.exec(args);
+        if (results instanceof Promise) {
+          // Async executor: suspend exactly like a named async grounded op (callGroundedG). Wrap so
+          // the driver never sees a rejection, then yield: the async driver awaits it, the sync
+          // driver throws AsyncInSyncError (runGenSync rejects any suspension).
+          pendingAsyncOp = "<grounded-exec>";
+          const settled = (yield results.then(
+            (rs) => ({ ok: rs }),
+            (e: unknown) => ({ err: e instanceof Error ? e.message : String(e) }),
+          )) as { ok?: readonly Atom[]; err?: string };
+          if (settled.err !== undefined) return [[finItem(prev, errAtom(x2, settled.err), b)], st];
+          return [settled.ok!.map((res) => evalResult(prev, res, b)), st];
+        }
         return [results.map((res) => evalResult(prev, res, b)), st];
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);

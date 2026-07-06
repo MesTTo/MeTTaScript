@@ -1,6 +1,6 @@
 {
   "name": "@metta-ts/node",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -22,7 +22,8 @@
     "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean"
   },
   "dependencies": {
-    "@metta-ts/core": "workspace:*"
+    "@metta-ts/core": "workspace:*",
+    "@metta-ts/py": "workspace:*"
   },
   "author": "MesTTo",
   "engines": {
@@ -49,5 +50,17 @@
   "homepage": "https://github.com/MesTTo/Meta-TypeScript-Talk#readme",
   "bugs": {
     "url": "https://github.com/MesTTo/Meta-TypeScript-Talk/issues"
+  },
+  "devDependencies": {
+    "pythonia": "^1.2.6",
+    "ws": "^7.5.10"
+  },
+  "peerDependencies": {
+    "pythonia": "^1.2.6"
+  },
+  "peerDependenciesMeta": {
+    "pythonia": {
+      "optional": true
+    }
   }
 }

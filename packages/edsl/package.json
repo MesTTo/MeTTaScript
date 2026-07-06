@@ -1,10 +1,17 @@
 {
   "name": "@metta-ts/edsl",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "author": "MesTTo",
   "license": "MIT",
   "description": "Ergonomic, typed TypeScript eDSL for MeTTa: typed term builders, rewrite rules, a tagged-template surface, and auto-grounding of TypeScript values.",
-  "keywords": ["metta", "hyperon", "edsl", "dsl", "term-rewriting", "typescript"],
+  "keywords": [
+    "metta",
+    "hyperon",
+    "edsl",
+    "dsl",
+    "term-rewriting",
+    "typescript"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -16,7 +23,9 @@
     },
     "./package.json": "./package.json"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=20"
   },

@@ -1,0 +1,6 @@
+!(println! (RESULT (py-call (str 5))))
+!(println! (RESULT (py-call (bool 1))))
+!(println! (RESULT (py-call (bool 0))))
+!(println! (RESULT (py-eval "None")))
+!(println! (RESULT (py-eval "2 ** 10")))
+!(println! (RESULT (py-eval "40 + 2")))

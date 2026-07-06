@@ -21,6 +21,7 @@ Other packages, add as needed:
 npm install @metta-ts/hyperon     # a Python-hyperon-style class API
 npm install @metta-ts/node        # CLI + file import! + a parallel matcher
 npm install @metta-ts/browser     # web entry + in-memory virtual file system
+npm install @metta-ts/py          # call Python (py-call / py-atom) via pythonia
 ```
 
 For the command-line runner, install `@metta-ts/node` globally (or use `npx`):
@@ -201,14 +202,15 @@ node packages/node/dist/cli.js examples/factorial.metta
 
 ## Packages
 
-| Package                                       | What it is                                                                                    |
-| --------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| [`@metta-ts/core`](packages/core)             | The interpreter, parser, type system, and standard library. Zero platform dependencies.       |
-| [`@metta-ts/hyperon`](packages/hyperon)       | A TypeScript class API over the core, modeled on Python's `hyperon`.                          |
-| [`@metta-ts/edsl`](packages/edsl)             | An ergonomic, typed eDSL: term builders, special-form combinators, and a tagged template.     |
-| [`@metta-ts/node`](packages/node)             | The `metta-ts` CLI, file `import!`, and a `SharedArrayBuffer` worker-thread parallel matcher. |
-| [`@metta-ts/browser`](packages/browser)       | Browser entry point with an in-memory virtual file system for `import!`.                      |
-| [`@metta-ts/das-client`](packages/das-client) | Optional client to SingularityNET's Distributed AtomSpace via a Connect gateway.              |
+| Package                                       | What it is                                                                                                 |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| [`@metta-ts/core`](packages/core)             | The interpreter, parser, type system, and standard library. Zero platform dependencies.                    |
+| [`@metta-ts/hyperon`](packages/hyperon)       | A TypeScript class API over the core, modeled on Python's `hyperon`.                                       |
+| [`@metta-ts/edsl`](packages/edsl)             | An ergonomic, typed eDSL: term builders, special-form combinators, and a tagged template.                  |
+| [`@metta-ts/node`](packages/node)             | The `metta-ts` CLI, file `import!`, and a `SharedArrayBuffer` worker-thread parallel matcher.              |
+| [`@metta-ts/browser`](packages/browser)       | Browser entry point with an in-memory virtual file system for `import!`.                                   |
+| [`@metta-ts/py`](packages/py)                 | Optional Python interop: PeTTa's `py-call` and Hyperon's `py-atom` over a caller-supplied pythonia bridge. |
+| [`@metta-ts/das-client`](packages/das-client) | Optional client to SingularityNET's Distributed AtomSpace via a Connect gateway.                           |
 
 ## Performance
 

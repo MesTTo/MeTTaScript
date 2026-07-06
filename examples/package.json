@@ -15,6 +15,7 @@
     "stdlib": "tsx stdlib.ts",
     "types": "tsx types.ts",
     "js-interop": "tsx js-interop.ts",
+    "python-interop": "tsx python-interop.ts",
     "json-module": "tsx json-module.ts",
     "custom-matching": "tsx custom-matching.ts",
     "concurrency": "tsx concurrency.ts",
@@ -28,7 +29,10 @@
     "@metta-ts/edsl": "workspace:*",
     "@metta-ts/grapher": "workspace:*",
     "@metta-ts/hyperon": "workspace:*",
-    "@metta-ts/node": "workspace:*"
+    "@metta-ts/node": "workspace:*",
+    "@metta-ts/py": "workspace:*",
+    "pythonia": "^1.2.6",
+    "ws": "^7.5.10"
   },
   "devDependencies": {
     "tsx": "^4.19.2",

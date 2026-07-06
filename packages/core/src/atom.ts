@@ -69,8 +69,11 @@ export interface GndAtom {
 export type Atom = SymAtom | VarAtom | ExprAtom | GndAtom;
 
 /** A grounded atom's executor: applied when the atom heads an expression `(<gnd> arg...)`. Receives
- *  the evaluated argument atoms and returns the result atoms. May throw to signal a runtime error. */
-export type GroundedExec = (args: readonly Atom[]) => readonly Atom[];
+ *  the evaluated argument atoms and returns the result atoms, either directly or as a Promise. A
+ *  Promise suspends the async runner (as a named async op does) and is refused by the sync runner;
+ *  it never widens the atom record, since `exec` stays a single slot. May throw / reject for a
+ *  runtime error. */
+export type GroundedExec = (args: readonly Atom[]) => readonly Atom[] | Promise<readonly Atom[]>;
 export type GroundedMatch = (other: Atom) => readonly unknown[];
 
 /** Structural equality of grounded values (LeaTTa `Ground.BEq`). */

@@ -66,6 +66,7 @@ export default defineConfig({
           { text: "Embedding TypeScript objects", link: "/typescript/embedding-objects" },
           { text: "Async MeTTa", link: "/typescript/async" },
           { text: "JavaScript interop", link: "/typescript/js-interop" },
+          { text: "Python interop", link: "/typescript/python-interop" },
         ],
       },
       {

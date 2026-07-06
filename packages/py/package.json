@@ -1,21 +1,9 @@
 {
-  "name": "@metta-ts/grapher",
+  "name": "@metta-ts/py",
   "version": "1.1.0",
-  "author": "MesTTo",
   "license": "MIT",
-  "description": "MeTTaGrapher: a pure-SVG visual node-graph editor for MeTTa. Build a program as connected nodes, evaluate any subtree on the engine, and see the result. A node graph is a MeTTa atom.",
-  "keywords": [
-    "metta",
-    "hyperon",
-    "visual",
-    "editor",
-    "graph",
-    "svg",
-    "typescript"
-  ],
   "type": "module",
   "main": "./dist/index.js",
-  "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
@@ -27,26 +15,41 @@
   "files": [
     "dist"
   ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean"
+  },
+  "dependencies": {
+    "@metta-ts/core": "workspace:*",
+    "@metta-ts/hyperon": "workspace:*"
+  },
+  "devDependencies": {
+    "pythonia": "^1.2.6",
+    "ws": "^7.5.10"
+  },
+  "author": "MesTTo",
   "engines": {
     "node": ">=20"
   },
   "sideEffects": false,
-  "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean --platform browser"
+  "module": "./dist/index.js",
+  "publishConfig": {
+    "access": "public"
   },
-  "dependencies": {
-    "@metta-ts/hyperon": "workspace:*"
-  },
+  "description": "Python interop for MeTTa TS: PeTTa-style py-call and Hyperon-style py-atom over a bring-your-own CPython bridge (pythonia reference adapter).",
+  "keywords": [
+    "metta",
+    "hyperon",
+    "python",
+    "interop",
+    "typescript"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/MesTTo/Meta-TypeScript-Talk.git",
-    "directory": "packages/grapher"
+    "directory": "packages/py"
   },
   "homepage": "https://github.com/MesTTo/Meta-TypeScript-Talk#readme",
   "bugs": {
     "url": "https://github.com/MesTTo/Meta-TypeScript-Talk/issues"
-  },
-  "publishConfig": {
-    "access": "public"
   }
 }
