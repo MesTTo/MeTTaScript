@@ -66,9 +66,7 @@ describe("purity analysis", () => {
     const tables = new TableSpace();
     const call = expr([sym("fib"), gint(30)]);
     expect(tables.key("ground", call, 0).tokens).toEqual(tables.key("ground", call, 0).tokens);
-    expect(tables.key("ground", call, 0).tokens).not.toEqual(
-      tables.key("ground", call, 1).tokens,
-    );
+    expect(tables.key("ground", call, 0).tokens).not.toEqual(tables.key("ground", call, 1).tokens);
     expect(keyWellFormed(call)).toBe(true);
     expect(keyWellFormed(expr([sym("g"), gfloat(1.5)]))).toBe(false);
   });

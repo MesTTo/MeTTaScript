@@ -286,8 +286,8 @@ A reproducible benchmark ([`packages/node/bench/corpus-bench.mjs`](packages/node
 
 A representative slice (wall-clock, subprocess including startup; `speedup` = PeTTa / MeTTa TS):
 
-| Program            |   PeTTa | MeTTa TS |  Speedup |
-| ------------------ | ------: | -------: | -------: |
+| Program            |   PeTTa | MeTTa TS |   Speedup |
+| ------------------ | ------: | -------: | --------: |
 | `peano`            | 1588 ms |   306 ms | **5.19×** |
 | `fib`              |  454 ms |    88 ms | **5.14×** |
 | `fibadd`           |  451 ms |   100 ms | **4.53×** |

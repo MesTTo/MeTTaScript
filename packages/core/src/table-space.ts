@@ -104,7 +104,10 @@ export class TokenTrie<V> {
         if (!removed) return [false, false];
         if (pruneChild) node.children!.delete(tokens[i]!);
       }
-      return [true, node.value === undefined && (node.children === undefined || node.children.size === 0)];
+      return [
+        true,
+        node.value === undefined && (node.children === undefined || node.children.size === 0),
+      ];
     };
     return del(this.root, 0)[0];
   }

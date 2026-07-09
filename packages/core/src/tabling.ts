@@ -138,8 +138,7 @@ function callHeads(a: Atom, out: Set<string>): void {
 /** How many calls in `a` target any functor in `targets`. */
 export function functorCallCount(a: Atom, targets: ReadonlySet<string>): number {
   if (a.kind !== "expr" || a.items.length === 0) return 0;
-  let n =
-    a.items[0]!.kind === "sym" && targets.has((a.items[0] as { name: string }).name) ? 1 : 0;
+  let n = a.items[0]!.kind === "sym" && targets.has((a.items[0] as { name: string }).name) ? 1 : 0;
   for (const it of a.items) n += functorCallCount(it, targets);
   return n;
 }

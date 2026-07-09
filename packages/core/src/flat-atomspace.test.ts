@@ -114,9 +114,9 @@ describe("FlatAtomSpace runtime store", () => {
       fc.integer({ min: 0, max: 5 }).map(gint),
       fc.constantFrom("x", "y").map(variable),
     );
-    const factArb = fc.tuple(head, fc.array(leaf, { minLength: 1, maxLength: 3 })).map(
-      ([h, args]) => A(sym(h), ...args),
-    );
+    const factArb = fc
+      .tuple(head, fc.array(leaf, { minLength: 1, maxLength: 3 }))
+      .map(([h, args]) => A(sym(h), ...args));
     const opArb = fc.oneof(
       factArb.map((atom) => ({ tag: "add" as const, atom })),
       factArb.map((atom) => ({ tag: "remove" as const, atom })),
