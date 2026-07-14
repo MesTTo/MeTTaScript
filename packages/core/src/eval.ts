@@ -62,6 +62,7 @@ import {
 import {
   type CompiledFns,
   type CompiledImpureOps,
+  compileDependentNondetGroup,
   compileEnv,
   runCompiled,
   runCompiledEffectCount,
@@ -527,6 +528,9 @@ export interface MinEnv {
   compiled?: CompiledFns | undefined;
   /** Set when an equation changed, so the compiler re-runs before the next query. */
   compileDirty?: boolean | undefined;
+  /** False when `compiled` contains only query-directed dependent search groups. Undefined retains the
+   *  historical meaning for structural environments whose map was produced by `compileEnv`. */
+  compiledComplete?: boolean | undefined;
   /** Opt-in trail-based matching (`experimental.trail`): the conjunctive `match` enumerates on a WAM-style
    *  trail (zero per-solution allocation) instead of the immutable `Bindings`/`merge` threading. Off by
    *  default; byte-identical to the reference matcher (differential-gated), falling back to it per query for
@@ -659,7 +663,11 @@ function invalidateTabling(env: MinEnv): void {
   runtimePureCache.clear();
   runtimeModedPureCache.clear();
   runtimeTableWorthCache.clear();
-  if (env.compiled !== undefined) env.compileDirty = true;
+  if (env.compiled !== undefined) {
+    env.compiled.clear();
+    env.compileDirty = true;
+    env.compiledComplete = false;
+  }
   if (env.tableSpace !== undefined) {
     env.tableSpace.clear();
     env.tablingDirty = true;
@@ -673,6 +681,7 @@ function invalidateGroundedRegistration(env: MinEnv): void {
   // those names, so this environment must stay on dispatch-aware interpretation after registration.
   env.compiled = undefined;
   env.compileDirty = undefined;
+  env.compiledComplete = undefined;
 }
 
 /** Register a sync grounded operation and invalidate analyses that may have classified its name. */
@@ -828,15 +837,59 @@ function ensureTablingAnalysis(env: MinEnv): void {
   env.tablingDirty = false;
 }
 
-/** Re-run the deterministic-core compiler if an equation changed since the last query. */
-function ensureCompiled(env: MinEnv): void {
-  if (env.compiled !== undefined && env.compileDirty) {
+/** Static rule functors mentioned as expression heads in a query. This is a conservative call set: a
+ *  data position can cause extra compilation, but a missing head can never expose stale compiled code. */
+function queryRuleFunctors(env: MinEnv, a: Atom, into: Set<string>): void {
+  const pending = [a];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (current.kind !== "expr" || current.items.length === 0) continue;
+    const head = current.items[0]!;
+    if (head.kind === "sym" && env.ruleIndex.has(head.name)) into.add(head.name);
+    for (let i = current.items.length - 1; i >= 0; i--) pending.push(current.items[i]!);
+  }
+}
+
+/** Bring the compiler map up to date for one top-level query. Answer-dependent recursive search groups
+ *  compile on demand; a query needing any other missing functor promotes the map to a complete compile. */
+function ensureCompiled(env: MinEnv, query: Atom): void {
+  if (env.compiled === undefined) {
+    ensureTablingAnalysis(env);
+    return;
+  }
+
+  const called = new Set<string>();
+  queryRuleFunctors(env, query, called);
+  if (called.size === 0) {
+    ensureTablingAnalysis(env);
+    return;
+  }
+
+  if (env.compileDirty) {
+    env.compiled.clear();
+    env.compiledComplete = false;
     specializeHO(env);
     ensureTablingAnalysis(env);
-    env.compiled = compileEnv(env);
     env.compileDirty = false;
+    called.clear();
+    queryRuleFunctors(env, query, called);
   } else {
     ensureTablingAnalysis(env);
+  }
+
+  // Existing structural environments set only `compiled` and `compileDirty=false`; their maps came from
+  // compileEnv and are complete. The runner marks its initially empty map incomplete explicitly.
+  if (env.compiledComplete !== false) return;
+
+  for (const root of called) {
+    if (env.compiled.has(root)) continue;
+    const group = compileDependentNondetGroup(env, root);
+    if (group === undefined) {
+      env.compiled = compileEnv(env);
+      env.compiledComplete = true;
+      return;
+    }
+    for (const [name, holder] of group) env.compiled.set(name, holder);
   }
 }
 
@@ -846,6 +899,7 @@ function disableTabling(env: MinEnv): void {
   env.evaluatedAtoms = new WeakSet();
   env.compiled = undefined;
   env.compileDirty = undefined;
+  env.compiledComplete = undefined;
   if (env.tableSpace !== undefined) {
     env.tableSpace.clear();
     env.pureFunctors = new Set();
@@ -5476,10 +5530,15 @@ function* mettaEvalG(
               !containsImpureHead(env, wApp, MODED_IMPURE_OPS);
           }
         }
-        // compiled fast path: deterministic static functions, including the state-threaded impure subset.
+        // Compiled fast path. A nondeterministic group runs before a profitable moded table only when a
+        // later recursive call consumes a clause-local answer field. Independent overlap such as relational
+        // Fibonacci stays table-first; dependent BFC joins avoid retaining their intermediate relation.
+        const compiledHolder = env.compiled?.get(op);
+        const preferCompiledModed =
+          compiledHolder?.kind === "nondet" && compiledHolder.preferDirectForModed;
         if (
           env.compiled !== undefined &&
-          !modedTableAdmissible &&
+          (!modedTableAdmissible || preferCompiledModed) &&
           !cur2.world.selfRules.has(op) &&
           !staticRulesChangedFor(cur2.world, op) &&
           cur2.world.selfVarRules.length === 0
@@ -5808,7 +5867,7 @@ function mettaEval(
   bnd: Bindings,
   a: Atom,
 ): [Array<[Atom, Bindings]>, St] {
-  ensureCompiled(env);
+  ensureCompiled(env, a);
   try {
     return runGenSync(mettaEvalG(env, fuel, st, bnd, a));
   } catch (e) {
@@ -5827,7 +5886,7 @@ export function mettaEvalAsync(
   a: Atom,
   signal?: AbortSignal,
 ): Promise<[Array<[Atom, Bindings]>, St]> {
-  ensureCompiled(env);
+  ensureCompiled(env, a);
   return runGenAsync(mettaEvalG(env, fuel, st, bnd, a), signal).catch((e: unknown) => {
     if (isNativeStackOverflow(e)) return stackOverflowResult(env, st, bnd, a);
     throw e;

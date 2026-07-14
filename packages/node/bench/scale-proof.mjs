@@ -3,8 +3,8 @@
 // SPDX-License-Identifier: MIT
 
 // Scale gate for real MeTTa programs. The generated cases exercise large static spaces, runtime-added
-// spaces, named spaces, count aggregation, conjunctive joins, removals, and the Hyperon-valid corpus
-// workloads touched by the audit fixes.
+// spaces, named spaces, count aggregation, conjunctive joins, removals, automatic moded tabling, and the
+// Hyperon-valid corpus workloads touched by the audit fixes.
 
 import { readFileSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
@@ -151,6 +151,21 @@ runBagValuesCase(
     (= (fib $n) 42)
     !(unique-atom (collapse (fib ${distinctFibN})))`,
   distinctFibAnswers(distinctFibN).map(String),
+  8_000,
+);
+
+runCase(
+  "moded relational fib(90)",
+  `(= (rel-fib 0 $out) 0)
+   (= (rel-fib 1 $out) 1)
+   (= (rel-fib $n $out)
+      (if (> $n 1)
+          (let* (($a (rel-fib (- $n 1) $left))
+                  ($b (rel-fib (- $n 2) $right)))
+                 (+ $a $b))
+          (empty)))
+   !(rel-fib 90 $result)`,
+  ["2880067194370816120"],
   8_000,
 );
 

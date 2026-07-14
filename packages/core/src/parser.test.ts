@@ -82,6 +82,10 @@ describe("parser", () => {
     expect(format(parse(src, tk())!)).toBe(src);
   });
 
+  it("rejects an unmatched top-level closing parenthesis without looping", () => {
+    expect(() => parseAll("!(a))", tk())).toThrow("Unexpected right bracket");
+  });
+
   it("parse∘format is identity up to atomEq for a nested program", () => {
     const t = tk();
     for (const { atom } of parseAll('(a (b $c) 3)\n!(g "s")', t)) {

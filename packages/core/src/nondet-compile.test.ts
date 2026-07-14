@@ -51,6 +51,44 @@ const BC_RULES = `
      (: ($rule $p1 $p2) $thm)))
 `;
 
+const COMMON_RESULT_RULES = `
+(= (layout-walk 0) (Box left 0))
+(= (layout-walk 0) (Box right 0))
+(= (layout-walk $n)
+   (if (> $n 0)
+       (let (Box $tag $value) (layout-walk (- $n 1))
+            (Box (S $tag) (+ $value 1)))
+       (empty)))
+(= (layout-wrap $n)
+   (let $whole (layout-walk $n)
+        (Box wrapped $whole)))
+`;
+
+const CONSTANT_RESULT_RULES = `
+(= (constant-layout 0) (Done))
+(= (constant-layout 0) (Done))
+(= (constant-layout $n)
+   (if (> $n 0)
+       (let (Done) (constant-layout (- $n 1)) (Done))
+       (empty)))
+(= (empty-layout 0) ())
+(= (empty-layout 0) ())
+(= (empty-layout $n)
+   (if (> $n 0)
+       (let () (empty-layout (- $n 1)) ())
+       (empty)))
+`;
+
+const REUSED_INPUT_RULES = `
+(= (reuse-layout 0 (Left $x)) (Box 0 (Left $x)))
+(= (reuse-layout 0 (Right $x $y)) (Box 0 (Right $x $y)))
+(= (reuse-layout $n $value)
+   (if (> $n 0)
+       (let (Box $k $same) (reuse-layout (- $n 1) $value)
+            (Box (+ $k 1) $same))
+       (empty)))
+`;
+
 describe("compiled nondet let*-chains are alpha-identical to the interpreter", () => {
   it("bc easy tier: free-proof query over a two-axiom KB", () => {
     expectAlphaIdentical(`${BC_RULES}
@@ -94,6 +132,50 @@ describe("compiled nondet let*-chains are alpha-identical to the interpreter", (
 !(search &kb (: $p (T c)))
 !(search &kb (deep k))
 `);
+  });
+
+  it("common result layouts preserve ordered duplicates and whole-result bindings", () => {
+    const src = `${COMMON_RESULT_RULES}
+!(layout-walk 2)
+!(layout-wrap 2)`;
+    expectAlphaIdentical(src);
+    expect(results(src, true).map((query) => query.map(format))).toEqual([
+      ["(Box (S (S left)) 2)", "(Box (S (S right)) 2)"],
+      ["(Box wrapped (Box (S (S left)) 2))", "(Box wrapped (Box (S (S right)) 2))"],
+    ]);
+  });
+
+  it("common result layout depths agree with the interpreter", () => {
+    fc.assert(
+      fc.property(fc.integer({ min: 0, max: 5 }), (depth) => {
+        expectAlphaIdentical(`${COMMON_RESULT_RULES}
+!(layout-walk ${depth})
+!(layout-wrap ${depth})`);
+      }),
+      { numRuns: 30 },
+    );
+  });
+
+  it("supports a common result layout with no changing fields", () => {
+    const src = `${CONSTANT_RESULT_RULES}
+!(constant-layout 3)
+!(empty-layout 3)`;
+    expectAlphaIdentical(src);
+    expect(results(src, true).map((query) => query.map(format))).toEqual([
+      ["(Done)", "(Done)"],
+      ["()", "()"],
+    ]);
+  });
+
+  it("reuses a matched input subtree as a varying result field", () => {
+    const src = `${REUSED_INPUT_RULES}
+!(reuse-layout 3 (Left payload))
+!(reuse-layout 2 (Right first second))`;
+    expectAlphaIdentical(src);
+    expect(results(src, true).map((query) => query.map(format))).toEqual([
+      ["(Box 3 (Left payload))"],
+      ["(Box 2 (Right first second))"],
+    ]);
   });
 
   it("randomized mini knowledge bases and queries agree", () => {

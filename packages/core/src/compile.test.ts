@@ -3,13 +3,15 @@
 // SPDX-License-Identifier: MIT
 import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
-import { buildEnv, initSt, mettaEval } from "./eval";
-import { type Atom, expr, sym, variable } from "./atom";
+import fc from "fast-check";
+import { addAtomToEnv, buildEnv, initSt, mettaEval } from "./eval";
+import { type Atom, expr, gint, sym, variable } from "./atom";
 import { stdTable } from "./builtins";
 import { parseAll, format } from "./parser";
 import { standardTokenizer, preludeAtoms, runProgram } from "./runner";
 import { analyzePurity } from "./tabling";
-import { compileEnv } from "./compile";
+import { compileDependentNondetGroup, compileEnv } from "./compile";
+import { TableSpace } from "./table-space";
 
 const atoms = (src: string) =>
   parseAll(src, standardTokenizer())
@@ -94,6 +96,139 @@ describe("deterministic-core compiler", () => {
   it("a match-using function is outside the pure int/bool core but compiles as nondet", () => {
     const c = compileEnv(envWith("(= (q $x) (match &self ($x) $x))"));
     expect(c.get("q")?.kind).toBe("nondet");
+  });
+
+  it("declines a nondeterministic group with a wrong-arity internal call", () => {
+    const c = compileEnv(
+      envWith(`
+(= (leaf (C $x)) (Box $x))
+(= (root $n)
+   (if (> $n 0)
+       (leaf)
+       (empty)))`),
+    );
+
+    expect(c.has("root")).toBe(false);
+  });
+
+  it("classifies independent and answer-dependent nondeterministic recursion", () => {
+    const independentEnv = envWith(`
+(= (rel-fib 0 $out) 0)
+(= (rel-fib 1 $out) 1)
+(= (rel-fib $n $out)
+   (if (> $n 1)
+       (let* (($a (rel-fib (- $n 1) $left))
+               ($b (rel-fib (- $n 2) $right)))
+              (+ $a $b))
+       (empty)))`);
+    const independent = compileEnv(independentEnv).get("rel-fib");
+    expect(independent?.kind).toBe("nondet");
+    if (independent?.kind === "nondet") expect(independent.preferDirectForModed).toBe(false);
+    expect(compileDependentNondetGroup(independentEnv, "rel-fib")).toBeUndefined();
+
+    const dependentEnv = envWith(`
+(= (dependent 0 $out) 0)
+(= (dependent $n $out)
+   (if (> $n 0)
+       (let* (($first (dependent (- $n 1) $left))
+               ($second (dependent $first $right)))
+              $second)
+       (empty)))`);
+    const dependent = compileEnv(dependentEnv).get("dependent");
+    expect(dependent?.kind).toBe("nondet");
+    if (dependent?.kind === "nondet") expect(dependent.preferDirectForModed).toBe(true);
+    expect([...compileDependentNondetGroup(dependentEnv, "dependent")!.keys()]).toEqual([
+      "dependent",
+    ]);
+  });
+
+  it("compiles dependent search on demand, promotes when needed, and invalidates partial code", () => {
+    const env = envWith(`
+(= (dependent 0 $out) 0)
+(= (dependent $n $out)
+   (if (> $n 0)
+       (let* (($first (dependent (- $n 1) $left))
+               ($second (dependent $first $right)))
+              $second)
+       (empty)))
+(= (inc $n) (+ $n 1))`);
+    env.tableSpace = new TableSpace();
+    env.tablingDirty = true;
+    env.compiled = new Map();
+    env.compileDirty = true;
+    env.compiledComplete = false;
+
+    expect(evalQuery(env, expr([sym("unknown-directive"), sym("value")])).results).toEqual([
+      "(unknown-directive value)",
+    ]);
+    expect(env.compiled.size).toBe(0);
+    expect(env.compileDirty).toBe(true);
+
+    let deep: Atom = sym("leaf");
+    for (let i = 0; i < 20_000; i++) deep = expr([sym("box"), deep]);
+    expect(() => mettaEval(env, 10_000_000, initSt(), [], deep)).not.toThrow(RangeError);
+    expect(env.compiled.size).toBe(0);
+    expect(env.compileDirty).toBe(true);
+
+    expect(evalQuery(env, expr([sym("dependent"), gint(2), variable("out")])).results).toEqual([
+      "0",
+    ]);
+    expect(env.compiled?.get("dependent")?.kind).toBe("nondet");
+    expect(env.compiled?.has("inc")).toBe(false);
+    expect(env.compileDirty).toBe(false);
+    expect(env.compiledComplete).toBe(false);
+
+    expect(evalQuery(env, expr([sym("inc"), gint(4)])).results).toEqual(["5"]);
+    expect(env.compiled?.has("inc")).toBe(true);
+    expect(env.compiledComplete).toBe(true);
+
+    addAtomToEnv(env, atoms("(= (dependent 2 $out) 99)")[0]!);
+    expect(env.compiled?.size).toBe(0);
+    expect(env.compileDirty).toBe(true);
+    expect(env.compiledComplete).toBe(false);
+    expect(evalQuery(env, expr([sym("dependent"), gint(2), variable("out")])).results).toEqual([
+      "0",
+      "99",
+    ]);
+  });
+
+  it("mixed query orders agree with the untabled interpreter", () => {
+    const rules = `
+(= (dependent 0 $out) 0)
+(= (dependent $n $out)
+   (if (> $n 0)
+       (let* (($first (dependent (- $n 1) $left))
+               ($second (dependent $first $right)))
+              $second)
+       (empty)))
+(= (inc $n) (+ $n 1))`;
+    fc.assert(
+      fc.property(
+        fc.array(
+          fc.record({
+            kind: fc.constantFrom("dependent", "inc"),
+            n: fc.integer({ min: 0, max: 5 }),
+          }),
+          { minLength: 1, maxLength: 10 },
+        ),
+        (queries) => {
+          const src =
+            rules +
+            "\n" +
+            queries
+              .map(({ kind, n }) =>
+                kind === "dependent" ? `!(dependent ${n} $out)` : `!(inc ${n})`,
+              )
+              .join("\n");
+          const run = (tabling: boolean) =>
+            runProgram(src, 10_000_000, new Map(), { tabling }).map((result) =>
+              result.results.map(format),
+            );
+          expect(run(true)).toEqual(run(false));
+        },
+      ),
+      { numRuns: 30 },
+    );
   });
 
   it("does not compile a function calling an uncompilable one (fixpoint drop)", () => {

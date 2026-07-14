@@ -27,6 +27,9 @@ export interface ControllerHost {
   viewport: Viewport;
   selection: Set<string>;
   primaryId: string | null;
+  /** Left-drag on empty canvas pans instead of rubber-band selecting. Host configuration, fixed for the
+   *  host's lifetime, unlike {@link isTracing} which changes as a playthrough runs. */
+  readonly panOnLeftDrag: boolean;
   render(): void;
   changed(): void;
   evaluate(nodeId: string): void;
@@ -145,6 +148,14 @@ export class Controller {
       return;
     }
     if (!e.shiftKey) this.clearSelection();
+    // Empty canvas. A host that owns its own panel pans here instead of banding; shift still bands, so
+    // box-select survives. Resolving it in this one branch is what keeps a drag doing a single thing: a
+    // host that bolted its own pan listener on top of this would pan *and* band at once.
+    if (this.host.panOnLeftDrag && !e.shiftKey) {
+      this.mode = "pan";
+      this.host.render();
+      return;
+    }
     this.mode = "rubber";
     this.rubberStart = this.worldOf(e);
     this.host.render();

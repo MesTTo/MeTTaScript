@@ -4,6 +4,8 @@
 
 import { describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { cliPath, mettaFixture } from "./cli-test-utils";
 
 const CLI = cliPath(import.meta.url);
@@ -72,5 +74,53 @@ describe("metta-ts --conformance", () => {
     }).toString();
 
     expect(out).toBe("[(Error foo BadType)]\n");
+  });
+
+  it("runs literal hyperpose through the worker-backed path", () => {
+    const out = execFileSync(
+      process.execPath,
+      [CLI, fixture("!(once (hyperpose ((+ 1 1) (* 1 2))))")],
+      { timeout: 60_000 },
+    ).toString();
+
+    expect(out).toBe("[2]\n");
+  });
+
+  it("loads the worker-backed path when hyperpose is used by an imported rule", () => {
+    const file = fixture("!(import! &self lib)\n!(run-hyperpose)");
+    writeFileSync(
+      join(dirname(file), "lib.metta"),
+      "(= (run-hyperpose) (once (hyperpose ((+ 1 1) (* 1 2)))))",
+    );
+
+    const out = execFileSync(process.execPath, [CLI, file], { timeout: 60_000 }).toString();
+
+    expect(out).toBe("[()]\n[2]\n");
+  });
+
+  it("runs a dynamically constructed hyperpose head through workers", () => {
+    const out = execFileSync(
+      process.execPath,
+      [
+        CLI,
+        fixture(`
+          (= (find-divisor $n $test-divisor)
+             (if (> (* $test-divisor $test-divisor) $n)
+                 $n
+                 (if (== 0 (% $n $test-divisor))
+                     $test-divisor
+                     (find-divisor $n (+ $test-divisor 1)))))
+          (= (prime? $n) (== $n (find-divisor $n 2)))
+          !(let $h (atom_concat hyper pose)
+             (once ($h ((prime? 535372570000000063)
+                        (prime? 537818110000000001)
+                        (prime? 5421844300001)
+                        (prime? 547344310000000013)))))
+        `),
+      ],
+      { timeout: 30_000 },
+    ).toString();
+
+    expect(out).toBe("[True]\n");
   });
 });

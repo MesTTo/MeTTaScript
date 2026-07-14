@@ -7,12 +7,12 @@ Run: `pnpm bench` (builds core, then deopt-aware mitata).
 
 | benchmark                                        | time/iter |
 | ------------------------------------------------ | --------- |
-| `matchAtoms` symbol mismatch                     | ~9.5 ns   |
-| `matchAtoms` nested, binds 2 vars                | ~8.2 ns   |
-| `match` over a 1000-atom space (functor-indexed) | ~6.3 µs   |
-| `fib(15)` (~1.2k calls, interpreter)             | ~18.1 ms  |
-| stdlib load + `(+ 1 2)`                          | ~233 µs   |
-| full 270-assertion oracle corpus                 | ~66 ms    |
+| `matchAtoms` symbol mismatch                     | ~11.7 ns  |
+| `matchAtoms` nested, binds 2 vars                | ~8.4 ns   |
+| `match` over a 1000-atom space (functor-indexed) | ~8.2 µs   |
+| `fib(15)` (~1.2k calls, interpreter)             | ~20.6 ms  |
+| stdlib load + `(+ 1 2)`                          | ~83.9 µs  |
+| full 270-assertion oracle corpus                 | ~77.4 ms  |
 
 Detailed sections below are historical, each measured when its optimization landed (some on a Ryzen 9 9950X). The corpus head-to-head against PeTTa is in [`RESULTS-corpus.md`](RESULTS-corpus.md).
 
@@ -166,20 +166,32 @@ The speedup is not "table everything." `fib` gets bounded table reuse because it
 
 ### Reported nondeterministic workloads
 
-`pnpm bench:nondeterminism` runs four query shapes reported by Patrick Hammer through PeTTa and MeTTa TS as subprocesses, then validates the actual result counts or embedded assertions. These are five-run medians from 2026-07-10 and include startup:
+`pnpm bench:nondeterminism` runs six reported query shapes through PeTTa and MeTTa TS as subprocesses, then validates the actual results or embedded assertions. The BFC inputs extract the exact `obc` definitions and `jarr` and `loowoz` queries from [`trueagi-io/chaining@bc9beb2`](https://github.com/trueagi-io/chaining/blob/bc9beb2672953e07971b3abecc1fe67651ecddc4/experimental/backward-via-forward/bfc-xp.metta). The validator compares every ordered proof, not only its count.
 
-| program                          |     PeTTa |  MeTTa TS | speedup |
-| -------------------------------- | --------: | --------: | ------: |
-| filtered `matespacefast` matches | 5738.1 ms | 3344.2 ms |   1.72x |
-| 22^4 `superpose` cross product   |  388.7 ms |  148.5 ms |   2.62x |
-| nondeterministic tabled `fib(7)` |  180.1 ms |   99.6 ms |   1.81x |
-| duplicate-heavy `TupleConcat`    |  178.8 ms |  101.1 ms |   1.77x |
+These are 15-run medians from 2026-07-15 on an AMD Ryzen 9 9950X with Node 22.22.1 and pnpm 11.2.2. PeTTa was the clean `6b7f52f` checkout running on SWI-Prolog 9.3.33. Times include process startup. Memory is the highest sampled process-tree RSS across the 15 runs on Linux.
 
-MeTTa TS uses its normal CLI evaluator for all four. The cross product still emits and validates all 234,256 results in order. A closed pure choice plan removes general binding allocation from that path. `unique-atom(collapse(...))` can retain first-seen choice answers or memoize a supported pure recurrence while it evaluates, but an ordinary `collapse` keeps exact order and multiplicity. Nested runtime-fact indexing and dead-result removal handle the two filtered-match shapes without changing a consumed match.
+| program                          | PeTTa ms | PeTTa MiB | MeTTa TS ms | MeTTa TS MiB | speedup |
+| -------------------------------- | -------: | --------: | ----------: | -----------: | ------: |
+| BFC `jarr`                       |    134.6 |      16.4 |       125.6 |         86.5 |   1.07x |
+| BFC `loowoz`                     |   2441.2 |      16.4 |       872.8 |        108.9 |   2.80x |
+| filtered `matespacefast` matches |   6157.9 |    3334.5 |      3568.3 |        424.0 |   1.73x |
+| 22^4 `superpose` cross product   |    357.5 |      87.9 |       147.7 |        148.8 |   2.42x |
+| nondeterministic tabled `fib(7)` |    127.8 |      16.4 |        94.1 |         79.8 |   1.36x |
+| duplicate-heavy `TupleConcat`    |    126.0 |      16.3 |        96.3 |         79.4 |   1.31x |
+
+MeTTa TS uses its normal CLI evaluator for all six. No benchmark mode or evaluator flag is selected. Static analysis sends recursive joins that consume a clause-local field from an earlier answer, such as BFC, to the nondeterministic compiler before moded answer tabling. Independent overlapping calls such as relational Fibonacci remain table-first. For BFC, generated continuations pass only the changing fields of the common `MkSized` result and rebuild the complete atom at the public evaluator boundary. Unsupported groups continue through the bounded table space or interpreter.
+
+Generated unification also applies SWI-Prolog's write-mode principle. If every slot below a structured write is first introduced at that site, the new structure cannot contain the target cell. The JIT binds it directly and trails the root. If any slot comes from an input, an earlier head position, a call argument, or an earlier result pattern, the ordinary occurs-checking bind remains. A cyclic `source($x) -> $x` regression with the consumer pattern `Wrap($x)` verifies that boundary.
+
+In a 400-run in-process `jarr` profile, `bindS` samples fell from 129 to 42 and `occursDerefS` samples from 114 to 50. An alternating same-process A/B produced identical ordered outputs and measured 1.073x on `jarr` over 200 pairs and 1.154x on `loowoz` over nine pairs. The other four official workloads measured between 1.02x and 1.63x faster; none regressed.
+
+The normal CLI process loads analyzer, host interop, overflow retry, and worker modules only when requested. A source file that directly uses `hyperpose`, or imports a rule containing it, selects the existing worker-backed evaluator automatically. The six rows above use no worker or host path.
+
+The cross product still emits and validates all 234,256 results in order. A closed pure choice plan removes general binding allocation from that path. `unique-atom(collapse(...))` can retain first-seen choice answers or memoize a supported pure recurrence while it evaluates, but an ordinary `collapse` keeps exact order and multiplicity. Nested runtime-fact indexing and dead-result removal handle the filtered-match shapes without changing a consumed match.
 
 ### Versus PeTTa (MeTTa-on-SWI-Prolog/WAM)
 
-Current standing (2026-07-09): MeTTa TS is faster than PeTTa on **all 98** shared corpus programs both engines pass, median 1.82x and geomean 1.85x. Both-pass totals are PeTTa 28.8s and MeTTa TS 15.9s. The full per-program table is in [`RESULTS-corpus.md`](RESULTS-corpus.md). The measurements and readings below are from June, before the compiled nondeterministic-search and saturation-loop phases landed; the third reading's "naive versus naive" gap is closed.
+Current standing (2026-07-15): MeTTa TS is faster than PeTTa on **all 98** shared corpus programs both engines pass, median 1.63x and geomean 1.69x. Three-run both-pass totals are PeTTa 29.0s and MeTTa TS 17.7s. The full per-program table is in [`RESULTS-corpus.md`](RESULTS-corpus.md). The measurements and readings below are from June, before the compiled nondeterministic-search and saturation-loop phases landed; the third reading's "naive versus naive" gap is closed.
 
 PeTTa numbers are full wall-clock (`time sh run.sh`, including its MeTTa-to-Prolog translation). Startup baselines: swipl 6 ms, node 45 ms.
 

@@ -95,12 +95,18 @@ function firstNumber(results: readonly Atom[]): number | null {
 export interface GrapherOptions {
   metta?: MeTTa;
   source?: string;
+  /** Left-drag on empty canvas pans instead of rubber-band selecting. For a host that gives the canvas its
+   *  own panel rather than embedding it in a scrolling article, where panning is the gesture a reader
+   *  reaches for first. Shift-drag still rubber-bands, so box-select stays available. Off by default. */
+  panOnLeftDrag?: boolean;
 }
 
 /** A visual MeTTa editor mounted in a DOM element. */
 export class MeTTaGrapher implements ControllerHost {
   readonly container: HTMLElement;
   readonly metta: MeTTa;
+  /** Whether a left-drag on empty canvas pans (part of {@link ControllerHost}). */
+  readonly panOnLeftDrag: boolean;
   graph = new Graph();
   viewport: Viewport = initialViewport();
   readonly selection = new Set<string>();
@@ -140,6 +146,7 @@ export class MeTTaGrapher implements ControllerHost {
     if (container.style.position === "") container.style.position = "relative";
     this.sharedSpace = opts.metta !== undefined;
     this.metta = opts.metta ?? new MeTTa();
+    this.panOnLeftDrag = opts.panOnLeftDrag ?? false;
     this.renderer = new Renderer(container);
     this.controller = new Controller(this);
     this.block = new BlockView(

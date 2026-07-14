@@ -116,6 +116,7 @@ function buildDefaultEnv(
     env.tablingDirty = false;
     env.compiled = new Map();
     env.compileDirty = true;
+    env.compiledComplete = false;
   }
   return env;
 }

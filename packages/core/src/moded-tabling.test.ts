@@ -2,25 +2,16 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Moded (variant) tabling memoizes a PURE call that carries free variables — a backward-chaining search's
-// own output/existential variables, e.g. the subgoal `(obc n (: $f (→ $a $b)))` — keyed by a structural
-// variant token key, replaying cached answers with fresh auxiliary variables (see `freshenModedResult`).
-// It is metta-ts's analogue of SLG/variant tabling and cuts the obc search's
-// repeated subgoals (measured 51% hit rate on the jarr goal).
-//
-// This is a DIFFERENTIAL test: it runs each program with tabling on and with tabling off and asserts the
-// two agree byte-for-byte. tabling-off is the plain, unmemoized interpreter (the ground-truth semantics), so
-// agreement proves the memoization changes nothing about WHICH answers are produced or their ORDER. The obc
-// goals are the motivating case; the free-enumeration queries `(obc n (: $x $a))` are adversarial — they
-// enumerate every proof up to a size, so they stress many distinct tabled subgoals, the auxiliary
-// metavariables introduced by the axiom schemes (a non-ground cached answer replayed with fresh variables),
-// and deep replay under outer bindings.
-import { describe, it, expect } from "vitest";
+// Moded tables memoize pure calls with free variables. Independent overlapping calls remain table-first;
+// proof-search chains whose later calls depend on earlier answers run on the lower-memory compiler first.
+// These tests pin both routes and compare their answers with the untabled interpreter.
+import { describe, it, expect, vi } from "vitest";
 import { type Atom } from "./atom";
 import { runProgram } from "./runner";
 import { format } from "./parser";
 import { canonicalize } from "./alpha";
 import { OBC } from "./obc-fixture";
+import { TableSpace } from "./table-space";
 
 const atoms = (src: string, tabling: boolean): Atom[] =>
   runProgram(src, 100_000_000, new Map(), { tabling })[0]!.results;
@@ -29,7 +20,34 @@ const fmt = (as: Atom[]): string[] => as.map(format);
 // gensym counter happened to assign compare equal (alpha-equivalence, per result, in order).
 const fmtCanon = (as: Atom[]): string[] => as.map((a) => format(canonicalize(a, new Map())));
 
-describe("moded tabling agrees with no tabling (differential oracle)", () => {
+const MODED_FIB = `
+(= (moded-fib 0 $out) 0)
+(= (moded-fib 1 $out) 1)
+(= (moded-fib $n $out)
+   (if (> $n 1)
+       (let* (($a (moded-fib (- $n 1) $left))
+               ($b (moded-fib (- $n 2) $right)))
+              (+ $a $b))
+       (empty)))
+`;
+
+describe("moded tabling path", () => {
+  it("keeps an independent compiler-eligible recurrence table-first", () => {
+    const keySpy = vi.spyOn(TableSpace.prototype, "key");
+    try {
+      const query = MODED_FIB + "\n!(moded-fib 15 $result)";
+      const on = fmt(atoms(query, true));
+      const off = fmt(atoms(query, false));
+      expect(on).toEqual(["610"]);
+      expect(on).toEqual(off);
+      expect(keySpy.mock.calls.some(([kind]) => kind === "moded")).toBe(true);
+    } finally {
+      keySpy.mockRestore();
+    }
+  });
+});
+
+describe("compiled OBC search agrees with the untabled interpreter", () => {
   // A ground result has no free variables, so tabling must reproduce it BYTE for byte.
   const agreeGround = (name: string, query: string): void =>
     it(`${name}: tabling on == off, byte-identical`, () => {
@@ -65,7 +83,7 @@ describe("moded tabling agrees with no tabling (differential oracle)", () => {
   agreeAlpha("free enumeration (obc 7)", "!(obc 7 (: $x $a))");
 });
 
-describe("moded tabling still returns the correct proofs (pins the tabled path)", () => {
+describe("compiler-first OBC search", () => {
   it("id: the textbook Łukasiewicz proof of 𝜑 → 𝜑", () => {
     expect(fmt(atoms(OBC + "\n!(obc 5 (: $x (→ 𝜑 𝜑)))", true))).toEqual([
       "(MkSized 5 (: (mp (mp ax₂ ax₁) ax₁) (→ 𝜑 𝜑)))",
@@ -73,9 +91,25 @@ describe("moded tabling still returns the correct proofs (pins the tabled path)"
   });
 
   it("jarr: both size-13 proofs, in order", () => {
-    expect(fmt(atoms(OBC + "\n!(obc 13 (: $x (→ (→ (→ 𝜑 𝜓) 𝜒) (→ 𝜓 𝜒))))", true))).toEqual([
-      "(MkSized 13 (: (mp (mp ax₂ (mp ax₁ (mp (mp ax₂ ax₂) (mp ax₁ ax₁)))) ax₁) (→ (→ (→ 𝜑 𝜓) 𝜒) (→ 𝜓 𝜒))))",
-      "(MkSized 13 (: (mp (mp ax₂ (mp (mp ax₂ (mp ax₁ ax₂)) ax₁)) (mp ax₁ ax₁)) (→ (→ (→ 𝜑 𝜓) 𝜒) (→ 𝜓 𝜒))))",
-    ]);
+    const keySpy = vi.spyOn(TableSpace.prototype, "key");
+    try {
+      expect(fmt(atoms(OBC + "\n!(obc 13 (: $x (→ (→ (→ 𝜑 𝜓) 𝜒) (→ 𝜓 𝜒))))", true))).toEqual([
+        "(MkSized 13 (: (mp (mp ax₂ (mp ax₁ (mp (mp ax₂ ax₂) (mp ax₁ ax₁)))) ax₁) (→ (→ (→ 𝜑 𝜓) 𝜒) (→ 𝜓 𝜒))))",
+        "(MkSized 13 (: (mp (mp ax₂ (mp (mp ax₂ (mp ax₁ ax₂)) ax₁)) (mp ax₁ ax₁)) (→ (→ (→ 𝜑 𝜓) 𝜒) (→ 𝜓 𝜒))))",
+      ]);
+      expect(keySpy.mock.calls.some(([kind]) => kind === "moded")).toBe(false);
+    } finally {
+      keySpy.mockRestore();
+    }
   });
+
+  it("loowoz: completes with three distinct size-19 proofs", () => {
+    const results = fmt(
+      runProgram(OBC + "\n!(obc 19 (: $x (→ (→ (→ 𝜑 𝜓) (→ 𝜑 𝜒)) (→ (→ 𝜓 𝜑) (→ 𝜓 𝜒)))))")[0]!
+        .results,
+    );
+    expect(results).toHaveLength(3);
+    expect(new Set(results).size).toBe(3);
+    expect(results.every((result) => result.startsWith("(MkSized 19 "))).toBe(true);
+  }, 30_000);
 });

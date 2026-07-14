@@ -6,10 +6,8 @@
 
 // MeTTa TS command-line runner: `metta-ts <file.metta>` prints each !-query's results.
 import { parseArgs } from "node:util";
-import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   atomEq,
   emptyExpr,
@@ -18,16 +16,20 @@ import {
   setOutputSink,
   setRawSink,
   type Atom,
+  type QueryResult,
   type ReduceResult,
   type RunOptions,
 } from "@metta-ts/core";
-import { composeHostInterops, type HostInterop } from "@metta-ts/core/host";
-import { runFile, runFileAllDirectives, readImports, runSourceAsync } from "./index";
-import { checkFile } from "./check";
+import type { HostInterop } from "@metta-ts/core/host";
+import { readImports } from "./file-imports";
 
 // Deep effectful MeTTa recursion can exceed V8's default call stack. Re-exec once with a larger stack,
 // matching the reference interpreter's iterative driver. Set METTA_TS_STACK to skip (e.g. when embedding).
-function reexecWithLargerStack(): void {
+async function reexecWithLargerStack(): Promise<never> {
+  const [{ spawnSync }, { fileURLToPath }] = await Promise.all([
+    import("node:child_process"),
+    import("node:url"),
+  ]);
   const res = spawnSync(
     process.execPath,
     ["--stack-size=8000", fileURLToPath(import.meta.url), ...process.argv.slice(2)],
@@ -36,22 +38,40 @@ function reexecWithLargerStack(): void {
   process.exit(res.status ?? 1);
 }
 
+async function runCliSource(
+  src: string,
+  fuel: number | undefined,
+  imports: Map<string, Atom[]>,
+  opts: RunOptions | undefined,
+  includeNonBang: boolean,
+): Promise<QueryResult[]> {
+  // A callable head can be constructed at runtime, so source text cannot soundly prove that `hyperpose`
+  // is unreachable. Install the worker hook for every normal CLI run; workers are created only if the
+  // evaluator reaches `(once (hyperpose ...))`.
+  const { runSource, runSourceAllDirectives } = await import("./source");
+  return includeNonBang
+    ? runSourceAllDirectives(src, fuel, imports, opts)
+    : runSource(src, fuel, imports, opts);
+}
+
 /** Run the file, buffering every byte it would print (query results plus eval-time `println!`/`print!`),
  *  and return it as one string. Buffering lets the optimistic default-stack attempt be discarded and
  *  retried under a bigger stack without a program that printed before overflowing double-printing. */
-function runToBuffer(
+
+async function runToBuffer(
   file: string,
   fuel: number | undefined,
   opts: RunOptions | undefined,
   includeNonBang: boolean,
-): string {
+): Promise<string> {
+  const src = readFileSync(file, "utf8");
+  const fileDir = dirname(resolve(file));
+  const imports = readImports(src, fileDir, dirname(fileDir));
   const buf: string[] = [];
   const prevOut = setOutputSink((line) => buf.push(line + "\n"));
   const prevRaw = setRawSink((text) => buf.push(text));
   try {
-    const results = includeNonBang
-      ? runFileAllDirectives(file, fuel, opts)
-      : runFile(file, fuel, opts);
+    const results = await runCliSource(src, fuel, imports, opts, includeNonBang);
     for (const r of results)
       buf.push(
         "[" +
@@ -104,6 +124,10 @@ async function runInteropToBuffer(
   opts: RunOptions | undefined,
   modes: { readonly py: boolean; readonly prolog: boolean },
 ): Promise<string> {
+  const [{ composeHostInterops }, { runSourceAsync }] = await Promise.all([
+    import("@metta-ts/core/host"),
+    import("./source"),
+  ]);
   const interops: HostInterop[] = [];
   const src = readFileSync(file, "utf8");
   const fileDir = dirname(resolve(file));
@@ -196,7 +220,7 @@ async function runInteropToBuffer(
   }
 }
 
-function main(): void {
+async function main(): Promise<void> {
   // CLI resource limits: `--max-steps` is the step ceiling, and `--max-stack-depth` seeds the interpreter
   // stack-depth bound a program can further tighten with `pragma!`.
   const { positionals, values } = parseArgs({
@@ -225,6 +249,7 @@ function main(): void {
   // big-stack-reexec path below. `--json` emits the Diagnostic[] as JSON to stdout; otherwise the
   // rustc-style render goes to stderr (a diagnostic, not program output). Exit 1 on any error-severity diag.
   if (values.check === true) {
+    const { checkFile } = await import("./check");
     const { text, exitCode } = checkFile(file, {
       json: values.json === true,
       undefinedSymbols: values["undefined-symbols"] === true,
@@ -262,17 +287,11 @@ function main(): void {
   // Host interop evaluates asynchronously, so it takes its own path before the sync runner and its
   // big-stack reexec. These programs push the external work over IPC rather than deep MeTTa recursion.
   if (values.py === true || values.prolog === true) {
-    runInteropToBuffer(file, fuel, opts, {
+    const output = await runInteropToBuffer(file, fuel, opts, {
       py: values.py === true,
       prolog: values.prolog === true,
-    })
-      .then((s) => {
-        process.stdout.write(s);
-      })
-      .catch((e: unknown) => {
-        process.stderr.write(String(e instanceof Error ? e.message : e) + "\n");
-        process.exit(1);
-      });
+    });
+    process.stdout.write(output);
     return;
   }
   // The child of a big-stack reexec (METTA_TS_STACK=1) already has the room, so it just runs. Otherwise
@@ -280,15 +299,18 @@ function main(): void {
   // on a short run. Only a genuine stack overflow reexecs once with an 8 MB stack, re-running from the
   // buffered start so nothing prints twice.
   if (process.env.METTA_TS_STACK !== undefined) {
-    process.stdout.write(runToBuffer(file, fuel, opts, values.conformance === true));
+    process.stdout.write(await runToBuffer(file, fuel, opts, values.conformance === true));
     return;
   }
   try {
-    process.stdout.write(runToBuffer(file, fuel, opts, values.conformance === true));
+    process.stdout.write(await runToBuffer(file, fuel, opts, values.conformance === true));
   } catch (e) {
     if (!(e instanceof RangeError)) throw e;
-    reexecWithLargerStack();
+    await reexecWithLargerStack();
   }
 }
 
-main();
+main().catch((e: unknown) => {
+  process.stderr.write(errorMessage(e) + "\n");
+  process.exit(1);
+});

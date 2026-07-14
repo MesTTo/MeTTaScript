@@ -53,7 +53,8 @@ contains `60`.
 
 Pass a whole program when the query depends on definitions. The renderer loads
 all top-level atoms into one `MeTTa` space and traces the last atom whose head is
-not `=` or `:`. Here the final `(fact 5)` is the query:
+not `=` or `:`. The normal `!` query marker is accepted. Here the final
+`!(fact 5)` is the query:
 
 ```js
 const source = `
@@ -61,7 +62,7 @@ const source = `
    (if (> $n 0)
        (* $n (fact (- $n 1)))
        1))
-(fact 5)
+!(fact 5)
 `;
 
 const gif = await renderReductionGif(source, {

@@ -142,6 +142,7 @@ export function leafAtom(word: string, tk: Tokenizer): Atom {
 function readAtom(c: Cursor, depth = 0): Atom {
   c.skipTrivia();
   const ch = c.peek();
+  if (ch === ")") throw new Error("Unexpected right bracket");
   if (ch === "(") {
     if (depth >= MAX_DEPTH) throw new Error("MeTTa expression nesting too deep");
     c.pos++;

@@ -32,6 +32,7 @@ export function compiledEnvWith(src: string) {
   const env = envWith(src);
   env.compiled = compileEnv(env);
   env.compileDirty = false;
+  env.compiledComplete = true;
   return env;
 }
 

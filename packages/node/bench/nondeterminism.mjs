@@ -8,11 +8,11 @@
 //
 // Usage:
 //   pnpm bench:nondeterminism
-//   PETTA_DIR=/path/to/PeTTa node packages/node/bench/nondeterminism.mjs --runs=5
+//   PETTA_DIR=/path/to/PeTTa pnpm bench:nondeterminism
 //   node packages/node/bench/nondeterminism.mjs --engine=ts --filter=fib
 
-import { spawnSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { arg, benchDir, cliPath } from "./bench-common.mjs";
 
@@ -20,11 +20,34 @@ const casesDir = resolve(benchDir, "nondeterminism");
 const pettaDir = resolve(process.env.PETTA_DIR ?? resolve(benchDir, "../../../../PeTTa"));
 const pettaRunner = join(pettaDir, "run.sh");
 const requestedEngine = arg("engine", "both");
-const runs = Math.max(1, Number(arg("runs", "5")));
-const timeoutMs = Number(arg("timeout", "120")) * 1000;
-const maxSteps = arg("max-steps", "1000000000");
+const runs = Number(arg("runs", "15"));
+const timeoutSeconds = Number(arg("timeout", "120"));
+const timeoutMs = timeoutSeconds * 1000;
 const filter = arg("filter", "");
+const maxOutputBytes = 1 << 27;
+const rssPollMs = 25;
 
+if (process.argv.includes("--help") || process.argv.includes("-h")) {
+  console.log(`Usage: node packages/node/bench/nondeterminism.mjs [options]
+
+Options:
+  --engine=both|ts|petta  Engines to run (default: both)
+  --runs=N                Successful samples per engine and case (default: 15)
+  --timeout=SECONDS       Per-process timeout (default: 120)
+  --filter=TEXT           Run fixture names containing TEXT
+
+Set PETTA_DIR to a PeTTa checkout containing run.sh.`);
+  process.exit(0);
+}
+
+if (!Number.isSafeInteger(runs) || runs < 1) {
+  console.error("--runs must be a positive integer");
+  process.exit(2);
+}
+if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
+  console.error("--timeout must be a positive number of seconds");
+  process.exit(2);
+}
 if (!existsSync(cliPath)) {
   console.error(`Missing MeTTa TS CLI: ${cliPath}`);
   console.error(
@@ -47,6 +70,26 @@ if ((engine === "both" || engine === "petta") && !existsSync(pettaRunner)) {
   }
   console.warn(`PeTTa not found at ${pettaDir}; running MeTTa TS only`);
   engine = "ts";
+}
+
+function describeCheckout(path) {
+  try {
+    return execFileSync("git", ["-C", path, "describe", "--always", "--dirty"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return "unversioned";
+  }
+}
+
+function defaultChildEnv(kind) {
+  const env = { ...process.env };
+  if (kind !== "ts") return env;
+  for (const key of Object.keys(env)) if (key.startsWith("METTA_")) delete env[key];
+  delete env.NODE_OPTIONS;
+  delete env.NODE_V8_COVERAGE;
+  return env;
 }
 
 const median = (values) => {
@@ -109,7 +152,76 @@ const compareIntegerStrings = (left, right) => {
 
 const fibExpected = fibDistinct(7).map(String).sort(compareIntegerStrings);
 
+function balancedTerms(output, head) {
+  const terms = [];
+  let residue = "";
+  let cursor = 0;
+  while (cursor < output.length) {
+    const start = output.indexOf(`(${head}`, cursor);
+    if (start < 0) {
+      residue += output.slice(cursor);
+      break;
+    }
+    residue += output.slice(cursor, start);
+    let depth = 0;
+    let end = start;
+    for (; end < output.length; end++) {
+      const ch = output[end];
+      if (ch === "(") depth += 1;
+      else if (ch === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          end += 1;
+          break;
+        }
+      }
+    }
+    if (depth !== 0) return { terms, error: `unterminated (${head} result` };
+    terms.push(output.slice(start, end).replace(/\s+/g, " ").trim());
+    cursor = end;
+  }
+  return { terms, residue, error: null };
+}
+
+const bfcExpected = new Map([
+  [
+    "bfc-jarr.metta",
+    [
+      "(MkSized 13 (: (mp (mp ax₂ (mp ax₁ (mp (mp ax₂ ax₂) (mp ax₁ ax₁)))) ax₁) (→ (→ (→ 𝜑 𝜓) 𝜒) (→ 𝜓 𝜒))))",
+      "(MkSized 13 (: (mp (mp ax₂ (mp (mp ax₂ (mp ax₁ ax₂)) ax₁)) (mp ax₁ ax₁)) (→ (→ (→ 𝜑 𝜓) 𝜒) (→ 𝜓 𝜒))))",
+    ],
+  ],
+  [
+    "bfc-loowoz.metta",
+    [
+      "(MkSized 19 (: (mp (mp ax₂ (mp ax₁ ax₂)) (mp (mp ax₂ (mp ax₁ (mp (mp ax₂ ax₂) (mp ax₁ ax₁)))) ax₁)) (→ (→ (→ 𝜑 𝜓) (→ 𝜑 𝜒)) (→ (→ 𝜓 𝜑) (→ 𝜓 𝜒)))))",
+      "(MkSized 19 (: (mp (mp ax₂ (mp ax₁ ax₂)) (mp (mp ax₂ (mp (mp ax₂ (mp ax₁ ax₂)) ax₁)) (mp ax₁ ax₁))) (→ (→ (→ 𝜑 𝜓) (→ 𝜑 𝜒)) (→ (→ 𝜓 𝜑) (→ 𝜓 𝜒)))))",
+      "(MkSized 19 (: (mp (mp ax₂ (mp ax₁ (mp (mp ax₂ (mp ax₁ ax₂)) (mp (mp ax₂ ax₂) (mp ax₁ ax₁))))) ax₁) (→ (→ (→ 𝜑 𝜓) (→ 𝜑 𝜒)) (→ (→ 𝜓 𝜑) (→ 𝜓 𝜒)))))",
+    ],
+  ],
+]);
+
+function validateBfc(kind, output, expected) {
+  const region = resultRegion(kind, output);
+  const target = kind === "ts" ? (region.trim().split(/\r?\n/).at(-1) ?? "") : region;
+  const extracted = balancedTerms(target, "MkSized");
+  if (extracted.error !== null) return extracted.error;
+  if (kind === "ts") {
+    const punctuation = extracted.residue.replace(/\s+/g, "");
+    const expectedPunctuation = `[${",".repeat(Math.max(0, expected.length - 1))}]`;
+    if (punctuation !== expectedPunctuation)
+      return `unexpected content in final result group: ${extracted.residue.trim().slice(0, 200)}`;
+  } else if (!/^\s*(?:\$_[A-Za-z0-9]+\s*)?$/.test(extracted.residue)) {
+    return `unexpected content around proof results: ${extracted.residue.trim().slice(0, 200)}`;
+  }
+  return firstMismatch(extracted.terms, expected);
+}
+
 const validators = new Map([
+  ...[...bfcExpected].map(([file, expected]) => [
+    file,
+    (kind, output) => validateBfc(kind, output, expected),
+  ]),
   [
     "superpose-cross-product.metta",
     (kind, output) => firstMismatch(numericResults(kind, output), crossProductExpected),
@@ -132,61 +244,187 @@ const validators = new Map([
   ],
 ]);
 
+function processTreeRssKb(rootPid) {
+  if (process.platform !== "linux") return null;
+  const pending = [rootPid];
+  const seen = new Set();
+  let total = 0;
+  while (pending.length > 0) {
+    const pid = pending.pop();
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    try {
+      const status = readFileSync(`/proc/${pid}/status`, "utf8");
+      const rss = /^VmRSS:\s+(\d+)\s+kB$/m.exec(status);
+      if (rss !== null) total += Number(rss[1]);
+    } catch {
+      continue;
+    }
+    try {
+      const children = readFileSync(`/proc/${pid}/task/${pid}/children`, "utf8").trim();
+      if (children !== "") pending.push(...children.split(/\s+/).map(Number));
+    } catch {
+      // A process can exit between its status and children reads.
+    }
+  }
+  return total;
+}
+
+function stopProcessTree(child, signal) {
+  if (child.pid === undefined) return;
+  try {
+    if (process.platform !== "win32") process.kill(-child.pid, signal);
+    else child.kill(signal);
+  } catch {
+    // The child may have exited between the timer and signal.
+  }
+}
+
 function classify(kind, file, result, ms) {
   const output = (result.stdout ?? "") + (result.stderr ?? "");
-  const timedOut = result.signal === "SIGTERM" || result.error?.code === "ETIMEDOUT";
   const checks = (output.match(/✅/g) ?? []).length;
   const failures = (output.match(/❌/g) ?? []).length;
-  if (timedOut) return { status: "timeout", ms, detail: `${timeoutMs / 1000}s limit` };
+  const base = { ms, peakRssKb: result.peakRssKb };
+  if (result.timedOut) return { ...base, status: "timeout", detail: `${timeoutMs / 1000}s limit` };
+  if (result.outputLimit)
+    return { ...base, status: "error", detail: `${maxOutputBytes >> 20} MiB output limit` };
   if (result.error !== undefined)
-    return { status: "error", ms, detail: String(result.error.message ?? result.error) };
+    return { ...base, status: "error", detail: String(result.error.message ?? result.error) };
   if (result.status !== 0)
-    return { status: "error", ms, detail: `exit ${result.status}: ${output.trim().slice(-500)}` };
-  if (failures > 0) return { status: "fail", ms, detail: `${failures} failed assertion(s)` };
+    return {
+      ...base,
+      status: "error",
+      detail: `exit ${result.status}: ${output.trim().slice(-500)}`,
+    };
+  if (failures > 0) return { ...base, status: "fail", detail: `${failures} failed assertion(s)` };
   const validator = validators.get(basename(file));
   const validationError = validator?.(kind, output) ?? null;
-  if (validationError !== null) return { status: "fail", ms, detail: validationError };
+  if (validationError !== null) return { ...base, status: "fail", detail: validationError };
   if (checks === 0 && validator === undefined)
-    return { status: "fail", ms, detail: "no assertion or output validator ran" };
+    return { ...base, status: "fail", detail: "no assertion or output validator ran" };
   return {
+    ...base,
     status: "pass",
-    ms,
     detail: checks > 0 ? `${checks} assertion(s)` : "validated output",
   };
 }
 
-function runOnce(kind, file) {
+async function runOnce(kind, file) {
   const command = kind === "ts" ? process.execPath : "sh";
-  const args =
-    kind === "ts"
-      ? ["--stack-size=8000", cliPath, `--max-steps=${maxSteps}`, file]
-      : [pettaRunner, file];
+  const args = kind === "ts" ? [cliPath, file] : [pettaRunner, file];
   const start = performance.now();
-  const result = spawnSync(command, args, {
+  const child = spawn(command, args, {
     cwd: kind === "ts" ? undefined : pettaDir,
-    encoding: "utf8",
-    env: { ...process.env, ...(kind === "ts" ? { METTA_TS_STACK: "1" } : {}) },
-    maxBuffer: 1 << 27,
-    timeout: timeoutMs,
+    env: defaultChildEnv(kind),
+    detached: process.platform !== "win32",
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  return classify(kind, file, result, performance.now() - start);
+  let stdout = "";
+  let stderr = "";
+  let outputBytes = 0;
+  let outputLimit = false;
+  let timedOut = false;
+  let error;
+  let peakRssKb = processTreeRssKb(child.pid);
+
+  const append = (target, chunk) => {
+    outputBytes += chunk.length;
+    if (outputBytes > maxOutputBytes) {
+      outputLimit = true;
+      stopProcessTree(child, "SIGTERM");
+      return target;
+    }
+    return target + chunk.toString("utf8");
+  };
+  child.stdout.on("data", (chunk) => {
+    stdout = append(stdout, chunk);
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr = append(stderr, chunk);
+  });
+  child.on("error", (cause) => {
+    error = cause;
+  });
+
+  const rssTimer = setInterval(() => {
+    const rss = processTreeRssKb(child.pid);
+    if (rss !== null && (peakRssKb === null || rss > peakRssKb)) peakRssKb = rss;
+  }, rssPollMs);
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    stopProcessTree(child, "SIGTERM");
+  }, timeoutMs);
+  let forceKill;
+  const armForceKill = () => {
+    if (forceKill !== undefined) return;
+    forceKill = setTimeout(() => stopProcessTree(child, "SIGKILL"), 1_000);
+  };
+  const terminationWatcher = setInterval(() => {
+    if (timedOut || outputLimit) armForceKill();
+  }, 25);
+
+  const { status, signal } = await new Promise((resolveClose) => {
+    child.once("close", (status, signal) => resolveClose({ status, signal }));
+  });
+  clearInterval(rssTimer);
+  clearInterval(terminationWatcher);
+  clearTimeout(timeout);
+  clearTimeout(forceKill);
+  return classify(
+    kind,
+    file,
+    { stdout, stderr, status, signal, error, timedOut, outputLimit, peakRssKb },
+    performance.now() - start,
+  );
 }
 
-function runCase(kind, file) {
+async function runCase(kind, file) {
   const attempts = [];
   for (let i = 0; i < runs; i++) {
-    const attempt = runOnce(kind, file);
+    const attempt = await runOnce(kind, file);
     attempts.push(attempt);
     if (attempt.status !== "pass") break;
   }
+  return summarizeAttempts(attempts);
+}
+
+function summarizeAttempts(attempts) {
   const successful = attempts.filter((attempt) => attempt.status === "pass");
   const complete = successful.length === runs;
+  const last = attempts.at(-1);
+  const peakRssValues = successful
+    .map((attempt) => attempt.peakRssKb)
+    .filter((value) => value !== null);
   return {
     attempts,
-    status: complete ? "pass" : attempts.at(-1).status,
-    detail: complete ? `${runs} pass` : attempts.at(-1).detail,
+    status: complete
+      ? "pass"
+      : last?.status === "pass"
+        ? "incomplete"
+        : (last?.status ?? "not-run"),
+    detail: complete
+      ? `${runs} pass`
+      : last?.status === "pass"
+        ? `${successful.length}/${runs} pass; paired engine stopped`
+        : (last?.detail ?? "no attempts"),
     medianMs: complete ? median(successful.map((attempt) => attempt.ms)) : null,
+    peakRssKb: peakRssValues.length === 0 ? null : Math.max(...peakRssValues),
   };
+}
+
+async function runPair(file) {
+  const attempts = { petta: [], ts: [] };
+  for (let i = 0; i < runs; i++) {
+    const order = i % 2 === 0 ? ["petta", "ts"] : ["ts", "petta"];
+    let failed = false;
+    for (const kind of order) {
+      const attempt = await runOnce(kind, file);
+      attempts[kind].push(attempt);
+      if (attempt.status !== "pass") failed = true;
+    }
+    if (failed) return [summarizeAttempts(attempts.petta), summarizeAttempts(attempts.ts)];
+  }
+  return [summarizeAttempts(attempts.petta), summarizeAttempts(attempts.ts)];
 }
 
 const files = readdirSync(casesDir)
@@ -194,30 +432,47 @@ const files = readdirSync(casesDir)
   .filter((file) => filter === "" || file.includes(filter))
   .sort();
 
+if (files.length === 0) {
+  console.error(
+    filter === "" ? "No benchmark cases found" : `No benchmark cases match --filter=${filter}`,
+  );
+  process.exit(2);
+}
+
 const pad = (value, width) => String(value).padEnd(width);
 const padLeft = (value, width) => String(value).padStart(width);
 const displayMs = (run) => {
   if (run === null) return "-";
   return run.medianMs === null ? `${run.status}*` : run.medianMs.toFixed(1);
 };
+const displayRss = (run) => {
+  if (run?.peakRssKb === null || run?.peakRssKb === undefined) return "-";
+  return (run.peakRssKb / 1024).toFixed(1);
+};
 
 console.log("MeTTa TS nondeterminism benchmark");
 console.log(`  cases=${files.length} runs=${runs} timeout=${timeoutMs / 1000}s engine=${engine}`);
 if (engine !== "ts") console.log(`  PeTTa=${pettaDir}`);
+if (engine !== "ts") console.log(`  PeTTa revision=${describeCheckout(pettaDir)}`);
 console.log("");
 console.log(
-  pad("case", 36),
+  pad("case", 34),
   padLeft("PeTTa ms", 12),
+  padLeft("MiB", 8),
   padLeft("MeTTa TS ms", 14),
+  padLeft("MiB", 8),
   padLeft("speedup", 10),
 );
-console.log("-".repeat(76));
+console.log("-".repeat(90));
 
 let failed = false;
 for (const file of files) {
   const path = join(casesDir, file);
-  const petta = engine === "ts" ? null : runCase("petta", path);
-  const ts = engine === "petta" ? null : runCase("ts", path);
+  let petta = null;
+  let ts = null;
+  if (engine === "both") [petta, ts] = await runPair(path);
+  else if (engine === "petta") petta = await runCase("petta", path);
+  else ts = await runCase("ts", path);
   const speedup =
     petta !== null && petta.medianMs !== null && ts !== null && ts.medianMs !== null
       ? petta.medianMs / ts.medianMs
@@ -225,16 +480,26 @@ for (const file of files) {
   failed ||= petta?.status !== undefined && petta.status !== "pass";
   failed ||= ts?.status !== undefined && ts.status !== "pass";
   console.log(
-    pad(basename(file, ".metta"), 36),
+    pad(basename(file, ".metta"), 34),
     padLeft(displayMs(petta), 12),
+    padLeft(displayRss(petta), 8),
     padLeft(displayMs(ts), 14),
+    padLeft(displayRss(ts), 8),
     padLeft(speedup === null ? "-" : `${speedup.toFixed(2)}x`, 10),
   );
   if (petta !== null && petta.status !== "pass") console.log(`  PeTTa: ${petta.detail}`);
   if (ts !== null && ts.status !== "pass") console.log(`  MeTTa TS: ${ts.detail}`);
+  if (petta !== null)
+    console.log(
+      `  PeTTa samples: ${petta.attempts.map((attempt) => attempt.ms.toFixed(1)).join(", ")} ms`,
+    );
+  if (ts !== null)
+    console.log(
+      `  MeTTa TS samples: ${ts.attempts.map((attempt) => attempt.ms.toFixed(1)).join(", ")} ms`,
+    );
 }
 
 console.log(
-  "\nTimings are subprocess medians and include runtime startup. speedup = PeTTa / MeTTa TS.",
+  "\nTimings are subprocess medians and include runtime startup. Both-engine runs alternate engine order between paired attempts. Memory is the maximum sampled process-tree RSS across runs on Linux. speedup = PeTTa / MeTTa TS.",
 );
 if (failed) process.exitCode = 1;

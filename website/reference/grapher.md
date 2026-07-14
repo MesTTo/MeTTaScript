@@ -55,11 +55,16 @@ import { MeTTaGrapher } from "@metta-ts/grapher";
 const editor = new MeTTaGrapher(document.getElementById("app")!, { source: "(+ 10 (* 25 2))" });
 ```
 
-`GrapherOptions` accepts `{ source?: string; metta?: MeTTa }`. Pass an existing
-`MeTTa` when the editor should share its space. The embedded editor on each
-docs page also stores its live instance on the canvas element
+`GrapherOptions` accepts `{ source?: string; metta?: MeTTa; panOnLeftDrag?: boolean }`.
+Pass an existing `MeTTa` when the editor should share its space. The embedded
+editor on each docs page also stores its live instance on the canvas element
 (`document.querySelector(".mg-canvas").grapher`), so you can drive it from the
 console.
+
+Set `panOnLeftDrag` when the canvas gets its own panel rather than sitting in a
+scrolling article, and a left-drag on empty canvas will pan instead of
+rubber-band selecting. Shift-drag still rubber-bands, so you keep box-select.
+Leave it off (the default) to get the editor gestures the docs pages use.
 
 ### Loading and reading
 

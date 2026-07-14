@@ -23,12 +23,17 @@ import {
   emptyExpr,
 } from "./atom";
 import { type CellVar, mkCell, derefCell, occursCell, unifyCellOccurs } from "./trail";
-import { type JitGroup, type Slim, compileJitGroup, jitRuntime } from "./nondet-jit";
+import {
+  type JitGroup,
+  type JitSearchState,
+  type Slim,
+  compileJitGroup,
+  jitRuntime,
+} from "./nondet-jit";
 import { type Bindings, emptyBindings, prependValRaw, hasLoop, lookupVal } from "./bindings";
 import { addVarBinding, matchAtoms, matchAtomsScoped, merge } from "./match";
 import { instantiate } from "./instantiate";
 import { IMPURE_OPS } from "./tabling";
-import { readEnv } from "./env";
 import { type IntVal, addInt, subInt, mulInt, intDiv, intMod, isZero, cmpIntVal } from "./number";
 import { callGrounded } from "./builtins";
 import { type MinEnv, type St } from "./eval";
@@ -138,6 +143,9 @@ interface NondetHolder {
   kind: "nondet";
   arity: number;
   clauseCount: number;
+  /** Prefer direct depth-first search when a later recursive call consumes a clause-local field
+   *  produced by an earlier answer. Independent overlapping calls retain table-first evaluation. */
+  preferDirectForModed: boolean;
   run: (
     env: MinEnv,
     partAtoms: readonly Atom[],
@@ -941,10 +949,63 @@ function compileSymbolic(env: MinEnv, functor: string): SymbolicHolder | undefin
 // interleaving); that is the impure-VM precedent: results stay deterministic and alpha-equivalent,
 // the equality the oracle and LeaTTa check.
 
-// A compiled search that exceeds this many clause dispatches bails to the interpreter, whose fuel
-// budget then governs: the collect-all loop itself has no fuel, and compiled code must never turn a
-// fuel-bounded divergence into a hang.
+// Past this hedge, a compiled search continues only while active recursive calls carry a dynamic
+// well-foundedness certificate. Finite sibling breadth may exceed the hedge; an unproven recurrence
+// bails to the interpreter, whose fuel budget governs it.
 const NONDET_CALL_CAP = 4_000_000;
+
+interface AtomRecurrenceFrame {
+  readonly fn: string;
+  readonly positions: readonly number[];
+  readonly values: readonly IntVal[];
+}
+
+const naturalAtomInt = (atom: Atom | undefined): IntVal | undefined =>
+  atom?.kind === "gnd" && atom.value.g === "int" && cmpIntVal(atom.value.n, 0) >= 0
+    ? atom.value.n
+    : undefined;
+
+function enterAtomNaturalRecurrence(
+  active: AtomRecurrenceFrame[],
+  fn: string,
+  args: readonly Atom[],
+): AtomRecurrenceFrame | undefined {
+  let previous: AtomRecurrenceFrame | undefined;
+  for (let i = active.length - 1; i >= 0; i--)
+    if (active[i]!.fn === fn) {
+      previous = active[i];
+      break;
+    }
+
+  if (previous === undefined) {
+    const positions: number[] = [];
+    const values: IntVal[] = [];
+    for (let i = 0; i < args.length; i++) {
+      const value = naturalAtomInt(args[i]);
+      if (value !== undefined) {
+        positions.push(i);
+        values.push(value);
+      }
+    }
+    const frame = { fn, positions, values };
+    active.push(frame);
+    return frame;
+  }
+
+  if (previous.positions.length === 0) return undefined;
+  const values: IntVal[] = [];
+  let order = 0;
+  for (let i = 0; i < previous.positions.length; i++) {
+    const value = naturalAtomInt(args[previous.positions[i]!]);
+    if (value === undefined) return undefined;
+    values.push(value);
+    if (order === 0) order = cmpIntVal(value, previous.values[i]!);
+  }
+  if (order >= 0) return undefined;
+  const frame = { fn, positions: previous.positions, values };
+  active.push(frame);
+  return frame;
+}
 
 type NondetCall =
   | { readonly tag: "call"; readonly fn: string; readonly args: readonly Atom[] }
@@ -1116,6 +1177,58 @@ function nondetUnwrap(env: MinEnv, group: ReadonlySet<string>, rhs: Atom): Nonde
 function nondetBodyHasCalls(body: NondetBody): boolean {
   if (body.tag === "if") return nondetBodyHasCalls(body.then) || nondetBodyHasCalls(body.els);
   return body.goals.length > 0 || body.tail.tag === "call" || body.tail.tag === "match";
+}
+
+function nondetCallArityOk(call: NondetCall, arityByFn: ReadonlyMap<string, number>): boolean {
+  return call.tag !== "call" || call.args.length === arityByFn.get(call.fn);
+}
+
+/** Keep wrong-arity calls on the evaluator path, where they retain normal irreducible-call semantics. */
+function nondetBodyCallAritiesOk(
+  body: NondetBody,
+  arityByFn: ReadonlyMap<string, number>,
+): boolean {
+  if (body.tag === "if")
+    return (
+      nondetBodyCallAritiesOk(body.then, arityByFn) && nondetBodyCallAritiesOk(body.els, arityByFn)
+    );
+  if (!body.goals.every((goal) => nondetCallArityOk(goal.call, arityByFn))) return false;
+  return body.tail.tag !== "call" || nondetCallArityOk(body.tail, arityByFn);
+}
+
+const callAtoms = (call: NondetCall): readonly Atom[] =>
+  call.tag === "call" ? call.args : [call.space, call.pattern, call.template];
+
+const atomsUseVars = (atoms: readonly Atom[], names: ReadonlySet<string>): boolean =>
+  atoms.some((atom) => atomVars(atom).some((name) => names.has(name)));
+
+/** Detect a dependent search join. A variable absent from the clause head but introduced in one goal's
+ *  call or result pattern is a clause-local answer field. If a later recursive call consumes it, keys fan out
+ *  with the prior answer instead of repeating an input-only subproblem. Direct DFS avoids retaining that
+ *  intermediate answer relation. Independent calls such as fib(n-1) and fib(n-2) remain table-first. */
+function nondetBodyHasAnswerDependentCall(
+  body: NondetBody,
+  headVars: ReadonlySet<string>,
+): boolean {
+  if (body.tag === "if")
+    return (
+      nondetBodyHasAnswerDependentCall(body.then, headVars) ||
+      nondetBodyHasAnswerDependentCall(body.els, headVars)
+    );
+
+  const known = new Set(headVars);
+  const produced = new Set<string>();
+  for (const goal of body.goals) {
+    const atoms = callAtoms(goal.call);
+    if (goal.call.tag === "call" && atomsUseVars(atoms, produced)) return true;
+    for (const atom of [...atoms, goal.pat])
+      for (const name of atomVars(atom))
+        if (!known.has(name)) {
+          known.add(name);
+          produced.add(name);
+        }
+  }
+  return body.tail.tag === "call" && atomsUseVars(body.tail.args, produced);
 }
 
 /** Whether a body queries a space via `(match ...)`. A group whose search is pure rule recursion (no
@@ -1301,13 +1414,18 @@ function discoverNondetGroup(env: MinEnv, root: string): Set<string> {
 // `(if guard then else)` size guards and the integer arithmetic (`(- $s 2)`, `(+ (+ $fs $xs) 1)`) of the
 // proof-size-bounded chainers, evaluated through the interpreter's own grounded ops for byte-identity.
 // Returns undefined (bail to the interpreter) if any group functor is outside the subset.
-function compileNondetGroup(env: MinEnv, root: string): Map<string, NondetHolder> | undefined {
+function compileNondetGroup(
+  env: MinEnv,
+  root: string,
+  requireDirectForModed = false,
+): Map<string, NondetHolder> | undefined {
   if (env.varRulesVar.length !== 0) return undefined;
   if ((env.ruleIndex.get(root)?.length ?? 0) === 0) return undefined;
   const group = discoverNondetGroup(env, root);
   const clausesByFn = new Map<string, NondetClause[]>();
   const arityByFn = new Map<string, number>();
   let anyCalls = false;
+  let preferDirectForModed = false;
   for (const fn of group) {
     const eqs = env.ruleIndex.get(fn);
     if (eqs === undefined || eqs.length === 0) return undefined;
@@ -1324,15 +1442,21 @@ function compileNondetGroup(env: MinEnv, root: string): Map<string, NondetHolder
       const body = nondetUnwrap(env, group, rhs);
       if (body === undefined) return undefined;
       if (nondetBodyHasCalls(body)) anyCalls = true;
+      if (nondetBodyHasAnswerDependentCall(body, new Set(atomVars(lhs))))
+        preferDirectForModed = true;
       clauses.push({ lhs, body });
     }
     if (arity === undefined) return undefined;
     clausesByFn.set(fn, clauses);
     arityByFn.set(fn, arity);
   }
+  for (const clauses of clausesByFn.values())
+    if (!clauses.every((clause) => nondetBodyCallAritiesOk(clause.body, arityByFn)))
+      return undefined;
   // A group with template-only clauses is compileSymbolic's job; this holder earns its keep only when
   // bodies actually search.
   if (!anyCalls) return undefined;
+  if (requireDirectForModed && !preferDirectForModed) return undefined;
 
   const makeRun =
     (entry: string) =>
@@ -1343,14 +1467,14 @@ function compileNondetGroup(env: MinEnv, root: string): Map<string, NondetHolder
       ops: CompiledImpureOps,
       fuel?: number,
     ): CompiledRunResult | undefined => {
-      // The dispatch cap mirrors the caller's fuel when that is the larger bound (a benchmark's generous
-      // step budget must not be cut down to the fixed hedge), and stays at the hedge otherwise, so a
-      // fuel-bounded divergence still cannot hang in compiled code.
+      // Honor a caller-provided search allowance above the fixed hedge. Once that allowance is spent,
+      // compiled recursion continues only while the active call path proves a natural-number descent.
       const cap = fuel === undefined || fuel < NONDET_CALL_CAP ? NONDET_CALL_CAP : fuel;
       const matchSolutions = ops.matchSolutions;
       if (matchSolutions === undefined) return undefined;
       const ctr = { c: st.counter };
       let dispatches = 0;
+      const active: AtomRecurrenceFrame[] = [];
       const world = st.world;
 
       // Deep resolution through the accumulated bindings (miniKanren's walk*): a goal can bind a
@@ -1493,7 +1617,9 @@ function compileNondetGroup(env: MinEnv, root: string): Map<string, NondetHolder
       };
 
       function runCall(fn: string, args: readonly Atom[]): Array<readonly [Atom, Bindings]> {
-        if (++dispatches > cap) throw BAIL;
+        const guarded = ++dispatches > cap;
+        const guardFrame = guarded ? enterAtomNaturalRecurrence(active, fn, args) : undefined;
+        if (guarded && guardFrame === undefined) throw BAIL;
         const cls = clausesByFn.get(fn);
         if (cls === undefined) throw BAIL;
         const app = expr([sym(fn), ...args]);
@@ -1504,6 +1630,7 @@ function compileNondetGroup(env: MinEnv, root: string): Map<string, NondetHolder
           for (const b0 of matchAtomsScoped(clause.lhs, app, suffix))
             if (!hasLoop(b0)) execBody(clause.body, b0, suffix, out);
         }
+        if (guarded) active.pop();
         return out;
       }
 
@@ -1533,7 +1660,7 @@ function compileNondetGroup(env: MinEnv, root: string): Map<string, NondetHolder
       _ops?: CompiledImpureOps,
       fuel?: number,
     ): CompiledRunResult | undefined => {
-      // The dispatch cap mirrors the caller's fuel when that is the larger bound (see makeRun).
+      // Match the copying runner's fixed hedge and caller-provided search allowance.
       const cap = fuel === undefined || fuel < NONDET_CALL_CAP ? NONDET_CALL_CAP : fuel;
       // The trail: bound cells in bind order; undoing to a mark pops and clears each cell's slot.
       const cellTrail: CellVar[] = [];
@@ -1543,6 +1670,7 @@ function compileNondetGroup(env: MinEnv, root: string): Map<string, NondetHolder
       // lockstep depends on, per-dispatch only) is untouched by how many answer variables get named.
       let cellNameC = 0;
       let dispatches = 0;
+      const active: AtomRecurrenceFrame[] = [];
       const results: CompiledAtomResult[] = [];
       const queryVars = atomVars(expr(partAtoms as Atom[]));
 
@@ -1730,7 +1858,17 @@ function compileNondetGroup(env: MinEnv, root: string): Map<string, NondetHolder
       };
 
       function runCall(fn: string, args: readonly Atom[], k: (r: Atom) => void): void {
-        if (++dispatches > cap) throw BAIL;
+        const guarded = ++dispatches > cap;
+        const guardFrame = guarded ? enterAtomNaturalRecurrence(active, fn, args) : undefined;
+        if (guarded && guardFrame === undefined) throw BAIL;
+        const emit =
+          guardFrame === undefined
+            ? k
+            : (result: Atom) => {
+                active.pop();
+                k(result);
+                active.push(guardFrame);
+              };
         const cls = skelsByFn.get(fn);
         if (cls === undefined) throw BAIL;
         for (const clause of cls) {
@@ -1745,9 +1883,10 @@ function compileNondetGroup(env: MinEnv, root: string): Map<string, NondetHolder
               ok = false;
               break;
             }
-          if (ok) execBody(clause.body, frame, k);
+          if (ok) execBody(clause.body, frame, emit);
           while (cellTrail.length > m) cellTrail.pop()!.b = undefined;
         }
+        if (guarded) active.pop();
       }
 
       try {
@@ -1791,13 +1930,12 @@ function compileNondetGroup(env: MinEnv, root: string): Map<string, NondetHolder
   );
   // A match-free group's clauses compile to skeletons once, here, and every run dispatches over them.
   const skelsByFn = matchFree ? compileSkels(clausesByFn) : undefined;
-  // Specialized clause code for the group (nondet-jit): the same search as the skeleton interpreter with
-  // the per-node dispatch compiled away. Unavailable under a CSP without 'unsafe-eval' (new Function
-  // throws), or with METTA_TS_NOJIT=1 for A/B measurement; the skeleton interpreter then runs unchanged.
+  // Specialized clause code for the group: the same search as the skeleton interpreter with per-node
+  // dispatch compiled away. Under a CSP, new Function throws and compilation declines this group.
   const jitGroup =
-    skelsByFn !== undefined && readEnv("METTA_TS_NOJIT") !== "1"
-      ? compileJitGroup(skelsByFn, arityByFn, BAIL)
-      : undefined;
+    skelsByFn === undefined
+      ? undefined
+      : compileJitGroup(skelsByFn, arityByFn, BAIL, preferDirectForModed);
 
   // The boundary wrapper for a JIT'd group: entry arguments convert to slim terms once, each answer
   // materializes once (with the query-variable bindings extracted from the entry cells), and the
@@ -1812,17 +1950,19 @@ function compileNondetGroup(env: MinEnv, root: string): Map<string, NondetHolder
       fuel?: number,
     ): CompiledRunResult | undefined => {
       const cap = fuel === undefined || fuel < NONDET_CALL_CAP ? NONDET_CALL_CAP : fuel;
-      const stBox = { c: st.counter, d: 0, cap };
-      const results: CompiledAtomResult[] = [];
       const queryVars = atomVars(expr(partAtoms as Atom[]));
-      const entryCells = new Map<string, Slim>();
-      const args = partAtoms.map((a) => jitRuntime.slimOfAtom(a, entryCells));
-      const namer = { c: 0 };
-      try {
-        jg.call(
-          entry,
-          args,
-          (r) => {
+      const attempt = (
+        strategy: "deferred" | "direct" | "frontier",
+      ): CompiledRunResult | undefined => {
+        const stBox: JitSearchState = { c: st.counter, d: 0, cap, active: [] };
+        const results: CompiledAtomResult[] = [];
+        const entryCells = new Map<string, Slim>();
+        const args = partAtoms.map((a) => jitRuntime.slimOfAtom(a, entryCells));
+        const namer = { c: 0 };
+        try {
+          if (strategy === "frontier" && jg.prepareFrontier?.(entry, args, stBox) !== true)
+            return undefined;
+          const emit = (r: Slim): void => {
             let bnd = emptyBindings;
             for (const v of queryVars) {
               const cell = entryCells.get(v);
@@ -1832,14 +1972,18 @@ function compileNondetGroup(env: MinEnv, root: string): Map<string, NondetHolder
               bnd = prependValRaw(bnd, v, jitRuntime.atomOfSlim(d, namer));
             }
             results.push({ atom: jitRuntime.atomOfSlim(r, namer), bnd });
-          },
-          stBox,
-        );
-        return { results, counterDelta: stBox.c - st.counter };
-      } catch (e) {
-        if (e === BAIL || e instanceof RangeError) return undefined;
-        throw e;
-      }
+          };
+          if (strategy === "deferred") {
+            if (jg.tryDeferred?.(entry, args, emit, stBox) !== true) return undefined;
+          } else jg.call(entry, args, emit, stBox);
+          return { results, counterDelta: stBox.c - st.counter };
+        } catch (e) {
+          if (e === BAIL || e instanceof RangeError) return undefined;
+          throw e;
+        }
+      };
+
+      return attempt("direct") ?? attempt("frontier");
     };
 
   const holders = new Map<string, NondetHolder>();
@@ -1848,6 +1992,7 @@ function compileNondetGroup(env: MinEnv, root: string): Map<string, NondetHolder
       kind: "nondet",
       arity: arityByFn.get(fn)!,
       clauseCount: clausesByFn.get(fn)!.length,
+      preferDirectForModed,
       run:
         jitGroup !== undefined
           ? makeJitRun(fn, jitGroup)
@@ -1856,6 +2001,17 @@ function compileNondetGroup(env: MinEnv, root: string): Map<string, NondetHolder
             : makeRun(fn),
     });
   return holders;
+}
+
+/** Compile one answer-dependent recursive search group for query-directed dispatch. Independent
+ *  overlapping recursion stays on moded tabling and returns undefined, so the caller can use the full
+ *  compiler when the query needs another compiled fragment. */
+export function compileDependentNondetGroup(env: MinEnv, root: string): CompiledFns | undefined {
+  const group = compileNondetGroup(env, root, true);
+  if (group === undefined) return undefined;
+  const compiled: CompiledFns = new Map();
+  for (const [name, holder] of group) compiled.set(name, holder);
+  return compiled;
 }
 
 // ---------- deterministic impure body compiler ----------
