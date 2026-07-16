@@ -4,6 +4,7 @@
 
 import { canonInt, type IntVal } from "./number";
 import type { ScopeId } from "./trace";
+import type { GroundedCallContext } from "./builtins";
 
 /**
  * The MeTTa term model. A discriminated union on `kind` (convention C1).
@@ -121,7 +122,10 @@ export function sameVariable(a: VarAtom, b: VarAtom): boolean {
  *  Promise suspends the async runner (as a named async op does) and is refused by the sync runner;
  *  it never widens the atom record, since `exec` stays a single slot. May throw / reject for a
  *  runtime error. */
-export type GroundedExec = (args: readonly Atom[]) => readonly Atom[] | Promise<readonly Atom[]>;
+export type GroundedExec = (
+  args: readonly Atom[],
+  context?: GroundedCallContext,
+) => readonly Atom[] | Promise<readonly Atom[]>;
 export type GroundedMatch = (other: Atom) => readonly unknown[];
 
 /** Structural equality of grounded values (LeaTTa `Ground.BEq`). */

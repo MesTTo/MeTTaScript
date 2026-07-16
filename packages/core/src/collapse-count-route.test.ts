@@ -9,6 +9,7 @@ import { type Atom } from "./atom";
 import { setOutputSink, setRawSink, stdTable } from "./builtins";
 import { addAtomToEnv, buildEnv, initSt, mettaEval, type St } from "./eval";
 import { withBuiltinModules } from "./extensions";
+import { RevisionMap } from "./revision-collection";
 import { parseAll, format } from "./parser";
 import { pettaStdlibAtoms } from "./petta-stdlib";
 import { preludeAtoms, standardTokenizer } from "./runner";
@@ -36,7 +37,7 @@ afterEach(() => {
 
 function buildDefaultTestEnv(imports: Map<string, Atom[]>) {
   const env = buildEnv([...preludeAtoms(), ...stdlibAtoms(), ...pettaStdlibAtoms()], stdTable());
-  env.imports = withBuiltinModules(imports);
+  env.imports = new RevisionMap(withBuiltinModules(imports));
   env.tableSpace = new TableSpace();
   env.pureFunctors = analyzePurity(env);
   env.modedPureFunctors = analyzePurity(env, MODED_IMPURE_OPS);

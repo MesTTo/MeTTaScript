@@ -110,12 +110,49 @@ Packets belong to the evaluation environment that created them. Replaying a forg
 
 The current packet handle is process-local. Worker transport will use the versioned atom and frame codec rather than relying on structured clone to copy the grounded handle.
 
+## Evaluation context and logical snapshots
+
+The grounded ABI includes one `GroundedCallContext`. The active context follows `evalc` and `metta` through rule reduction, nested evaluation, synchronous and asynchronous groundeds, executable heads, type checks, and imports. Built-in functions whose implementation cannot inspect context receive the frozen compatibility context and avoid dynamic snapshot work. Custom groundeds receive the complete active context.
+
+| Field                  | Meaning                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------ |
+| `currentSpace`         | The atomspace selected for `&self` in the active evaluator                     |
+| `visibleSpaces`        | The ordered atomspace view available to the call                               |
+| `expectedType`         | The type requested by `metta`, or `%Undefined%` when no type was requested     |
+| `generation`           | The causal depth of committed world changes on this branch                     |
+| `typeEnvironment`      | Immutable signatures, declared types, and expression types visible to the call |
+| `groundingEnvironment` | Immutable names of synchronous and asynchronous grounded operations            |
+| `imports`              | Immutable module catalog visible to the evaluator                              |
+| `moduleInstallations`  | Successful catalog and host imports in commit order                            |
+| `capabilities`         | Immutable host capabilities granted to the evaluator                           |
+
+`generation` is not a process-wide unique revision. A child world starts at its parent's generation and increments after an observable mutation. Two independent branches can therefore have the same generation. Branch and state IDs supply identity when a trace needs it.
+
+The large descriptor fields are materialized only when a grounded operation reads them. Their source registries are revisioned copy-on-write collections. An asynchronous call therefore keeps the registry versions from its call boundary even if the host changes the original environment while the call is suspended. The returned maps and sets reject mutation.
+
+`mettaEvalAsync` pins both the static program image and the starting world for the query. `createAsyncEvaluationSession` reuses one pinned image across sequential calls and refreshes it after a supported program mutation. `runProgramAsync` owns its environment and state for the full suspension, so it uses the owned path and avoids copying data that no external caller can reach.
+
+The standard prelude and library indexes are also cached as one read-only program image. A runner shares that image until its first top-level definition, then detaches every mutable index before writing. This is the same lazy-copy rule used for async snapshots. Concurrent runners retain separate effects, caches, imports, capabilities, and mutex tables.
+
+The snapshot rule follows SQLite's distinction between a reader's stable view and later commits in another connection. See [Isolation in SQLite](https://www.sqlite.org/isolation.html). The implementation uses in-memory copy-on-write collections rather than database transactions, but the observable rule is the same: one evaluation does not switch to a newer program or registry view halfway through a suspension.
+
+## Imports and transactions
+
+`import!` checks the explicit module catalog before calling the host resolver. A catalog installation records its resolved name, a deterministic `sha256:` content hash, target space, and exact world delta. Repeated imports and imports with an empty delta remain separate history entries. Hashing uses [`@noble/hashes` 1.x](https://github.com/paulmillr/noble-hashes/tree/1.8.0), which supplies the same synchronous SHA-256 implementation in Node and browsers supported by the package.
+
+A host import is opaque. Its installation record keeps the original request and exact effects, but has no resolved catalog identity or content hash unless a later host ABI supplies them.
+
+`transaction` snapshots the complete evaluation overlay used by this slice. Commit retains atomspace changes, type changes, module history, and semantic-cache invalidation. Rollback restores them together. A catalog import can run inside a transaction because every effect is represented in the overlay. A host import is rejected before invocation inside a transaction because arbitrary host I/O cannot be rolled back.
+
+`context-space`, `capture`, `metta`, and `metta-thread` use the active context rather than silently falling back to the root `&self`. `metta` also enforces its expected-type operand. A named space owns its local rules and declarations while inheriting the shared prelude and grounded services. Local declarations cannot replace an existing shared grounded signature.
+
 ## Compatibility rule
 
 The following public signatures remain unchanged during the migration:
 
 - `mettaEval` returns `[Array<[Atom, Bindings]>, St]`.
 - `mettaEvalAsync` returns a promise of the same tuple.
+- `mettaEvalAsyncOwned` returns the same promise and requires exclusive ownership of its environment and state until settlement.
 - `evalAtom` returns `[Atom[], St]`.
 - `QueryResult` has only `query` and `results`.
 - `ReduceResult`, `GroundFn`, `Frame`, `Item`, `World`, `St`, and string-based `Bindings` remain exported.

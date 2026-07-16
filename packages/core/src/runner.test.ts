@@ -124,7 +124,64 @@ describe("runner + stdlib prelude", () => {
     expect(r[4]!.results.map(format)).toEqual(["Foo"]);
   });
 
-  it("evalc uses the explicit space for equation lookup only", () => {
+  it("get-type-space rejects a non-space operand", () => {
+    const r = runProgram("!(get-type-space 1 Foo)");
+    expect(r[0]!.results.map(format)).toEqual([
+      "(Error (get-type-space 1 Foo) get-type-space: not a space)",
+    ]);
+  });
+
+  it("does not let named declarations override shared grounded signatures", () => {
+    const r = runProgram(`
+      !(bind! &s (new-space))
+      !(add-atom &s (: + (-> Atom Atom)))
+      !(metta (+ 1 2) %Undefined% &s)
+    `);
+    expect(r[2]!.results.map(format)).toEqual(["3"]);
+  });
+
+  it("keeps imported types and rules in their target named space", () => {
+    const imports = new Map([
+      [
+        "typed-module",
+        moduleAtoms(`
+          (: imported-value ImportedType)
+          (= (from-import) imported-value)
+        `),
+      ],
+    ]);
+    const r = runProgram(
+      `
+        !(bind! &s (new-space))
+        !(import! &s typed-module)
+        !(get-type imported-value)
+        !(get-type-space &s imported-value)
+        !(metta (from-import) %Undefined% &s)
+        !(from-import)
+      `,
+      2_000_000,
+      imports,
+    );
+
+    expect(r[2]!.results.map(format)).toEqual(["%Undefined%"]);
+    expect(r[3]!.results.map(format)).toEqual(["ImportedType"]);
+    expect(r[4]!.results.map(format)).toEqual(["imported-value"]);
+    expect(r[5]!.results.map(format)).toEqual(["(from-import)"]);
+  });
+
+  it("adds and removes root type declarations with the atomspace snapshot", () => {
+    const r = runProgram(`
+      !(add-atom &self (: runtime-value RuntimeType))
+      !(get-type runtime-value)
+      !(remove-atom &self (: runtime-value RuntimeType))
+      !(get-type runtime-value)
+    `);
+
+    expect(r[1]!.results.map(format)).toEqual(["RuntimeType"]);
+    expect(r[3]!.results.map(format)).toEqual(["%Undefined%"]);
+  });
+
+  it("evalc keeps the explicit context through nested standard evaluation", () => {
     const r = runProgram(`
       (= (bar) 7)
       !(bind! &s (new-space))
@@ -137,8 +194,73 @@ describe("runner + stdlib prelude", () => {
     expect(r[1]!.results.map(format)).toEqual(["()"]);
     expect(r[2]!.results.map(format)).toEqual(["42"]);
     expect(r[3]!.results.map(format)).toEqual(["7"]);
-    expect(r[4]!.results.map(format)).toEqual(["(evalc (if True yes no) &s)"]);
-    expect(r[5]!.results.map(format)).toEqual(["&self"]);
+    expect(r[4]!.results.map(format)).toEqual(["yes"]);
+    expect(r[5]!.results.map(format)).toEqual(["&space-0"]);
+  });
+
+  it("metta keeps the selected context space through nested evaluation", () => {
+    const r = runProgram(`
+      (= (global-only) global)
+      !(bind! &s (new-space))
+      !(add-atom &s (= (inner) (context-space)))
+      !(add-atom &s (= (outer) (inner)))
+      !(add-atom &s (= (local-only) local))
+      !(metta (outer) %Undefined% &s)
+      !(metta (local-only) %Undefined% &s)
+      !(metta (global-only) %Undefined% &s)
+      !(metta-thread (outer) %Undefined% &s)
+      !(metta (capture (local-only)) %Undefined% &s)
+    `);
+
+    expect(r[4]!.results.map(format)).toEqual(["&space-0"]);
+    expect(r[5]!.results.map(format)).toEqual(["local"]);
+    expect(r[6]!.results.map(format)).toEqual(["(global-only)"]);
+    expect(r[7]!.results.map(format)).toEqual(["&space-0"]);
+    expect(r[8]!.results.map(format)).toEqual(["local"]);
+  });
+
+  it("resolves &self against the active metta context for space effects", () => {
+    const r = runProgram(`
+      !(bind! &s (new-space))
+      !(add-atom &s (= (write-local) (add-atom &self marker)))
+      !(metta (write-local) %Undefined% &s)
+      !(collapse (match &s marker marker))
+      !(collapse (match &self marker marker))
+    `);
+
+    expect(r[2]!.results.map(format)).toEqual(["()"]);
+    expect(r[3]!.results.map(format)).toEqual(["(, marker)"]);
+    expect(r[4]!.results.map(format)).toEqual(["(,)"]);
+  });
+
+  it("pins a named-space candidate view while one match is being enumerated", () => {
+    const r = runProgram(`
+      !(bind! &s (new-space))
+      !(add-atom &s a)
+      !(add-atom &s b)
+      !(collapse (match &s $x (let $_ (add-atom &s c) $x)))
+      !(collapse (match &s $x $x))
+    `);
+
+    expect(r[3]!.results.map(format)).toEqual(["(, a b)"]);
+    expect(r[4]!.results.map(format)).toEqual(["(, a b c c)"]);
+  });
+
+  it("metta obeys its expected type operand", () => {
+    const r = runProgram(`
+      (= (foo) reduced)
+      !(metta (foo) %Undefined% &self)
+      !(metta (foo) Atom &self)
+      !(metta (foo) Expression &self)
+      !(metta hello Symbol &self)
+      !(metta 1 Symbol &self)
+    `);
+
+    expect(r[0]!.results.map(format)).toEqual(["reduced"]);
+    expect(r[1]!.results.map(format)).toEqual(["(foo)"]);
+    expect(r[2]!.results.map(format)).toEqual(["(foo)"]);
+    expect(r[3]!.results.map(format)).toEqual(["hello"]);
+    expect(r[4]!.results.map(format)).toEqual(["(Error 1 (BadType Symbol Number))"]);
   });
 
   it("deduplicates repeated type declarations in get-type results", () => {
@@ -264,6 +386,16 @@ describe("runner + stdlib prelude", () => {
   it("sequential: a definition is visible to a later query", () => {
     const src = "(= (f $x) (* $x $x))\n!(f 7)";
     expect(q(src)).toEqual(["49"]);
+  });
+
+  it("detaches the cached base program before a run adds definitions", () => {
+    const left = runProgram("(= (run-local) left)\n!(run-local)");
+    const right = runProgram("(= (run-local) right)\n!(run-local)");
+    const untouched = runProgram("!(run-local)");
+
+    expect(left[0]!.results.map(format)).toEqual(["left"]);
+    expect(right[0]!.results.map(format)).toEqual(["right"]);
+    expect(untouched[0]!.results.map(format)).toEqual(["(run-local)"]);
   });
 
   it("import! resolves bare symbols and PeTTa library module references", () => {

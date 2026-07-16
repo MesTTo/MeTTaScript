@@ -46,6 +46,10 @@ export function asyncOperationReturnToReduceResult(raw: AsyncOperationReturn): c
     : { tag: "ok", results: coreResults, effects };
 }
 
+function installBuiltinImports(env: core.MinEnv): void {
+  for (const [name, atoms] of core.withBuiltinModules()) env.imports.set(name, atoms);
+}
+
 /** A reference to a Space: a store of atoms that can be added to, queried, and substituted over. */
 export class SpaceRef {
   constructor(readonly space: core.Space) {}
@@ -183,7 +187,7 @@ export class MeTTa {
     this.gt = core.stdTable();
     this.tok = new Tokenizer(standardTokenizerC());
     this.env = core.buildEnv([...core.preludeAtoms(), ...core.stdlibAtoms()], this.gt);
-    this.env.imports = core.withBuiltinModules();
+    installBuiltinImports(this.env);
     this.st = core.initSt();
     this._space = new SpaceRef(
       new RunnerSpace(
@@ -207,7 +211,7 @@ export class MeTTa {
     if (i < 0) return false;
     this.kb.splice(i, 1);
     this.env = core.buildEnv([...core.preludeAtoms(), ...core.stdlibAtoms(), ...this.kb], this.gt);
-    this.env.imports = core.withBuiltinModules();
+    installBuiltinImports(this.env);
     return true;
   }
 

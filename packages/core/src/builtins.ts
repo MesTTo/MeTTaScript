@@ -38,6 +38,7 @@ import {
 import { format, parseAll } from "./parser";
 import { applySubst, type Subst } from "./substitution";
 import { Tokenizer } from "./tokenizer";
+import { readonlyMapSnapshot, readonlySetSnapshot } from "./readonly-collection";
 
 // A standalone tokenizer for `parse`/`sread` (number/bool literals), built here to avoid importing the runner
 // (which imports this module). Matches the runner's standardTokenizer.
@@ -70,7 +71,79 @@ export type ReduceResult =
   | { readonly tag: "incorrectArgument"; readonly msg: string }
   | { readonly tag: "noReduce" };
 
-export type GroundFn = (args: readonly Atom[]) => ReduceResult;
+export interface GroundedTypeEnvironment {
+  readonly signatures: ReadonlyMap<string, readonly Atom[]>;
+  readonly declaredTypes: ReadonlyMap<string, readonly Atom[]>;
+  readonly expressionTypes: readonly (readonly [Atom, Atom])[];
+}
+
+export interface GroundedOperationEnvironment {
+  readonly synchronous: ReadonlySet<string>;
+  readonly asynchronous: ReadonlySet<string>;
+}
+
+export interface GroundedWorldAtomDelta {
+  readonly space: Atom;
+  readonly atom: Atom;
+}
+
+export interface GroundedWorldTokenDelta {
+  readonly name: string;
+  readonly atom: Atom;
+}
+
+export interface GroundedImportWorldDelta {
+  readonly addedAtoms: readonly GroundedWorldAtomDelta[];
+  readonly removedAtoms: readonly GroundedWorldAtomDelta[];
+  readonly boundTokens: readonly GroundedWorldTokenDelta[];
+}
+
+export interface GroundedModuleInstallation {
+  readonly request: Atom;
+  readonly resolvedIdentity?: string;
+  readonly source: "catalog" | "host";
+  readonly contentHash?: string;
+  readonly targetSpace: Atom;
+  readonly previousGeneration: number;
+  readonly generation: number;
+  readonly worldDelta: GroundedImportWorldDelta;
+}
+
+/** Dynamic interpreter context supplied to sync, async, and import groundeds. */
+export interface GroundedCallContext {
+  readonly currentSpace: Atom;
+  readonly visibleSpaces: readonly Atom[];
+  readonly expectedType: Atom;
+  /** Logical-update generation of the branch world observed by this call. */
+  readonly generation?: number;
+  readonly typeEnvironment?: GroundedTypeEnvironment;
+  readonly groundingEnvironment?: GroundedOperationEnvironment;
+  readonly imports?: ReadonlyMap<string, readonly Atom[]>;
+  /** Append-only successful import history. Removing imported atoms does not erase this audit log. */
+  readonly moduleInstallations?: readonly GroundedModuleInstallation[];
+  readonly capabilities?: ReadonlySet<string>;
+}
+
+export const DEFAULT_GROUNDED_CALL_CONTEXT: GroundedCallContext = Object.freeze({
+  currentSpace: sym("&self"),
+  visibleSpaces: Object.freeze([sym("&self")]),
+  expectedType: sym("%Undefined%"),
+  generation: 0,
+  typeEnvironment: Object.freeze({
+    signatures: readonlyMapSnapshot(new Map<string, readonly Atom[]>()),
+    declaredTypes: readonlyMapSnapshot(new Map<string, readonly Atom[]>()),
+    expressionTypes: Object.freeze([] as Array<readonly [Atom, Atom]>),
+  }),
+  groundingEnvironment: Object.freeze({
+    synchronous: readonlySetSnapshot(new Set<string>()),
+    asynchronous: readonlySetSnapshot(new Set<string>()),
+  }),
+  imports: readonlyMapSnapshot(new Map<string, readonly Atom[]>()),
+  moduleInstallations: Object.freeze([] as GroundedModuleInstallation[]),
+  capabilities: readonlySetSnapshot(new Set<string>()),
+});
+
+export type GroundFn = (args: readonly Atom[], context?: GroundedCallContext) => ReduceResult;
 export type GroundingTable = Map<string, GroundFn>;
 
 const groundedOperationTypes = new WeakMap<GroundFn, Atom>();
@@ -1605,9 +1678,18 @@ for (const [name, fn] of [...mathEntries, ...coreEntries, ...stdEntries, ...pett
   if (!TABLE_UNSAFE_GROUNDED_OPS.has(name) && !tableSafeGroundedFns.has(name))
     tableSafeGroundedFns.set(name, fn);
 
+const contextIndependentGroundedFns = new WeakSet<GroundFn>();
+for (const [, fn] of [...mathEntries, ...coreEntries, ...stdEntries, ...pettaEntries])
+  contextIndependentGroundedFns.add(fn);
+
 /** True only for the unchanged built-in function registered under this name. */
 export function isTableSafeGroundedOp(name: string, fn: GroundFn): boolean {
   return tableSafeGroundedFns.get(name) === fn;
+}
+
+/** True for built-in functions whose implementation cannot observe the dynamic interpreter context. */
+export function isContextIndependentGroundedOp(fn: GroundFn): boolean {
+  return contextIndependentGroundedFns.has(fn);
 }
 
 /** The arithmetic / boolean / list-surgery / math grounding core every KB starts with. */
@@ -1624,7 +1706,12 @@ export function stdTable(): GroundingTable {
 }
 
 /** Dispatch `op` through the grounding table, or `noReduce` if unknown. */
-export function callGrounded(gt: GroundingTable, op: string, args: readonly Atom[]): ReduceResult {
+export function callGrounded(
+  gt: GroundingTable,
+  op: string,
+  args: readonly Atom[],
+  context: GroundedCallContext = DEFAULT_GROUNDED_CALL_CONTEXT,
+): ReduceResult {
   const fn = gt.get(op);
-  return fn ? fn(args) : { tag: "noReduce" };
+  return fn ? fn(args, context) : { tag: "noReduce" };
 }

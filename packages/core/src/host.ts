@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 import type { Atom } from "./atom";
-import type { ReduceResult } from "./builtins";
+import type { GroundedCallContext, ReduceResult } from "./builtins";
 import type { AsyncGroundFn, HostImportFn } from "./eval";
 
 export interface HostInterop {
@@ -29,15 +29,20 @@ function dispatchHostImport(
   index: number,
   space: Atom,
   file: Atom,
+  context?: GroundedCallContext,
 ): ReduceResult | Promise<ReduceResult> {
   if (index >= imports.length) return { tag: "noReduce" };
-  const result = imports[index]!(space, file);
+  const result = imports[index]!(space, file, context);
   if (isPromiseLike(result)) {
     return result.then((resolved) =>
-      resolved.tag === "noReduce" ? dispatchHostImport(imports, index + 1, space, file) : resolved,
+      resolved.tag === "noReduce"
+        ? dispatchHostImport(imports, index + 1, space, file, context)
+        : resolved,
     );
   }
-  return result.tag === "noReduce" ? dispatchHostImport(imports, index + 1, space, file) : result;
+  return result.tag === "noReduce"
+    ? dispatchHostImport(imports, index + 1, space, file, context)
+    : result;
 }
 
 export function composeHostInterops(
@@ -65,7 +70,8 @@ export function composeHostInterops(
     ...(asyncOps.size > 0 ? { asyncOps } : {}),
     ...(hostImports.length > 0
       ? {
-          hostImport: (space, file) => dispatchHostImport(hostImports, 0, space, file),
+          hostImport: (space, file, context) =>
+            dispatchHostImport(hostImports, 0, space, file, context),
         }
       : {}),
     async dispose() {

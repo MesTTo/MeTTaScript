@@ -17,7 +17,7 @@ import {
   addAtomToEnv,
   initSt,
   mettaEval,
-  mettaEvalAsync,
+  mettaEvalAsyncOwned,
   registerAsyncGroundedOperation,
 } from "./eval";
 import { stdTable } from "./builtins";
@@ -26,6 +26,7 @@ import { PRELUDE_SRC } from "./prelude";
 import { withBuiltinModules } from "./extensions";
 import { stdlibAtoms } from "./stdlib";
 import { pettaStdlibAtoms } from "./petta-stdlib";
+import { RevisionMap, RevisionSet } from "./revision-collection";
 import { TableSpace } from "./table-space";
 
 /** The standard tokenizer: integer/float literals and the `True`/`False` grounded booleans. */
@@ -72,6 +73,15 @@ interface TablingAnalysis {
 }
 
 let defaultTablingAnalysis: TablingAnalysis | undefined;
+let defaultProgramTemplate: MinEnv | undefined;
+
+function baseProgramTemplate(): MinEnv {
+  if (defaultProgramTemplate !== undefined) return defaultProgramTemplate;
+  const env = buildEnv([...preludeAtoms(), ...stdlibAtoms(), ...pettaStdlibAtoms()], stdTable());
+  env.sharedContextAtoms = env.atoms;
+  defaultProgramTemplate = env;
+  return env;
+}
 
 function baseTablingAnalysis(env: MinEnv): TablingAnalysis {
   if (defaultTablingAnalysis === undefined) {
@@ -97,11 +107,19 @@ function buildDefaultEnv(
   opts: RunOptions = {},
 ): MinEnv {
   const experimental = opts.experimental;
-  const env: MinEnv = buildEnv(
-    [...preludeAtoms(), ...stdlibAtoms(), ...pettaStdlibAtoms()],
-    stdTable(),
-  );
-  env.imports = withBuiltinModules(imports);
+  const template = baseProgramTemplate();
+  // Static program indexes are immutable between top-level additions. Share the cached image and detach all
+  // mutable indexes together on the first write, while keeping per-run effects and semantic caches private.
+  const env: MinEnv = {
+    ...template,
+    staticProgramShared: true,
+    imports: new RevisionMap(),
+    agt: new RevisionMap(),
+    capabilities: new RevisionSet(template.capabilities),
+    mutexes: new Map(),
+    evaluatedAtoms: new WeakSet(),
+  };
+  env.imports = new RevisionMap(withBuiltinModules(imports));
   if (opts.hostImport !== undefined) env.hostImport = opts.hostImport;
   if (experimental?.hashCons === true) env.intern = createInternTable();
   if (experimental?.trail === true) env.useTrail = true;
@@ -276,7 +294,7 @@ export async function runProgramAsync(
       addAtomToEnv(env, atom);
       continue;
     }
-    const [pairs, st2] = await mettaEvalAsync(env, fuel, st, [], atom);
+    const [pairs, st2] = await mettaEvalAsyncOwned(env, fuel, st, [], atom);
     st = st2;
     out.push({ query: atom, results: resultsForQuery(pairs) });
   }

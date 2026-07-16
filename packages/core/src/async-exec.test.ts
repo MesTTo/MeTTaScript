@@ -56,4 +56,22 @@ describe("async grounded-head exec", () => {
       /synchronous evaluation/,
     );
   });
+
+  it("passes a selected metta context to an async executable head", async () => {
+    const runtime = env();
+    const head = opAtom("async-context", async (_args, context) => {
+      if (context === undefined) throw new Error("missing grounded call context");
+      return [context.currentSpace];
+    });
+    const [, allocated] = mettaEval(runtime, DEFAULT_FUEL, initSt(), [], expr([sym("new-space")]));
+    const [pairs] = await mettaEvalAsync(
+      runtime,
+      DEFAULT_FUEL,
+      allocated,
+      [],
+      expr([sym("metta"), expr([head]), sym("%Undefined%"), sym("&space-0")]),
+    );
+
+    expect(pairs.map(([atom]) => format(atom))).toEqual(["&space-0"]);
+  });
 });

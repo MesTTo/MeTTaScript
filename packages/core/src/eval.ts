@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: MIT
 
 import { canonicalize } from "./alpha";
+import { sha256 } from "@noble/hashes/sha256";
+import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
 // The minimal MeTTa interpreter and type-directed evaluator: a faithful port of LeaTTa
 // `MettaHyperonFull/Minimal/Interpreter.lean` (itself a port of Hyperon `interpreter.rs`).
 // A CPS nondeterministic stack machine over the minimal instructions, with `mettaEval` (the
@@ -53,10 +55,14 @@ import {
 import { bindingFrameFromLegacy, bindingFrameToLegacy, emptyBindingFrame } from "./binding-frame";
 import { BindingPacketRegistry } from "./binding-packet";
 import {
-  callGrounded,
+  DEFAULT_GROUNDED_CALL_CONTEXT,
   type GroundFn,
+  type GroundedCallContext,
+  type GroundedImportWorldDelta,
+  type GroundedModuleInstallation,
   type GroundingTable,
   groundedOperationType,
+  isContextIndependentGroundedOp,
   isTableSafeGroundedOp,
   pettaOpNames,
   type ReduceEffect,
@@ -78,6 +84,8 @@ import { instantiate } from "./instantiate";
 import { addVarBinding, matchAtoms, matchAtomsScoped, merge } from "./match";
 import { addInt, type IntVal, subInt } from "./number";
 import { format } from "./parser";
+import { readonlyMapSnapshot, readonlySetSnapshot } from "./readonly-collection";
+import { asRevisionMap, collectionRevision, RevisionMap, RevisionSet } from "./revision-collection";
 import { stdlibDocAtoms } from "./stdlib";
 import { applySubst, type Subst } from "./substitution";
 import {
@@ -107,13 +115,21 @@ const STREAM_CASE = readEnv("METTA_STREAM_CASE") !== "0";
 // (the gensync / Effect pattern), so the synchronous path is unchanged in behaviour and async is
 // purely additive. `yield*` propagates a suspension up through the whole nested call chain.
 /** A grounded operation that runs asynchronously, for the async runner. */
-export type AsyncGroundFn = (args: readonly Atom[]) => Promise<ReduceResult>;
-export type HostImportFn = (space: Atom, file: Atom) => ReduceResult | Promise<ReduceResult>;
+export type AsyncGroundFn = (
+  args: readonly Atom[],
+  context?: GroundedCallContext,
+) => Promise<ReduceResult>;
+export type HostImportFn = (
+  space: Atom,
+  file: Atom,
+  context?: GroundedCallContext,
+) => ReduceResult | Promise<ReduceResult>;
 // A suspension is any Promise the async driver awaits; each yield site knows its resolved type. The
 // grounded boundary yields a Promise<ReduceResult>; the concurrency primitives yield Promise<[pairs,St]>.
 type Susp = Promise<unknown>;
 type Gen<R> = Generator<Susp, R, unknown>;
 type EvalRes = [Array<[Atom, Bindings]>, St];
+type ContextualPair = [Atom, Bindings, MinEnv?];
 interface CandidateSource extends Iterable<Atom> {
   readonly counterPadding?: number;
   readonly synthetic?: true;
@@ -136,7 +152,7 @@ const syntheticCandidateSource = (source: CandidateSource): boolean => source.sy
 // TS-native concurrency primitives (async-only): par/race evaluate their argument expressions
 // concurrently; with-mutex serialises a critical section across await points. Their arguments are NOT
 // eagerly evaluated (the op drives them), and reaching them in the sync driver throws AsyncInSyncError.
-const LAZY_ARGS_OPS = new Set(["par", "race", "once", "with-mutex"]);
+const LAZY_ARGS_OPS = new Set(["transaction", "par", "race", "once", "with-mutex"]);
 const LEATTA_EVAL_ARGS_OPS = new Set(["superpose", "hyperpose", "collapse-extract"]);
 
 /** Thrown when synchronous evaluation reaches an async grounded operation. Use the async runner. */
@@ -161,33 +177,327 @@ function runGenSync<R>(gen: Gen<R>): R {
 async function runGenAsync<R>(gen: Gen<R>, signal?: AbortSignal): Promise<R> {
   let r = gen.next();
   while (!r.done) {
-    signal?.throwIfAborted();
-    const v = await r.value;
-    signal?.throwIfAborted();
-    r = gen.next(v);
+    try {
+      signal?.throwIfAborted();
+      const v = await r.value;
+      signal?.throwIfAborted();
+      r = gen.next(v);
+    } catch (error) {
+      // Inject suspension failures into the generator so nested transaction and resource `finally`
+      // blocks run before the failure reaches the caller.
+      r = gen.throw(error);
+    }
   }
   return r.value;
 }
 
 /** The grounded-operation boundary: a sync op returns immediately; an async op (in `env.agt`) yields its
  *  Promise, which the async driver awaits and the sync driver rejects. */
-function* callGroundedG(env: MinEnv, op: string, args: readonly Atom[]): Gen<ReduceResult> {
+interface CachedGroundedContext {
+  readonly syncRegistry: GroundingTable;
+  readonly asyncRegistry: Map<string, AsyncGroundFn>;
+  readonly syncSize: number;
+  readonly asyncSize: number;
+  readonly groundingVersion: number;
+  readonly typeProgramVersion: number;
+  readonly syncRevision: number | undefined;
+  readonly asyncRevision: number | undefined;
+  readonly imports: Map<string, Atom[]>;
+  readonly importRevision: number | undefined;
+  readonly capabilities: ReadonlySet<string> | undefined;
+  readonly capabilityRevision: number | undefined;
+  readonly evaluationContext: GroundedCallContext;
+  readonly context: GroundedCallContext;
+}
+
+const groundedContextCache = new WeakMap<World, WeakMap<MinEnv, CachedGroundedContext>>();
+
+interface CachedGroundingEnvironment {
+  readonly syncRegistry: GroundingTable;
+  readonly asyncRegistry: Map<string, AsyncGroundFn>;
+  readonly syncSize: number;
+  readonly asyncSize: number;
+  readonly groundingVersion: number;
+  readonly syncRevision: number | undefined;
+  readonly asyncRevision: number | undefined;
+  readonly value: NonNullable<GroundedCallContext["groundingEnvironment"]>;
+}
+
+const groundingEnvironmentCache = new WeakMap<MinEnv, CachedGroundingEnvironment>();
+
+interface CachedImmutableAtomLists {
+  readonly revision: number;
+  readonly value: ReadonlyMap<string, readonly Atom[]>;
+}
+
+const immutableAtomListsCache = new WeakMap<object, CachedImmutableAtomLists>();
+
+function immutableAtomLists(
+  source: ReadonlyMap<string, readonly Atom[]>,
+  revision?: number,
+): ReadonlyMap<string, readonly Atom[]> {
+  const cached = immutableAtomListsCache.get(source);
+  if (revision !== undefined && cached?.revision === revision) return cached.value;
+  const value = readonlyMapSnapshot(
+    new Map([...source].map(([name, atoms]) => [name, Object.freeze(atoms.slice())] as const)),
+  );
+  if (revision !== undefined) immutableAtomListsCache.set(source, { revision, value });
+  return value;
+}
+
+const moduleInstallationsCache = new WeakMap<
+  readonly GroundedModuleInstallation[],
+  readonly GroundedModuleInstallation[]
+>();
+
+interface CachedTypeEnvironment {
+  readonly programVersion: number;
+  readonly value: NonNullable<GroundedCallContext["typeEnvironment"]>;
+}
+
+const immutableTypeEnvironmentCache = new WeakMap<TypeView, CachedTypeEnvironment>();
+
+interface CachedImmutableCapabilities {
+  readonly revision: number;
+  readonly value: ReadonlySet<string>;
+}
+
+const immutableCapabilitiesCache = new WeakMap<object, CachedImmutableCapabilities>();
+
+function immutableCapabilities(
+  source: ReadonlySet<string>,
+  revision?: number,
+): ReadonlySet<string> {
+  const cached = immutableCapabilitiesCache.get(source);
+  if (revision !== undefined && cached?.revision === revision) return cached.value;
+  const value = readonlySetSnapshot(source);
+  if (revision !== undefined) immutableCapabilitiesCache.set(source, { revision, value });
+  return value;
+}
+
+function memoizedValue<T>(compute: () => T): () => T {
+  let initialized = false;
+  let value: T;
+  return () => {
+    if (!initialized) {
+      value = compute();
+      initialized = true;
+    }
+    return value!;
+  };
+}
+
+function immutableTypeEnvironment(
+  types: TypeView,
+  programVersion: number,
+): NonNullable<GroundedCallContext["typeEnvironment"]> {
+  const cached = immutableTypeEnvironmentCache.get(types);
+  if (cached?.programVersion === programVersion) return cached.value;
+  const value = Object.freeze({
+    signatures: immutableAtomLists(types.sigs),
+    declaredTypes: immutableAtomLists(types.types),
+    expressionTypes: Object.freeze(
+      types.exprTypes.map(([subject, type]) => Object.freeze([subject, type] as const)),
+    ),
+  });
+  immutableTypeEnvironmentCache.set(types, { programVersion, value });
+  return value;
+}
+
+function immutableModuleInstallations(
+  source: readonly GroundedModuleInstallation[],
+): readonly GroundedModuleInstallation[] {
+  const cached = moduleInstallationsCache.get(source);
+  if (cached !== undefined) return cached;
+  const value = Object.freeze(
+    source.map((installation) =>
+      Object.freeze({
+        ...installation,
+        worldDelta: Object.freeze({
+          addedAtoms: Object.freeze(
+            installation.worldDelta.addedAtoms.map((delta) => Object.freeze({ ...delta })),
+          ),
+          removedAtoms: Object.freeze(
+            installation.worldDelta.removedAtoms.map((delta) => Object.freeze({ ...delta })),
+          ),
+          boundTokens: Object.freeze(
+            installation.worldDelta.boundTokens.map((delta) => Object.freeze({ ...delta })),
+          ),
+        }),
+      }),
+    ),
+  );
+  moduleInstallationsCache.set(source, value);
+  return value;
+}
+
+function groundingEnvironmentFor(
+  env: MinEnv,
+): NonNullable<GroundedCallContext["groundingEnvironment"]> {
+  const groundingVersion = env.groundingVersion ?? 0;
+  const syncRevision = collectionRevision(env.gt);
+  const asyncRevision = collectionRevision(env.agt);
+  const cached = groundingEnvironmentCache.get(env);
+  if (
+    cached !== undefined &&
+    cached.syncRegistry === env.gt &&
+    cached.asyncRegistry === env.agt &&
+    cached.syncSize === env.gt.size &&
+    cached.asyncSize === env.agt.size &&
+    cached.groundingVersion === groundingVersion &&
+    syncRevision !== undefined &&
+    asyncRevision !== undefined &&
+    cached.syncRevision === syncRevision &&
+    cached.asyncRevision === asyncRevision
+  )
+    return cached.value;
+  const value = Object.freeze({
+    synchronous: readonlySetSnapshot(new Set(env.gt.keys())),
+    asynchronous: readonlySetSnapshot(new Set(env.agt.keys())),
+  });
+  groundingEnvironmentCache.set(env, {
+    syncRegistry: env.gt,
+    asyncRegistry: env.agt,
+    syncSize: env.gt.size,
+    asyncSize: env.agt.size,
+    groundingVersion,
+    syncRevision,
+    asyncRevision,
+    value,
+  });
+  return value;
+}
+
+function groundedCallContext(env: MinEnv, world: World): GroundedCallContext {
+  let byEnvironment = groundedContextCache.get(world);
+  if (byEnvironment === undefined) {
+    byEnvironment = new WeakMap();
+    groundedContextCache.set(world, byEnvironment);
+  }
+  const cached = byEnvironment.get(env);
+  const groundingVersion = env.groundingVersion ?? 0;
+  const typeProgramVersion = env.typeProgramVersion ?? 0;
+  const syncRevision = collectionRevision(env.gt);
+  const asyncRevision = collectionRevision(env.agt);
+  const importRevision = collectionRevision(env.imports);
+  const capabilityRevision =
+    env.capabilities === undefined ? 0 : collectionRevision(env.capabilities);
+  const base = env.evaluationContext ?? DEFAULT_GROUNDED_CALL_CONTEXT;
+  if (
+    cached !== undefined &&
+    cached.syncRegistry === env.gt &&
+    cached.asyncRegistry === env.agt &&
+    cached.syncSize === env.gt.size &&
+    cached.asyncSize === env.agt.size &&
+    cached.groundingVersion === groundingVersion &&
+    cached.typeProgramVersion === typeProgramVersion &&
+    syncRevision !== undefined &&
+    asyncRevision !== undefined &&
+    importRevision !== undefined &&
+    capabilityRevision !== undefined &&
+    cached.syncRevision === syncRevision &&
+    cached.asyncRevision === asyncRevision &&
+    cached.imports === env.imports &&
+    cached.importRevision === importRevision &&
+    cached.capabilities === env.capabilities &&
+    cached.capabilityRevision === capabilityRevision &&
+    cached.evaluationContext === base
+  )
+    return cached.context;
+
+  // Most built-ins ignore host metadata. Capture the stable program/world references now, then materialize
+  // their immutable public views only if the grounded operation reads them. Async evaluations pin the
+  // referenced registries and static indexes, so a getter first read after an await still observes call-time
+  // state rather than a later host mutation.
+  const owner = rootEvaluationEnvironment(env);
+  const typeEnvironment = memoizedValue(() =>
+    immutableTypeEnvironment(typeViewFor(env, world), owner.typeProgramVersion ?? 0),
+  );
+  const groundingEnvironment = memoizedValue(() => groundingEnvironmentFor(env));
+  const imports = memoizedValue(() => immutableAtomLists(env.imports, importRevision));
+  const moduleInstallations = memoizedValue(() =>
+    immutableModuleInstallations(world.moduleInstallations),
+  );
+  const capabilities = memoizedValue(() =>
+    immutableCapabilities(
+      env.capabilities ?? new RevisionSet(DEFAULT_RUNTIME_CAPABILITIES),
+      capabilityRevision,
+    ),
+  );
+  const context: GroundedCallContext = Object.freeze({
+    currentSpace: base.currentSpace,
+    visibleSpaces: Object.freeze(base.visibleSpaces.slice()),
+    expectedType: base.expectedType,
+    generation: world.generation,
+    get typeEnvironment() {
+      return typeEnvironment();
+    },
+    get groundingEnvironment() {
+      return groundingEnvironment();
+    },
+    get imports() {
+      return imports();
+    },
+    get moduleInstallations() {
+      return moduleInstallations();
+    },
+    get capabilities() {
+      return capabilities();
+    },
+  });
+  byEnvironment.set(env, {
+    syncRegistry: env.gt,
+    asyncRegistry: env.agt,
+    syncSize: env.gt.size,
+    asyncSize: env.agt.size,
+    groundingVersion,
+    typeProgramVersion,
+    syncRevision,
+    asyncRevision,
+    imports: env.imports,
+    importRevision,
+    capabilities: env.capabilities,
+    capabilityRevision,
+    evaluationContext: base,
+    context,
+  });
+  return context;
+}
+
+function* callGroundedG(
+  env: MinEnv,
+  world: World,
+  op: string,
+  args: readonly Atom[],
+): Gen<ReduceResult> {
   const af = env.agt.get(op);
   if (af !== undefined) {
     pendingAsyncOp = op;
-    return (yield af(args)) as ReduceResult;
+    return (yield af(args, groundedCallContext(env, world))) as ReduceResult;
   }
-  return callGrounded(env.gt, op, args);
+  const sf = env.gt.get(op);
+  if (sf === undefined) return { tag: "noReduce" };
+  return sf(
+    args,
+    isContextIndependentGroundedOp(sf)
+      ? DEFAULT_GROUNDED_CALL_CONTEXT
+      : groundedCallContext(env, world),
+  );
 }
 
 function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
   return typeof (value as { then?: unknown }).then === "function";
 }
 
-function* callHostImportG(env: MinEnv, space: Atom, file: Atom): Gen<ReduceResult | undefined> {
+function* callHostImportG(
+  env: MinEnv,
+  world: World,
+  space: Atom,
+  file: Atom,
+): Gen<ReduceResult | undefined> {
   const hostImport = env.hostImport;
   if (hostImport === undefined) return undefined;
-  const result = hostImport(space, file);
+  const result = hostImport(space, file, groundedCallContext(env, world));
   if (isPromiseLike(result)) {
     pendingAsyncOp = "import!";
     return (yield result) as ReduceResult;
@@ -214,6 +524,13 @@ const cons = (head: Frame, tail: Stack): StackCons => ({ head, tail });
 export interface Item {
   readonly stack: Stack;
   readonly bnd: Bindings;
+  /** Dynamic evaluator selected by `evalc`, delimited by the continuation stack it entered from. */
+  readonly evaluationScope?: EvaluationScope;
+}
+interface EvaluationScope {
+  readonly env: MinEnv;
+  readonly boundary: Stack;
+  readonly parent?: EvaluationScope;
 }
 interface ItemSource {
   readonly endState: St;
@@ -381,7 +698,7 @@ function headKey(a: Atom): string | undefined {
 function isDefinedHead(env: MinEnv, w: World, name: string): boolean {
   return (
     hasVisibleStaticRuleHead(env, w, name) ||
-    env.sigs.has(name) ||
+    typeViewFor(env, w).sigs.has(name) ||
     w.selfRules.has(name) ||
     env.gt.has(name) ||
     env.agt.has(name) ||
@@ -464,6 +781,10 @@ function evalResult(prev: Stack, r: Atom, b: Bindings): Item {
 
 // ---------- env (MinEnv) ----------
 export interface MinEnv {
+  /** Static program revision used to validate reusable async program snapshots. */
+  programVersion?: number;
+  /** Static indexes share a cached program image and must detach before their first write. */
+  staticProgramShared?: boolean;
   ruleIndex: Map<string, Array<[Atom, Atom]>>;
   varRules: Array<[Atom, Atom]>;
   // The genuinely variable-headed (`($x …)`) subset of `varRules`. Those can match a query of ANY head;
@@ -471,15 +792,25 @@ export interface MinEnv {
   // an expression-headed query. Kept as a separate list so a symbol/grounded query skips the dead probes.
   varRulesVar: Array<[Atom, Atom]>;
   sigs: Map<string, Atom[]>;
+  /** Local version of the static and grounded type program used to validate cached world views. */
+  typeProgramVersion?: number;
   gt: GroundingTable;
   atoms: Atom[];
+  /** Runtime-independent prelude/module atoms inherited by every selected named-space evaluator. */
+  sharedContextAtoms?: readonly Atom[];
   types: Map<string, Atom[]>;
   imports: Map<string, Atom[]>;
   exprTypes: Array<[Atom, Atom]>;
   /** Async grounded operations, dispatched by the async runner; empty for pure synchronous evaluation. */
   agt: Map<string, AsyncGroundFn>;
+  /** Local version of the sync and async grounded registries used by context descriptors. */
+  groundingVersion?: number;
   /** Optional host-language import hook used by async `import!` for files outside the MeTTa import map. */
   hostImport?: HostImportFn;
+  /** Capabilities made visible to grounded operations in this runtime. */
+  capabilities?: ReadonlySet<string>;
+  /** Dynamic atomspace selected by `evalc` or `metta`. Absent means the compatibility `&self` context. */
+  evaluationContext?: EvaluationContext;
   /** Per-runner `with-mutex` locks (a Promise chain per key), so mutexes do not leak across runners. */
   mutexes: Map<string, Promise<void>>;
   /** Optional per-run hash-cons table for immutable terms. */
@@ -505,15 +836,15 @@ export interface MinEnv {
   /** Positive only while an idempotent unique(collapse ...) consumer evaluates a proven-pure ground call. */
   distinctGroundDepth?: number | undefined;
   /** Functor names proven tabling-safe by `analyzePurity`; recomputed when equations change. */
-  pureFunctors?: Set<string>;
+  pureFunctors?: Set<string> | undefined;
   /** Functor names proven safe for MODED tabling by `analyzePurity(env, MODED_IMPURE_OPS)` — a superset of
    *  `pureFunctors` (only `empty`, which is genuinely pure, is treated more permissively); recomputed
    *  alongside it. */
-  modedPureFunctors?: Set<string>;
+  modedPureFunctors?: Set<string> | undefined;
   /** Pure functors whose rule SCC has branching recursion, so ground tabling is likely useful. */
-  tableWorth?: Set<string>;
+  tableWorth?: Set<string> | undefined;
   /** Pure functors whose rule SCC has branching recursion under the moded purity rules. */
-  modedTableWorth?: Set<string>;
+  modedTableWorth?: Set<string> | undefined;
   /** Set when equations changed and the purity/profitability analysis must be refreshed before evaluation. */
   tablingDirty?: boolean | undefined;
   /** Memo for `getTypes` of ground atoms: a ground atom's type is a pure function of the env's type tables,
@@ -545,13 +876,106 @@ export interface MinEnv {
   useFlatAtomspace?: boolean;
 }
 
+interface TypeView {
+  sigs: Map<string, Atom[]>;
+  types: Map<string, Atom[]>;
+  exprTypes: Array<[Atom, Atom]>;
+  typeCache?: WeakMap<Atom, Atom[]> | undefined;
+}
+
+const DEFAULT_RUNTIME_CAPABILITIES: readonly string[] = Object.freeze([
+  "atomspace-read",
+  "atomspace-write",
+  "grounded-exec",
+  "import",
+]);
+
+/** The atomspace-dependent part of one dynamic evaluation context. */
+export type EvaluationContext = GroundedCallContext;
+
+interface NamedEvaluationEnvironment {
+  readonly root: MinEnv;
+  readonly name: string;
+  readonly source: NamedSpace | undefined;
+}
+
+const namedEvaluationEnvironments = new WeakMap<MinEnv, NamedEvaluationEnvironment>();
+const rootContextEnvironments = new WeakMap<MinEnv, MinEnv>();
+
+interface CachedNamedEnvironment {
+  readonly source: NamedSpace | undefined;
+  readonly shared: readonly Atom[] | undefined;
+  readonly expectedType: Atom;
+  readonly typeProgramVersion: number;
+  readonly groundingVersion: number;
+  readonly syncRegistry: GroundingTable;
+  readonly asyncRegistry: Map<string, AsyncGroundFn>;
+  readonly syncSize: number;
+  readonly asyncSize: number;
+  readonly syncRevision: number | undefined;
+  readonly asyncRevision: number | undefined;
+  readonly imports: Map<string, Atom[]>;
+  readonly importRevision: number | undefined;
+  readonly capabilities: ReadonlySet<string> | undefined;
+  readonly capabilityRevision: number | undefined;
+  readonly hostImport: HostImportFn | undefined;
+  readonly environment: MinEnv;
+}
+
+const namedEnvironmentCache = new WeakMap<MinEnv, Map<string, readonly CachedNamedEnvironment[]>>();
+
+function rootEvaluationEnvironment(env: MinEnv): MinEnv {
+  return namedEvaluationEnvironments.get(env)?.root ?? rootContextEnvironments.get(env) ?? env;
+}
+
+function isNamedEvaluationEnvironment(env: MinEnv): boolean {
+  return env.evaluationContext !== undefined && namedEvaluationEnvironments.has(env);
+}
+
+function evaluationCacheEnvironment(env: MinEnv): MinEnv {
+  return isNamedEvaluationEnvironment(env) ? env : rootEvaluationEnvironment(env);
+}
+
+function activeSpaceAtom(env: MinEnv): Atom {
+  return env.evaluationContext?.currentSpace ?? sym("&self");
+}
+
+function activeSpaceName(env: MinEnv): string {
+  const space = activeSpaceAtom(env);
+  return space.kind === "sym" ? space.name : "&self";
+}
+
+function withExpectedEvaluationType(env: MinEnv, expectedType: Atom): MinEnv {
+  const currentExpected = env.evaluationContext?.expectedType ?? UNDEF;
+  if (atomEq(currentExpected, expectedType)) return env;
+  const currentSpace = activeSpaceAtom(env);
+  const visibleSpaces = env.evaluationContext?.visibleSpaces ?? [currentSpace];
+  const view: MinEnv = {
+    ...env,
+    evaluationContext: { currentSpace, visibleSpaces, expectedType },
+  };
+  const named = namedEvaluationEnvironments.get(env);
+  if (named === undefined) rootContextEnvironments.set(view, rootEvaluationEnvironment(env));
+  else namedEvaluationEnvironments.set(view, named);
+  return view;
+}
+
 const bindingPacketRegistries = new WeakMap<MinEnv, BindingPacketRegistry>();
+const pinnedProgramOwners = new WeakMap<MinEnv, MinEnv>();
+const pinnedProgramEnvironments = new WeakSet<MinEnv>();
+const activeProgramSnapshots = new WeakMap<MinEnv, Set<MinEnv>>();
+
+function programIdentityEnvironment(env: MinEnv): MinEnv {
+  const root = rootEvaluationEnvironment(env);
+  return pinnedProgramOwners.get(root) ?? root;
+}
 
 function bindingPacketRegistry(env: MinEnv): BindingPacketRegistry {
-  let registry = bindingPacketRegistries.get(env);
+  const owner = programIdentityEnvironment(env);
+  let registry = bindingPacketRegistries.get(owner);
   if (registry === undefined) {
     registry = new BindingPacketRegistry("binding-packets");
-    bindingPacketRegistries.set(env, registry);
+    bindingPacketRegistries.set(owner, registry);
   }
   return registry;
 }
@@ -567,6 +991,37 @@ interface StaticNestedMatchIndex {
 
 function emptyStaticNestedMatchIndex(): StaticNestedMatchIndex {
   return { byHead: new Map(), wildcardAtPos: new Map(), nonGroundFactHeads: new Set() };
+}
+
+function cloneArrayMap<T>(source: ReadonlyMap<string, readonly T[]>): Map<string, T[]> {
+  return new Map([...source].map(([key, values]) => [key, values.slice()]));
+}
+
+/** Detach mutable static indexes only when a live async snapshot still shares them. */
+function detachProgramCollectionsIfShared(env: MinEnv): void {
+  const snapshots = activeProgramSnapshots.get(env);
+  const liveSnapshotSharesProgram =
+    snapshots !== undefined && [...snapshots].some((snapshot) => snapshot.atoms === env.atoms);
+  if (env.staticProgramShared !== true && !liveSnapshotSharesProgram) return;
+  env.ruleIndex = cloneArrayMap(env.ruleIndex);
+  env.varRules = env.varRules.slice();
+  env.varRulesVar = env.varRulesVar.slice();
+  env.sigs = cloneArrayMap(env.sigs);
+  env.atoms = env.atoms.slice();
+  env.types = cloneArrayMap(env.types);
+  env.exprTypes = env.exprTypes.slice();
+  env.factIndex = cloneArrayMap(env.factIndex);
+  env.argIndex = cloneArrayMap(env.argIndex);
+  env.nonGroundAtPos = cloneArrayMap(env.nonGroundAtPos);
+  env.varHeadedFacts = env.varHeadedFacts.slice();
+  if (env.nestedMatchIndex !== undefined) {
+    env.nestedMatchIndex = {
+      byHead: cloneArrayMap(env.nestedMatchIndex.byHead),
+      wildcardAtPos: cloneArrayMap(env.nestedMatchIndex.wildcardAtPos),
+      nonGroundFactHeads: new Set(env.nestedMatchIndex.nonGroundFactHeads),
+    };
+  }
+  env.staticProgramShared = false;
 }
 
 const KEY_SEP = "\x01";
@@ -652,21 +1107,27 @@ function addGroundedOperationType(env: MinEnv, name: string, op: GroundFn): void
   if (type.kind === "expr" && opOf(type) === "->") env.sigs.set(name, type.items.slice(1));
   pushUniqueType(env.types, name, type);
   env.typeCache = undefined;
+  env.typeProgramVersion = (env.typeProgramVersion ?? 0) + 1;
 }
 
 /** An empty environment for grounding table `gt`. Grow it with `addAtomToEnv`. */
 export function emptyEnv(gt: GroundingTable): MinEnv {
+  const groundingTable = asRevisionMap(gt);
   const env: MinEnv = {
+    programVersion: 0,
     ruleIndex: new Map(),
     varRules: [],
     varRulesVar: [],
     sigs: new Map(),
-    gt,
+    typeProgramVersion: 0,
+    gt: groundingTable,
     atoms: [],
     types: new Map(),
-    imports: new Map(),
+    imports: new RevisionMap(),
     exprTypes: [],
-    agt: new Map(),
+    agt: new RevisionMap(),
+    groundingVersion: 0,
+    capabilities: new RevisionSet(DEFAULT_RUNTIME_CAPABILITIES),
     mutexes: new Map(),
     evaluatedAtoms: new WeakSet(),
     factIndex: new Map(),
@@ -675,7 +1136,7 @@ export function emptyEnv(gt: GroundingTable): MinEnv {
     nestedMatchIndex: emptyStaticNestedMatchIndex(),
     varHeadedFacts: [],
   };
-  for (const [name, op] of gt) addGroundedOperationType(env, name, op);
+  for (const [name, op] of groundingTable) addGroundedOperationType(env, name, op);
   return env;
 }
 
@@ -711,14 +1172,19 @@ function invalidateGroundedRegistration(env: MinEnv): void {
 
 /** Register a sync grounded operation and invalidate analyses that may have classified its name. */
 export function registerGroundedOperation(env: MinEnv, name: string, op: GroundFn): void {
+  retireCachedProgramSnapshot(env);
+  detachProgramCollectionsIfShared(env);
   env.gt.set(name, op);
+  env.groundingVersion = (env.groundingVersion ?? 0) + 1;
   addGroundedOperationType(env, name, op);
   invalidateGroundedRegistration(env);
 }
 
 /** Register an async grounded operation and invalidate analyses that may have classified its name. */
 export function registerAsyncGroundedOperation(env: MinEnv, name: string, op: AsyncGroundFn): void {
+  retireCachedProgramSnapshot(env);
   env.agt.set(name, op);
+  env.groundingVersion = (env.groundingVersion ?? 0) + 1;
   invalidateGroundedRegistration(env);
 }
 
@@ -856,6 +1322,7 @@ function ensureTablingAnalysis(env: MinEnv): void {
     env.modedTableWorth !== undefined
   )
     return;
+  retireCachedProgramSnapshot(env);
   env.pureFunctors = analyzePurityRef(env);
   env.tableWorth = analyzeTableWorth(env, env.pureFunctors);
   env.modedPureFunctors = analyzePurityRef(env, MODED_IMPURE_OPS);
@@ -892,6 +1359,8 @@ function ensureCompiled(env: MinEnv, query: Atom): void {
   }
 
   if (env.compileDirty) {
+    retireCachedProgramSnapshot(env);
+    detachProgramCollectionsIfShared(env);
     env.compiled.clear();
     env.compiledComplete = false;
     specializeHO(env);
@@ -939,7 +1408,11 @@ function disableTabling(env: MinEnv): void {
 /** Incorporate one atom into `env` (mutating): rule index, signatures, types, and the atom list.
  *  Lets a sequential runner extend the env per atom instead of rebuilding it each query; correctness
  *  gated by the 270/270 oracle. */
-export function addAtomToEnv(env: MinEnv, x: Atom): void {
+export function addAtomToEnv(env: MinEnv, x: Atom, replaceTypeSignature = true): void {
+  retireCachedProgramSnapshot(env);
+  detachProgramCollectionsIfShared(env);
+  if (env.sharedContextAtoms === env.atoms) env.atoms = env.atoms.slice();
+  env.programVersion = (env.programVersion ?? 0) + 1;
   const atom = env.intern === undefined ? x : internAtom(env.intern, x);
   const occurrenceId = env.atoms.length;
   // Old structural MinEnv values may not carry this optional index. Initialize only for an empty env;
@@ -990,13 +1463,20 @@ export function addAtomToEnv(env: MinEnv, x: Atom): void {
     const subj = atom.items[1]!;
     const t = atom.items[2]!;
     if (subj.kind === "sym") {
-      if (opOf(t) === "->" && t.kind === "expr") env.sigs.set(subj.name, t.items.slice(1));
+      if (
+        opOf(t) === "->" &&
+        t.kind === "expr" &&
+        (replaceTypeSignature || !env.sigs.has(subj.name))
+      )
+        env.sigs.set(subj.name, t.items.slice(1));
       pushUniqueType(env.types, subj.name, t);
     } else if (subj.kind === "expr") {
       if (!env.exprTypes.some(([s, tt]) => atomEq(s, subj) && atomEq(tt, t)))
         env.exprTypes.push([subj, t]);
     }
     env.typeCache = undefined; // a new type declaration invalidates the getTypes memo
+    env.typeProgramVersion = (env.typeProgramVersion ?? 0) + 1;
+    disableTabling(env);
   }
 }
 
@@ -1006,38 +1486,73 @@ export function buildEnv(atoms: Atom[], gt: GroundingTable): MinEnv {
   return env;
 }
 
-/** Register only the type declarations (`(: subj type)`) from imported atoms into the env, so an
- *  imported module's signatures drive type-directed evaluation. Rules are left to the space. */
-function registerImportedTypes(env: MinEnv, atoms: readonly Atom[]): void {
-  for (const x of atoms) {
-    if (x.kind !== "expr" || opOf(x) !== ":" || x.items.length !== 3) continue;
-    const subj = x.items[1]!;
-    const t = x.items[2]!;
-    if (subj.kind === "sym") {
-      // An imported `(: op ...)` declaration may ADD a signature for an op that has none, but must not
-      // OVERRIDE one already registered (by the prelude/stdlib or an earlier import). This keeps a grounded
-      // op's built-in signature fixed: PeTTa's lib_he redeclares `unify` as `(-> Expression Expression
-      // Expression Expression %Undefined%)`; letting that replace the built-in `(-> Atom Atom Atom Atom ...)`
-      // makes the prelude's own `is-function` -> `unify` calls fail arg type-checking on their symbol/metatype
-      // arguments (e.g. `(unify Symbol Expression then False)` -> BadArgType). The module's `(= (unify ...) ...)`
-      // rules still load into the space as usual. (First-registration-wins also leaves the concurrency
-      // module free to set `transaction`'s `(-> Atom ...)` sig, which its lazy-argument evaluation relies on.)
-      if (opOf(t) === "->" && t.kind === "expr" && !env.sigs.has(subj.name))
-        env.sigs.set(subj.name, t.items.slice(1));
-      const cur = env.types.get(subj.name) ?? [];
-      if (!cur.some((e) => atomEq(e, t))) env.types.set(subj.name, [...cur, t]);
-    } else if (subj.kind === "expr") {
-      if (!env.exprTypes.some(([s, tt]) => atomEq(s, subj) && atomEq(tt, t)))
-        env.exprTypes.push([subj, t]);
-    }
-    env.typeCache = undefined; // a new type declaration invalidates the getTypes memo
-  }
+interface EnvironmentMutationSnapshot {
+  readonly sigs: Map<string, Atom[]>;
+  readonly types: Map<string, Atom[]>;
+  readonly exprTypes: Array<[Atom, Atom]>;
+  readonly typeCache: WeakMap<Atom, Atom[]> | undefined;
+  readonly evaluatedAtoms: WeakSet<Atom>;
+  readonly compiled: CompiledFns | undefined;
+  readonly compileDirty: boolean | undefined;
+  readonly compiledComplete: boolean | undefined;
+  readonly pureFunctors: Set<string> | undefined;
+  readonly modedPureFunctors: Set<string> | undefined;
+  readonly tableWorth: Set<string> | undefined;
+  readonly modedTableWorth: Set<string> | undefined;
+  readonly tablingDirty: boolean | undefined;
+}
+
+function snapshotEnvironmentMutations(env: MinEnv): EnvironmentMutationSnapshot {
+  return {
+    sigs: new Map(env.sigs),
+    types: new Map(env.types),
+    exprTypes: env.exprTypes.slice(),
+    typeCache: env.typeCache,
+    evaluatedAtoms: env.evaluatedAtoms,
+    compiled: env.compiled,
+    compileDirty: env.compileDirty,
+    compiledComplete: env.compiledComplete,
+    pureFunctors: env.pureFunctors,
+    modedPureFunctors: env.modedPureFunctors,
+    tableWorth: env.tableWorth,
+    modedTableWorth: env.modedTableWorth,
+    tablingDirty: env.tablingDirty,
+  };
+}
+
+function restoreEnvironmentMutations(env: MinEnv, snapshot: EnvironmentMutationSnapshot): void {
+  const semanticCachesReplaced = env.evaluatedAtoms !== snapshot.evaluatedAtoms;
+  env.sigs = snapshot.sigs;
+  env.types = snapshot.types;
+  env.exprTypes = snapshot.exprTypes;
+  env.typeCache = snapshot.typeCache;
+  env.evaluatedAtoms = snapshot.evaluatedAtoms;
+  if (snapshot.compiled === undefined) env.compiled = undefined;
+  else env.compiled = snapshot.compiled;
+  if (snapshot.compileDirty === undefined) env.compileDirty = undefined;
+  else env.compileDirty = snapshot.compileDirty;
+  if (snapshot.compiledComplete === undefined) env.compiledComplete = undefined;
+  else env.compiledComplete = snapshot.compiledComplete;
+  if (snapshot.pureFunctors === undefined) env.pureFunctors = undefined;
+  else env.pureFunctors = snapshot.pureFunctors;
+  if (snapshot.modedPureFunctors === undefined) env.modedPureFunctors = undefined;
+  else env.modedPureFunctors = snapshot.modedPureFunctors;
+  if (snapshot.tableWorth === undefined) env.tableWorth = undefined;
+  else env.tableWorth = snapshot.tableWorth;
+  if (snapshot.modedTableWorth === undefined) env.modedTableWorth = undefined;
+  else env.modedTableWorth = snapshot.modedTableWorth;
+  if (snapshot.tablingDirty === undefined) env.tablingDirty = undefined;
+  else env.tablingDirty = snapshot.tablingDirty;
+  if (semanticCachesReplaced) env.tableSpace?.clear();
 }
 
 /** The `&self` atoms (prelude + stdlib + KB in `env.atoms`, plus any dynamically added `selfExtra`).
  *  Returns `env.atoms` directly when nothing has been added dynamically (the common case), avoiding an
  *  O(atoms) spread allocation on every type/candidate/match lookup. Callers must not mutate the result. */
 function selfAtoms(env: MinEnv, w: World): readonly Atom[] {
+  const named =
+    env.evaluationContext === undefined ? undefined : namedEvaluationEnvironments.get(env);
+  if (named !== undefined) return namedSpaceAtoms(w.spaces.get(named.name));
   if (w.removedStatic !== null) {
     const stat = visibleStaticAtoms(w, env.atoms);
     const runtime = runtimeAtoms(w);
@@ -1114,12 +1629,14 @@ function staticRuleRemoved(w: World, lhs: Atom, rhs: Atom): boolean {
 
 function visibleStaticRules(env: MinEnv, w: World, toEval: Atom): Array<[Atom, Atom]> {
   const stat = candidates(env, toEval);
+  if (isNamedEvaluationEnvironment(env)) return stat;
   if (w.removedStatic === null) return stat;
   return stat.filter(([lhs, rhs]) => !staticRuleRemoved(w, lhs, rhs));
 }
 
 function visibleStaticRulesForHead(env: MinEnv, w: World, name: string): Array<[Atom, Atom]> {
   const rules = env.ruleIndex.get(name) ?? [];
+  if (isNamedEvaluationEnvironment(env)) return rules;
   if (w.removedStatic === null || !staticRulesChangedFor(w, name)) return rules;
   return rules.filter(([lhs, rhs]) => !staticRuleRemoved(w, lhs, rhs));
 }
@@ -1127,6 +1644,7 @@ function visibleStaticRulesForHead(env: MinEnv, w: World, name: string): Array<[
 function hasVisibleStaticRuleHead(env: MinEnv, w: World, name: string): boolean {
   const rules = env.ruleIndex.get(name);
   if (rules === undefined) return false;
+  if (isNamedEvaluationEnvironment(env)) return true;
   if (w.removedStatic === null || !staticRulesChangedFor(w, name)) return true;
   return rules.some(([lhs, rhs]) => !staticRuleRemoved(w, lhs, rhs));
 }
@@ -1187,11 +1705,122 @@ function namedSpaceAtoms(space: NamedSpace | undefined): Atom[] {
   return logToArray(space ?? emptyLog);
 }
 
-function namedSpaceEnv(env: MinEnv, w: World, name: string): MinEnv {
-  const view = buildEnv(namedSpaceAtoms(w.spaces.get(name)), env.gt);
-  view.imports = env.imports;
-  if (env.intern !== undefined) view.intern = env.intern;
+function namedSpaceEnv(env: MinEnv, w: World, name: string, expectedType: Atom = UNDEF): MinEnv {
+  const root = rootEvaluationEnvironment(env);
+  const source = w.spaces.get(name);
+  const shared = root.sharedContextAtoms ?? [];
+  let byName = namedEnvironmentCache.get(root);
+  if (byName === undefined) {
+    byName = new Map();
+    namedEnvironmentCache.set(root, byName);
+  }
+  const cached = byName.get(name) ?? [];
+  const typeProgramVersion = root.typeProgramVersion ?? 0;
+  const groundingVersion = root.groundingVersion ?? 0;
+  const syncRevision = collectionRevision(root.gt);
+  const asyncRevision = collectionRevision(root.agt);
+  const importRevision = collectionRevision(root.imports);
+  const capabilityRevision =
+    root.capabilities === undefined ? 0 : collectionRevision(root.capabilities);
+  const hit = cached.find(
+    (entry) =>
+      entry.source === source &&
+      entry.shared === root.sharedContextAtoms &&
+      atomEq(entry.expectedType, expectedType) &&
+      entry.typeProgramVersion === typeProgramVersion &&
+      entry.groundingVersion === groundingVersion &&
+      entry.syncRegistry === root.gt &&
+      entry.asyncRegistry === root.agt &&
+      entry.syncSize === root.gt.size &&
+      entry.asyncSize === root.agt.size &&
+      entry.syncRevision === syncRevision &&
+      entry.asyncRevision === asyncRevision &&
+      entry.imports === root.imports &&
+      entry.importRevision === importRevision &&
+      entry.capabilities === root.capabilities &&
+      entry.capabilityRevision === capabilityRevision &&
+      entry.hostImport === root.hostImport,
+  );
+  if (hit !== undefined) return hit.environment;
+
+  const local = namedSpaceAtoms(source);
+  const view = buildEnv(shared.slice(), root.gt);
+  for (const atom of local) addAtomToEnv(view, atom, false);
+  // A context changes the program/type view, not the runtime services. Sync and async groundeds, imports,
+  // host import resolution, interning, and mutex ownership therefore stay attached to the root runner.
+  view.imports = root.imports;
+  view.agt = root.agt;
+  view.mutexes = root.mutexes;
+  if (root.capabilities !== undefined) view.capabilities = root.capabilities;
+  if (root.hostImport !== undefined) view.hostImport = root.hostImport;
+  if (root.intern !== undefined) view.intern = root.intern;
+  if (root.useTrail !== undefined) view.useTrail = root.useTrail;
+  if (root.useFlatAtomspace !== undefined) view.useFlatAtomspace = root.useFlatAtomspace;
+  view.evaluationContext = {
+    currentSpace: sym(name),
+    visibleSpaces: [sym(name)],
+    expectedType,
+  };
+  // Worker evaluators are built from the root program image. A named context must stay local until the
+  // structured worker protocol can transport that selected image instead of formatted source alone.
+  namedEvaluationEnvironments.set(view, { root, name, source });
+  const entry: CachedNamedEnvironment = {
+    source,
+    shared: root.sharedContextAtoms,
+    expectedType,
+    typeProgramVersion,
+    groundingVersion,
+    syncRegistry: root.gt,
+    asyncRegistry: root.agt,
+    syncSize: root.gt.size,
+    asyncSize: root.agt.size,
+    syncRevision,
+    asyncRevision,
+    imports: root.imports,
+    importRevision,
+    capabilities: root.capabilities,
+    capabilityRevision,
+    hostImport: root.hostImport,
+    environment: view,
+  };
+  const sameExpected = cached.findIndex((candidate) =>
+    atomEq(candidate.expectedType, expectedType),
+  );
+  const next = cached.slice();
+  if (sameExpected < 0) next.push(entry);
+  else next[sameExpected] = entry;
+  byName.set(name, next.length <= 8 ? next : next.slice(-8));
   return view;
+}
+
+function refreshEvaluationEnvironment(env: MinEnv, w: World): MinEnv {
+  if (env.evaluationContext === undefined) return env;
+  const named = namedEvaluationEnvironments.get(env);
+  if (named === undefined) return env;
+  return namedSpaceEnv(named.root, w, named.name, env.evaluationContext?.expectedType ?? UNDEF);
+}
+
+function selectEvaluationEnvironment(
+  env: MinEnv,
+  w: World,
+  requested: Atom,
+  expectedType: Atom,
+): MinEnv | undefined {
+  const resolved = resolveTok(w, requested);
+  if (resolved.kind !== "sym") return undefined;
+  if (resolved.name === "&self") return withExpectedEvaluationType(env, expectedType);
+  if (resolved.name === activeSpaceName(env)) return withExpectedEvaluationType(env, expectedType);
+  return namedSpaceEnv(env, w, resolved.name, expectedType);
+}
+
+function contextualSpaceName(env: MinEnv, w: World, requested: Atom): string | undefined {
+  const name = spaceName(w, requested);
+  return name === "&self" ? activeSpaceName(env) : name;
+}
+
+function contextualSpaceAtom(env: MinEnv, w: World, requested: Atom): Atom {
+  const name = contextualSpaceName(env, w, requested);
+  return name === undefined ? requested : sym(name);
 }
 
 function namedSpaceCandidateGetter(
@@ -1210,6 +1839,12 @@ function namedSpaceCandidateGetter(
 }
 
 export interface World {
+  /** Monotone logical-update generation for observable branch-world mutations. */
+  generation: number;
+  /** Successful catalog and host imports in commit order. Repeated imports remain distinct. */
+  moduleInstallations: readonly GroundedModuleInstallation[];
+  /** Nested transaction depth used to reject host imports that cannot be rolled back. */
+  transactionDepth: number;
   spaces: Map<string, NamedSpace>;
   store: Map<number, Atom>;
   tokens: Map<string, Atom>;
@@ -1232,6 +1867,14 @@ export interface World {
   removedStatic: AtomLog;
   removedStaticHeads: ReadonlySet<string>;
   removedStaticVarRules: boolean;
+  /** True once a branch adds or removes a type declaration in `&self`. */
+  hasTypeMutations: boolean;
+  /** Complete visible type tables for that branch, built lazily after a type mutation. */
+  typeView: TypeView | undefined;
+  /** Static type-program version used to build `typeView`. */
+  typeViewProgramVersion: number | undefined;
+  /** Root environment whose static type program owns `typeView`. */
+  typeViewOwner: MinEnv | undefined;
   // Interpreter stack-depth bound, set in-language by `(pragma! max-stack-depth N)` (Hyperon's pragma).
   // 0 means unlimited (the Hyperon default). When positive, a branch whose stack reaches this depth
   // degrades to a StackOverflow error atom instead of recursing further. The pragma is a depth bound only; the
@@ -1247,10 +1890,16 @@ let runtimeRuleSetVersionCounter = 0;
 function nextRuntimeRuleSetVersion(): number {
   return ++runtimeRuleSetVersionCounter;
 }
+function nextWorldGeneration(world: World): number {
+  return world.generation + 1;
+}
 
 export const initSt = (): St => ({
   counter: 0,
   world: {
+    generation: 0,
+    moduleInstallations: [],
+    transactionDepth: 0,
     spaces: new Map(),
     store: new Map(),
     tokens: new Map(),
@@ -1262,11 +1911,18 @@ export const initSt = (): St => ({
     removedStatic: emptyLog,
     removedStaticHeads: new Set(),
     removedStaticVarRules: false,
+    hasTypeMutations: false,
+    typeView: undefined,
+    typeViewProgramVersion: undefined,
+    typeViewOwner: undefined,
     maxStackDepth: 0,
   },
 });
 function cloneWorld(w: World): World {
   return {
+    generation: w.generation,
+    moduleInstallations: w.moduleInstallations,
+    transactionDepth: w.transactionDepth,
     spaces: new Map(w.spaces),
     store: new Map(w.store),
     tokens: new Map(w.tokens),
@@ -1278,8 +1934,476 @@ function cloneWorld(w: World): World {
     removedStatic: w.removedStatic,
     removedStaticHeads: new Set(w.removedStaticHeads),
     removedStaticVarRules: w.removedStaticVarRules,
+    hasTypeMutations: w.hasTypeMutations,
+    typeView: w.typeView,
+    typeViewProgramVersion: w.typeViewProgramVersion,
+    typeViewOwner: w.typeViewOwner,
     maxStackDepth: w.maxStackDepth,
   };
+}
+
+interface PinnedAsyncEvaluation {
+  readonly env: MinEnv;
+  readonly state: St;
+  readonly release: () => void;
+}
+
+interface ProgramSnapshotStamp {
+  readonly reusable: boolean;
+  readonly programVersion: number;
+  readonly typeProgramVersion: number;
+  readonly groundingVersion: number;
+  readonly atoms: Atom[];
+  readonly ruleIndex: MinEnv["ruleIndex"];
+  readonly sigs: MinEnv["sigs"];
+  readonly types: MinEnv["types"];
+  readonly gt: GroundingTable;
+  readonly gtRevision: number | undefined;
+  readonly agt: Map<string, AsyncGroundFn>;
+  readonly agtRevision: number | undefined;
+  readonly imports: Map<string, Atom[]>;
+  readonly importRevision: number | undefined;
+  readonly capabilities: ReadonlySet<string> | undefined;
+  readonly capabilityRevision: number | undefined;
+  readonly sharedContextAtoms: readonly Atom[] | undefined;
+  readonly hostImport: HostImportFn | undefined;
+  readonly evaluationContext: EvaluationContext | undefined;
+  readonly mutexes: Map<string, Promise<void>>;
+  readonly tableSpace: TableSpace | undefined;
+  readonly compiled: CompiledFns | undefined;
+  readonly compiledSize: number;
+  readonly intern: InternTable | undefined;
+  readonly parEval: MinEnv["parEval"];
+  readonly parEvalAsync: MinEnv["parEvalAsync"];
+  readonly useTrail: boolean | undefined;
+  readonly useFlatAtomspace: boolean | undefined;
+}
+
+interface CachedPinnedProgram {
+  readonly source: MinEnv;
+  readonly stamp: ProgramSnapshotStamp;
+  readonly pinned: MinEnv;
+  readonly snapshots: Set<MinEnv>;
+  readonly pinnedGroundings: RevisionMap<string, GroundFn>;
+  readonly pinnedAsyncGroundings: RevisionMap<string, AsyncGroundFn>;
+  readonly pinnedImports: RevisionMap<string, Atom[]>;
+  readonly pinnedCapabilities: RevisionSet<string> | undefined;
+  leases: number;
+  retired: boolean;
+  disposed: boolean;
+}
+
+const asyncProgramSnapshotCache = new WeakMap<MinEnv, CachedPinnedProgram>();
+
+function programSnapshotStamp(root: MinEnv): ProgramSnapshotStamp {
+  const gtRevision = collectionRevision(root.gt);
+  const agtRevision = collectionRevision(root.agt);
+  const importRevision = collectionRevision(root.imports);
+  const capabilityRevision =
+    root.capabilities === undefined ? 0 : collectionRevision(root.capabilities);
+  return {
+    reusable:
+      gtRevision !== undefined &&
+      agtRevision !== undefined &&
+      importRevision !== undefined &&
+      capabilityRevision !== undefined,
+    programVersion: root.programVersion ?? 0,
+    typeProgramVersion: root.typeProgramVersion ?? 0,
+    groundingVersion: root.groundingVersion ?? 0,
+    atoms: root.atoms,
+    ruleIndex: root.ruleIndex,
+    sigs: root.sigs,
+    types: root.types,
+    gt: root.gt,
+    gtRevision,
+    agt: root.agt,
+    agtRevision,
+    imports: root.imports,
+    importRevision,
+    capabilities: root.capabilities,
+    capabilityRevision,
+    sharedContextAtoms: root.sharedContextAtoms,
+    hostImport: root.hostImport,
+    evaluationContext: root.evaluationContext,
+    mutexes: root.mutexes,
+    tableSpace: root.tableSpace,
+    compiled: root.compiled,
+    compiledSize: root.compiled?.size ?? 0,
+    intern: root.intern,
+    parEval: root.parEval,
+    parEvalAsync: root.parEvalAsync,
+    useTrail: root.useTrail,
+    useFlatAtomspace: root.useFlatAtomspace,
+  };
+}
+
+function sameProgramSnapshot(left: ProgramSnapshotStamp, right: ProgramSnapshotStamp): boolean {
+  return (
+    right.reusable &&
+    left.programVersion === right.programVersion &&
+    left.typeProgramVersion === right.typeProgramVersion &&
+    left.groundingVersion === right.groundingVersion &&
+    left.atoms === right.atoms &&
+    left.ruleIndex === right.ruleIndex &&
+    left.sigs === right.sigs &&
+    left.types === right.types &&
+    left.gt === right.gt &&
+    left.gtRevision === right.gtRevision &&
+    left.agt === right.agt &&
+    left.agtRevision === right.agtRevision &&
+    left.imports === right.imports &&
+    left.importRevision === right.importRevision &&
+    left.capabilities === right.capabilities &&
+    left.capabilityRevision === right.capabilityRevision &&
+    left.sharedContextAtoms === right.sharedContextAtoms &&
+    left.hostImport === right.hostImport &&
+    left.evaluationContext === right.evaluationContext &&
+    left.mutexes === right.mutexes &&
+    left.tableSpace === right.tableSpace &&
+    left.compiled === right.compiled &&
+    left.compiledSize === right.compiledSize &&
+    left.intern === right.intern &&
+    left.parEval === right.parEval &&
+    left.parEvalAsync === right.parEvalAsync &&
+    left.useTrail === right.useTrail &&
+    left.useFlatAtomspace === right.useFlatAtomspace
+  );
+}
+
+function programSnapshotStillCurrent(stamp: ProgramSnapshotStamp, root: MinEnv): boolean {
+  return (
+    stamp.reusable &&
+    stamp.programVersion === (root.programVersion ?? 0) &&
+    stamp.typeProgramVersion === (root.typeProgramVersion ?? 0) &&
+    stamp.groundingVersion === (root.groundingVersion ?? 0) &&
+    stamp.atoms === root.atoms &&
+    stamp.ruleIndex === root.ruleIndex &&
+    stamp.sigs === root.sigs &&
+    stamp.types === root.types &&
+    stamp.gt === root.gt &&
+    stamp.gtRevision === collectionRevision(root.gt) &&
+    stamp.agt === root.agt &&
+    stamp.agtRevision === collectionRevision(root.agt) &&
+    stamp.imports === root.imports &&
+    stamp.importRevision === collectionRevision(root.imports) &&
+    stamp.capabilities === root.capabilities &&
+    stamp.capabilityRevision ===
+      (root.capabilities === undefined ? 0 : collectionRevision(root.capabilities)) &&
+    stamp.sharedContextAtoms === root.sharedContextAtoms &&
+    stamp.hostImport === root.hostImport &&
+    stamp.evaluationContext === root.evaluationContext &&
+    stamp.mutexes === root.mutexes &&
+    stamp.tableSpace === root.tableSpace &&
+    stamp.compiled === root.compiled &&
+    stamp.compiledSize === (root.compiled?.size ?? 0) &&
+    stamp.intern === root.intern &&
+    stamp.parEval === root.parEval &&
+    stamp.parEvalAsync === root.parEvalAsync &&
+    stamp.useTrail === root.useTrail &&
+    stamp.useFlatAtomspace === root.useFlatAtomspace
+  );
+}
+
+function disposeCachedPinnedProgram(cached: CachedPinnedProgram): void {
+  if (cached.disposed) return;
+  cached.disposed = true;
+  cached.snapshots.delete(cached.pinned);
+  cached.pinnedGroundings.releaseSnapshot();
+  cached.pinnedAsyncGroundings.releaseSnapshot();
+  cached.pinnedImports.releaseSnapshot();
+  cached.pinnedCapabilities?.releaseSnapshot();
+}
+
+function retireCachedProgramSnapshot(env: MinEnv): void {
+  const root = rootEvaluationEnvironment(env);
+  const cached = asyncProgramSnapshotCache.get(root);
+  if (cached === undefined) return;
+  asyncProgramSnapshotCache.delete(root);
+  cached.retired = true;
+  if (cached.leases === 0) disposeCachedPinnedProgram(cached);
+}
+
+function createCachedPinnedProgram(root: MinEnv, stamp: ProgramSnapshotStamp): CachedPinnedProgram {
+  const pinnedGroundings =
+    root.gt instanceof RevisionMap ? root.gt.snapshot() : new RevisionMap(root.gt);
+  const pinnedAsyncGroundings =
+    root.agt instanceof RevisionMap ? root.agt.snapshot() : new RevisionMap(root.agt);
+  const pinnedImports =
+    root.imports instanceof RevisionMap
+      ? root.imports.snapshot()
+      : new RevisionMap([...root.imports].map(([name, atoms]) => [name, atoms.slice()] as const));
+  const pinnedCapabilities =
+    root.capabilities instanceof RevisionSet
+      ? root.capabilities.snapshot()
+      : root.capabilities === undefined
+        ? undefined
+        : new RevisionSet(root.capabilities);
+  const pinned: MinEnv = {
+    ...root,
+    gt: pinnedGroundings,
+    imports: pinnedImports,
+    agt: pinnedAsyncGroundings,
+    ...(pinnedCapabilities === undefined ? {} : { capabilities: pinnedCapabilities }),
+    ...(root.evaluationContext === undefined
+      ? {}
+      : { evaluationContext: copyEvaluationContext(root.evaluationContext) }),
+    evaluatedAtoms: new WeakSet(),
+    typeCache: new WeakMap(),
+    tableSpace:
+      root.tableSpace === undefined ? undefined : new TableSpace(root.tableSpace.resourceBudget()),
+    compiled: root.compiled === undefined ? undefined : new Map(root.compiled),
+    pureFunctors: root.pureFunctors === undefined ? undefined : new Set(root.pureFunctors),
+    modedPureFunctors:
+      root.modedPureFunctors === undefined ? undefined : new Set(root.modedPureFunctors),
+    tableWorth: root.tableWorth === undefined ? undefined : new Set(root.tableWorth),
+    modedTableWorth: root.modedTableWorth === undefined ? undefined : new Set(root.modedTableWorth),
+  };
+  pinnedProgramEnvironments.add(pinned);
+  pinnedProgramOwners.set(pinned, programIdentityEnvironment(root));
+  let snapshots = activeProgramSnapshots.get(root);
+  if (snapshots === undefined) {
+    snapshots = new Set();
+    activeProgramSnapshots.set(root, snapshots);
+  }
+  snapshots.add(pinned);
+  return {
+    source: root,
+    stamp,
+    pinned,
+    snapshots,
+    pinnedGroundings,
+    pinnedAsyncGroundings,
+    pinnedImports,
+    pinnedCapabilities,
+    leases: 0,
+    retired: false,
+    disposed: false,
+  };
+}
+
+function acquirePinnedProgram(root: MinEnv): {
+  readonly env: MinEnv;
+  readonly release: () => void;
+  readonly isCurrent: () => boolean;
+} {
+  const stamp = programSnapshotStamp(root);
+  let cached = asyncProgramSnapshotCache.get(root);
+  if (cached === undefined || !sameProgramSnapshot(cached.stamp, stamp)) {
+    if (cached !== undefined) {
+      asyncProgramSnapshotCache.delete(root);
+      cached.retired = true;
+      if (cached.leases === 0) disposeCachedPinnedProgram(cached);
+    }
+    cached = createCachedPinnedProgram(root, stamp);
+    if (stamp.reusable) asyncProgramSnapshotCache.set(root, cached);
+    else cached.retired = true;
+  }
+  cached.leases += 1;
+  let released = false;
+  return {
+    env: cached.pinned,
+    isCurrent: () => !cached!.retired && programSnapshotStillCurrent(cached!.stamp, root),
+    release: () => {
+      if (released) return;
+      released = true;
+      cached!.leases -= 1;
+      if (cached!.retired && cached!.leases === 0) disposeCachedPinnedProgram(cached!);
+    },
+  };
+}
+
+function copyEvaluationContext(context: EvaluationContext): EvaluationContext {
+  return {
+    currentSpace: context.currentSpace,
+    visibleSpaces: context.visibleSpaces.slice(),
+    expectedType: context.expectedType,
+  };
+}
+
+function selectPinnedProgramEnvironment(
+  source: MinEnv,
+  root: MinEnv,
+  pinnedRoot: MinEnv,
+  world: World,
+): MinEnv {
+  let selected = pinnedRoot;
+  const named = namedEvaluationEnvironments.get(source);
+  if (named !== undefined) {
+    selected = namedSpaceEnv(
+      pinnedRoot,
+      world,
+      named.name,
+      source.evaluationContext?.expectedType ?? UNDEF,
+    );
+  } else if (source !== root || source.evaluationContext !== undefined) {
+    selected = { ...pinnedRoot };
+    if (source.evaluationContext !== undefined)
+      selected.evaluationContext = copyEvaluationContext(source.evaluationContext);
+    rootContextEnvironments.set(selected, pinnedRoot);
+  }
+  pinnedProgramEnvironments.add(selected);
+  return selected;
+}
+
+/** Pin one async query to its starting program and world while sharing static indexes until a write. */
+function pinAsyncEvaluation(env: MinEnv, state: St): PinnedAsyncEvaluation {
+  if (pinnedProgramEnvironments.has(env)) return { env, state, release: () => undefined };
+
+  const root = rootEvaluationEnvironment(env);
+  if (pinnedProgramEnvironments.has(root)) return { env, state, release: () => undefined };
+
+  const world = cloneWorld(state.world);
+  const program = acquirePinnedProgram(root);
+  const pinnedRoot = program.env;
+  const selected = selectPinnedProgramEnvironment(env, root, pinnedRoot, world);
+
+  return {
+    env: selected,
+    state: { counter: state.counter, world },
+    release: program.release,
+  };
+}
+
+/** Reuse one immutable program image across sequential async queries. */
+export interface AsyncEvaluationSession {
+  evaluate(
+    fuel: number,
+    state: St,
+    bindings: Bindings,
+    atom: Atom,
+    signal?: AbortSignal,
+  ): Promise<[Array<[Atom, Bindings]>, St]>;
+  /** Evaluate an exclusively owned state without copying its persistent world maps. */
+  evaluateOwned(
+    fuel: number,
+    state: St,
+    bindings: Bindings,
+    atom: Atom,
+    signal?: AbortSignal,
+  ): Promise<[Array<[Atom, Bindings]>, St]>;
+  isCurrent(): boolean;
+  close(): void;
+}
+
+export function createAsyncEvaluationSession(env: MinEnv): AsyncEvaluationSession {
+  const root = rootEvaluationEnvironment(env);
+  let program = acquirePinnedProgram(root);
+  let closed = false;
+
+  const refresh = (): void => {
+    if (program.isCurrent()) return;
+    program.release();
+    program = acquirePinnedProgram(root);
+  };
+
+  const evaluate = (
+    fuel: number,
+    state: St,
+    bindings: Bindings,
+    atom: Atom,
+    signal: AbortSignal | undefined,
+    copyWorld: boolean,
+  ): Promise<[Array<[Atom, Bindings]>, St]> => {
+    if (closed) return Promise.reject(new Error("async evaluation session is closed"));
+    ensureCompiled(root, atom);
+    refresh();
+    const pinnedState = copyWorld
+      ? { counter: state.counter, world: cloneWorld(state.world) }
+      : state;
+    const selected = selectPinnedProgramEnvironment(env, root, program.env, pinnedState.world);
+    return runGenAsync(mettaEvalG(selected, fuel, pinnedState, bindings, atom), signal).catch(
+      (error: unknown) => {
+        if (isNativeStackOverflow(error))
+          return stackOverflowResult(selected, pinnedState, bindings, atom);
+        throw error;
+      },
+    );
+  };
+
+  return {
+    evaluate: (fuel, state, bindings, atom, signal) =>
+      evaluate(fuel, state, bindings, atom, signal, true),
+    evaluateOwned: (fuel, state, bindings, atom, signal) =>
+      evaluate(fuel, state, bindings, atom, signal, false),
+    isCurrent: () => !closed && program.isCurrent(),
+    close: () => {
+      if (closed) return;
+      closed = true;
+      program.release();
+    },
+  };
+}
+
+function installTypeDeclaration(view: TypeView, atom: Atom, replaceSignature: boolean): void {
+  if (!isTypeDeclaration(atom)) return;
+  const subject = atom.items[1]!;
+  const type = atom.items[2]!;
+  if (subject.kind === "sym") {
+    if (
+      opOf(type) === "->" &&
+      type.kind === "expr" &&
+      (replaceSignature || !view.sigs.has(subject.name))
+    )
+      view.sigs.set(subject.name, type.items.slice(1));
+    pushUniqueType(view.types, subject.name, type);
+  } else if (
+    subject.kind === "expr" &&
+    !view.exprTypes.some(
+      ([existing, existingType]) => atomEq(existing, subject) && atomEq(existingType, type),
+    )
+  ) {
+    view.exprTypes.push([subject, type]);
+  }
+}
+
+/** Rebuild the complete root type view from intrinsic grounded types plus visible declarations. */
+function buildWorldTypeView(env: MinEnv, world: World): TypeView {
+  const view: TypeView = {
+    sigs: new Map(),
+    types: new Map(),
+    exprTypes: [],
+    typeCache: undefined,
+  };
+  for (const [name, operation] of env.gt) {
+    const type = groundedOperationType(operation);
+    if (type === undefined) continue;
+    if (type.kind === "expr" && opOf(type) === "->") view.sigs.set(name, type.items.slice(1));
+    pushUniqueType(view.types, name, type);
+  }
+
+  // Static removal is a multiset operation. Consume one matching tombstone per declaration occurrence.
+  const removed = logToArray(world.removedStatic).filter(isTypeDeclaration);
+  for (const atom of env.atoms) {
+    if (!isTypeDeclaration(atom)) continue;
+    const removedIndex = removed.findIndex((candidate) => atomEq(candidate, atom));
+    if (removedIndex >= 0) {
+      removed.splice(removedIndex, 1);
+      continue;
+    }
+    installTypeDeclaration(view, atom, true);
+  }
+
+  // Runtime imports and add-atom declarations extend intrinsic/static signatures without replacing them.
+  // The rule matches registerImportedTypes and prevents a module redeclaration from shadowing a grounded
+  // operation's evaluator contract.
+  for (const atom of runtimeAtoms(world)) installTypeDeclaration(view, atom, false);
+  return view;
+}
+
+function typeViewFor(env: MinEnv, world: World): TypeView {
+  if (!world.hasTypeMutations || isNamedEvaluationEnvironment(env)) return env;
+  const owner = rootEvaluationEnvironment(env);
+  const programVersion = owner.typeProgramVersion ?? 0;
+  if (
+    world.typeView === undefined ||
+    world.typeViewProgramVersion !== programVersion ||
+    world.typeViewOwner !== owner
+  ) {
+    world.typeView = buildWorldTypeView(owner, world);
+    world.typeViewProgramVersion = programVersion;
+    world.typeViewOwner = owner;
+  }
+  return world.typeView;
 }
 
 // ---------- concurrent world merge (for `par`) ----------
@@ -1313,7 +2437,7 @@ function applyAtomDelta(into: Atom[], added: readonly Atom[], removed: readonly 
   return out;
 }
 
-function mergeWorlds(base: World, branches: readonly World[]): World {
+function mergeWorlds(env: MinEnv, base: World, branches: readonly World[]): World {
   // The concurrent-branch merge works on materialized arrays (par is off the hot path); the result is
   // rebuilt into a log. The atom order is preserved so merged `&self` content matches the array version.
   const baseSelf = runtimeAtoms(base);
@@ -1321,38 +2445,90 @@ function mergeWorlds(base: World, branches: readonly World[]): World {
   const spaces = new Map(base.spaces);
   const store = new Map(base.store);
   const tokens = new Map(base.tokens);
+  const moduleInstallations = base.moduleInstallations.slice();
   const staticRemovals = mergeStaticRemovals(base, branches);
+  let changed = false;
+  let selfChanged = false;
+  let maxStackDepth = base.maxStackDepth;
   for (const w of branches) {
+    const newModules = w.moduleInstallations.slice(base.moduleInstallations.length);
+    if (newModules.length > 0) {
+      changed = true;
+      moduleInstallations.push(...newModules);
+    }
     const d = multisetDelta(baseSelf, runtimeAtoms(w));
-    selfExtra = applyAtomDelta(selfExtra, d.added, d.removed);
+    if (d.added.length > 0 || d.removed.length > 0) {
+      changed = true;
+      selfChanged = true;
+      selfExtra = applyAtomDelta(selfExtra, d.added, d.removed);
+    }
     for (const [k, v] of w.spaces) {
       const baseV = namedSpaceAtoms(base.spaces.get(k));
       const sd = multisetDelta(baseV, namedSpaceAtoms(v));
+      if (base.spaces.has(k) && sd.added.length === 0 && sd.removed.length === 0) continue;
+      changed = true;
       spaces.set(
         k,
         logFromArray(applyAtomDelta(namedSpaceAtoms(spaces.get(k)), sd.added, sd.removed)),
       );
     }
-    for (const [k, v] of w.store) if (!Object.is(base.store.get(k), v)) store.set(k, v);
-    for (const [k, v] of w.tokens) if (!Object.is(base.tokens.get(k), v)) tokens.set(k, v);
+    for (const [k, v] of w.store)
+      if (!Object.is(base.store.get(k), v)) {
+        changed = true;
+        store.set(k, v);
+      }
+    for (const [k, v] of w.tokens)
+      if (!Object.is(base.tokens.get(k), v)) {
+        changed = true;
+        tokens.set(k, v);
+      }
+    if (w.maxStackDepth !== base.maxStackDepth) {
+      changed = true;
+      maxStackDepth = w.maxStackDepth;
+    }
   }
+  const staticChanged = logSize(staticRemovals.removedStatic) !== logSize(base.removedStatic);
+  changed ||= staticChanged;
+  if (!changed) return base;
   // Rebuild the rule index from the merged `&self` atoms (par is rare; correctness over speed here).
-  const flat = base.flatSelfExtra === undefined ? undefined : FlatAtomSpace.fromAtoms(selfExtra);
+  const flat = selfChanged
+    ? base.flatSelfExtra === undefined
+      ? undefined
+      : FlatAtomSpace.fromAtoms(selfExtra)
+    : base.flatSelfExtra;
   const merged: World = {
+    generation: Math.max(base.generation, ...branches.map((branch) => branch.generation)) + 1,
+    moduleInstallations: Object.freeze(moduleInstallations),
+    transactionDepth: base.transactionDepth,
     spaces,
     store,
     tokens,
-    selfExtra: flat === undefined ? logFromArray(selfExtra) : emptyLog,
+    selfExtra: selfChanged
+      ? flat === undefined
+        ? logFromArray(selfExtra)
+        : emptyLog
+      : base.selfExtra,
     flatSelfExtra: flat,
-    selfRules: new Map(),
-    selfVarRules: [],
-    selfRuleVersion: nextRuntimeRuleSetVersion(),
+    selfRules: selfChanged ? new Map() : base.selfRules,
+    selfVarRules: selfChanged ? [] : base.selfVarRules,
+    selfRuleVersion:
+      selfChanged || staticChanged ? nextRuntimeRuleSetVersion() : base.selfRuleVersion,
     removedStatic: staticRemovals.removedStatic,
     removedStaticHeads: staticRemovals.removedStaticHeads,
     removedStaticVarRules: staticRemovals.removedStaticVarRules,
-    maxStackDepth: base.maxStackDepth,
+    hasTypeMutations: base.hasTypeMutations || branches.some((branch) => branch.hasTypeMutations),
+    typeView: undefined,
+    typeViewProgramVersion: undefined,
+    typeViewOwner: undefined,
+    maxStackDepth,
   };
-  indexSelfRules(merged, selfExtra);
+  if (selfChanged) indexSelfRules(merged, selfExtra);
+  if (merged.hasTypeMutations) {
+    const owner = rootEvaluationEnvironment(env);
+    merged.typeView = buildWorldTypeView(owner, merged);
+    merged.typeViewProgramVersion = owner.typeProgramVersion ?? 0;
+    merged.typeViewOwner = owner;
+  }
   return merged;
 }
 
@@ -1484,6 +2660,7 @@ const typePrep = (env: MinEnv, w: World, a: Atom): Atom =>
   wrapStates(w, subTokens(w, a, env.intern));
 
 function candidatesW(env: MinEnv, w: World, toEval: Atom): Array<[Atom, Atom]> {
+  if (isNamedEvaluationEnvironment(env)) return candidates(env, toEval);
   // Runtime rules come from the index (head-matched bucket plus var-headed), not a scan of the log.
   const k2 = headKey(toEval);
   const headRules = k2 !== undefined ? (w.selfRules.get(k2) ?? []) : [];
@@ -1603,13 +2780,6 @@ function hasRuleFor(env: MinEnv, w: World, counter: number, a: Atom): boolean {
   return false;
 }
 
-function evalcUsesOuterContext(env: MinEnv, a: Atom): boolean {
-  const op = opOf(a);
-  if (op !== undefined && env.gt.has(op)) return true;
-  if (isEmbeddedOp(a)) return true;
-  return a.kind === "expr" && a.items[0]?.kind === "gnd" && a.items[0].exec !== undefined;
-}
-
 function* evalOpG(env: MinEnv, st: St, prev: Stack, x: Atom, b: Bindings): Gen<[Item[], St]> {
   const x2 = inst(env, b, x);
   const op = opOf(x2);
@@ -1642,7 +2812,7 @@ function* evalOpG(env: MinEnv, st: St, prev: Stack, x: Atom, b: Bindings): Gen<[
       .map((a) => resolveStates(st.world, subTokens(st.world, a, env.intern)));
     if (op === "repr" && args.length === 1)
       args = [partialApplicationView(env, st.world, args[0]!)];
-    const r = yield* callGroundedG(env, op!, args);
+    const r = yield* callGroundedG(env, st.world, op!, args);
     if (r.tag === "ok") {
       const effects = applyReduceEffects(env, st, b, r.effects);
       if (effects.tag === "error") return [[finItem(prev, errAtom(x2, effects.msg), b)], st];
@@ -1663,7 +2833,7 @@ function* evalOpG(env: MinEnv, st: St, prev: Stack, x: Atom, b: Bindings): Gen<[
         .slice(1)
         .map((a) => resolveStates(st.world, subTokens(st.world, a, env.intern)));
       try {
-        const results = head.exec(args);
+        const results = head.exec(args, groundedCallContext(env, st.world));
         if (results instanceof Promise) {
           // Async executor: suspend exactly like a named async grounded op (callGroundedG). Wrap so
           // the driver never sees a rejection, then yield: the async driver awaits it, the sync
@@ -1713,15 +2883,27 @@ function unifyOp(
 // ---------- final-item helpers ----------
 const isFinal = (it: Item): boolean =>
   it.stack !== null && it.stack.tail === null && it.stack.head.fin;
-function finalPair(env: MinEnv, it: Item): [Atom, Bindings] {
+function finalPair(env: MinEnv, it: Item): ContextualPair {
   const f = it.stack;
-  return f === null ? [emptyA, []] : [inst(env, it.bnd, f.head.atom), it.bnd];
-}
-function exhaustedPair(env: MinEnv, it: Item): [Atom, Bindings] {
-  const f = it.stack;
+  const selected = it.evaluationScope?.env;
+  const active = selected ?? env;
   return f === null
-    ? [emptyA, it.bnd]
-    : [makeExpr(env, [sym("Error"), inst(env, it.bnd, f.head.atom), sym("StackOverflow")]), it.bnd];
+    ? selected === undefined
+      ? [emptyA, []]
+      : [emptyA, [], selected]
+    : selected === undefined
+      ? [inst(active, it.bnd, f.head.atom), it.bnd]
+      : [inst(active, it.bnd, f.head.atom), it.bnd, selected];
+}
+function exhaustedPair(env: MinEnv, it: Item): ContextualPair {
+  const f = it.stack;
+  const selected = it.evaluationScope?.env;
+  const active = selected ?? env;
+  const atom =
+    f === null
+      ? emptyA
+      : makeExpr(active, [sym("Error"), inst(active, it.bnd, f.head.atom), sym("StackOverflow")]);
+  return selected === undefined ? [atom, it.bnd] : [atom, it.bnd, selected];
 }
 
 // A depth-bound cut result: `(Error <atom> StackOverflow)`, what exhaustedPair (and the fuel-exhausted path)
@@ -1914,10 +3096,10 @@ function argMask(ts: Atom[] | undefined, arity: number): boolean[] {
   }
   return mask;
 }
-function returnsAtom(env: MinEnv, a: Atom): boolean {
+function returnsAtom(env: MinEnv, w: World, a: Atom): boolean {
   const op = headKey(a);
   if (op === undefined) return false;
-  const ts = env.sigs.get(op);
+  const ts = typeViewFor(env, w).sigs.get(op);
   const last = ts && ts.length > 0 ? ts[ts.length - 1] : undefined;
   return last !== undefined && atomEq(last, sym("Atom"));
 }
@@ -1947,9 +3129,10 @@ function skipApplicationCheck(op: string, args: readonly Atom[]): boolean {
  *  untyped lowercase user functions use their defining `=` rule head. Typed user functions stay under
  *  Hyperon's strict arity checks. */
 function functionArity(env: MinEnv, w: World, name: string): number | undefined {
-  const sig = env.sigs.get(name);
+  const view = typeViewFor(env, w);
+  const sig = view.sigs.get(name);
   if (sig !== undefined && sig.length >= 1) {
-    const types = env.types.get(name) ?? [];
+    const types = view.types.get(name) ?? [];
     const hasDataType = types.some((t) => !(t.kind === "expr" && opOf(t) === "->"));
     if (!hasDataType && env.gt.has(name)) return sig.length - 1;
   }
@@ -1985,19 +3168,23 @@ const UNDEF_T: Atom[] = [UNDEF];
 const GROUNDED_T: Atom[] = [sym("Grounded")];
 
 export function getTypes(env: MinEnv, a: Atom): Atom[] {
+  return getTypesWithView(env, env, a);
+}
+
+function getTypesWithView(env: MinEnv, view: TypeView, a: Atom): Atom[] {
   // Memoise ground atoms: the type is stable for a fixed env, and the recursion below reuses the cached
   // type of every shared subterm. Non-ground atoms are not cached (they churn and rarely repeat by identity).
   if (a.ground) {
-    const cache = (env.typeCache ??= new WeakMap());
+    const cache = (view.typeCache ??= new WeakMap());
     const hit = cache.get(a);
     if (hit !== undefined) return hit;
-    const r = getTypesUncached(env, a);
+    const r = getTypesUncached(env, view, a);
     cache.set(a, r);
     return r;
   }
-  return getTypesUncached(env, a);
+  return getTypesUncached(env, view, a);
 }
-function getTypesUncached(env: MinEnv, a: Atom): Atom[] {
+function getTypesUncached(env: MinEnv, view: TypeView, a: Atom): Atom[] {
   if (a.kind === "gnd") {
     const g = a.value;
     if (g.g === "int" || g.g === "float") return NUMBER_T;
@@ -2009,19 +3196,19 @@ function getTypesUncached(env: MinEnv, a: Atom): Atom[] {
   }
   if (a.kind === "var") return UNDEF_T;
   if (a.kind === "sym") {
-    const ts = env.types.get(a.name);
+    const ts = view.types.get(a.name);
     return ts && ts.length > 0 ? ts : UNDEF_T;
   }
   // expression
   if (a.items.length === 0) return UNDEF_T;
   if (opOf(a) === "StateValue" && a.items.length === 2)
-    return [expr([sym("StateMonad"), headOr(getTypes(env, a.items[1]!), UNDEF)])];
-  const direct = env.exprTypes.filter((p) => atomEq(p[0], a));
+    return [expr([sym("StateMonad"), headOr(getTypesWithView(env, view, a.items[1]!), UNDEF)])];
+  const direct = view.exprTypes.filter((p) => atomEq(p[0], a));
   if (direct.length > 0) return direct.map((p) => p[1]);
   const f = a.items[0]!;
   const args = a.items.slice(1);
-  const argTs = args.map((x) => headOr(getTypes(env, x), UNDEF));
-  const fTypes = getTypes(env, f);
+  const argTs = args.map((x) => headOr(getTypesWithView(env, view, x), UNDEF));
+  const fTypes = getTypesWithView(env, view, f);
   const out: Atom[] = [];
   for (const t of fTypes) {
     if (opOf(t) === "->" && t.kind === "expr") {
@@ -2050,16 +3237,20 @@ function getTypesUncached(env: MinEnv, a: Atom): Atom[] {
  *  because that drives type-directed argument evaluation, which must stay conservative (%Undefined%) for an
  *  ordinary tuple expression rather than invent a tuple type. */
 function getTypesForQuery(env: MinEnv, w: World, a: Atom): Atom[] {
-  const base = getTypes(env, a);
+  return getTypesForQueryWithView(env, w, typeViewFor(env, w), a);
+}
+
+function getTypesForQueryWithView(env: MinEnv, w: World, view: TypeView, a: Atom): Atom[] {
+  const base = getTypesWithView(env, view, a);
   if (a.kind !== "expr" || a.items.length === 0) return base;
   if (base.length > 0 && !base.every((t) => atomEq(t, UNDEF))) return base;
   const f = a.items[0]!;
   if (f.kind === "sym" && isDefinedHead(env, w, f.name)) return base;
-  if (getTypes(env, f).some((t) => opOf(t) === "->")) return base;
+  if (getTypesWithView(env, view, f).some((t) => opOf(t) === "->")) return base;
   // Cartesian product of each element's type list, building one tuple type per combination.
   let combos: Atom[][] = [[]];
   for (const x of a.items) {
-    const ts = getTypesForQuery(env, w, x);
+    const ts = getTypesForQueryWithView(env, w, view, x);
     const opts = ts.length > 0 ? ts : [UNDEF];
     const next: Atom[][] = [];
     for (const combo of combos) for (const t of opts) next.push([...combo, t]);
@@ -2109,6 +3300,7 @@ function typeCheckArgs(
   i: number,
   tb: Bindings,
   argsLeft: readonly Atom[],
+  view: TypeView = typeViewFor(env, w),
 ): [number, Atom, Atom] | undefined {
   if (argsLeft.length === 0) return undefined;
   const ti0 = argTypes[i];
@@ -2119,7 +3311,7 @@ function typeCheckArgs(
   // O(term-size) walk, on the very common case (e.g. `add-atom`'s `Atom` parameter). Without it, adding
   // deeply-nested terms re-walks each one every time and turns add-heavy programs quadratic.
   if (ti.kind === "sym" && (ti.name === "Atom" || ti.name === "%Undefined%"))
-    return typeCheckArgs(env, w, argTypes, i + 1, tb, argsLeft.slice(1));
+    return typeCheckArgs(env, w, argTypes, i + 1, tb, argsLeft.slice(1), view);
   const ai = argsLeft[0]!;
   const prepped = typePrep(env, w, ai);
   // Hyperon `check_arg_types` (types.rs): an argument satisfies a parameter whose type names the
@@ -2128,11 +3320,12 @@ function typeCheckArgs(
   // `Expression` parameter. Without this, ops with meta-typed parameters (lib_he's `evalc`/`noreduce-eq`,
   // `map-atom`) wrongly raise BadArgType on unevaluated expression arguments.
   if (ti.kind === "sym" && ti.name === metaType(prepped))
-    return typeCheckArgs(env, w, argTypes, i + 1, tb, argsLeft.slice(1));
-  const actuals = getTypes(env, prepped);
+    return typeCheckArgs(env, w, argTypes, i + 1, tb, argsLeft.slice(1), view);
+  const actuals = getTypesWithView(env, view, prepped);
   for (const act of actuals) {
     const tb2 = matchType(tb, ti, act);
-    if (tb2 !== undefined) return typeCheckArgs(env, w, argTypes, i + 1, tb2, argsLeft.slice(1));
+    if (tb2 !== undefined)
+      return typeCheckArgs(env, w, argTypes, i + 1, tb2, argsLeft.slice(1), view);
   }
   return [i + 1, ti, headOr(actuals, UNDEF)];
 }
@@ -2143,9 +3336,10 @@ function typeMismatch(
   args: readonly Atom[],
   ts?: Atom[],
 ): [number, Atom, Atom] | undefined {
-  if (arguments.length < 5) ts = env.sigs.get(op);
+  const view = typeViewFor(env, w);
+  if (arguments.length < 5) ts = view.sigs.get(op);
   if (ts === undefined) return undefined;
-  return typeCheckArgs(env, w, ts.slice(0, -1), 0, [], args);
+  return typeCheckArgs(env, w, ts.slice(0, -1), 0, [], args, view);
 }
 
 export function checkApplication(
@@ -2153,8 +3347,10 @@ export function checkApplication(
   w: World,
   op: string,
   args: readonly Atom[],
-  opSig: Atom[] | undefined = env.sigs.get(op),
+  opSig?: Atom[],
 ): Atom | null {
+  const view = typeViewFor(env, w);
+  if (arguments.length < 5) opSig = view.sigs.get(op);
   if (skipApplicationCheck(op, args)) return null;
   const strictErr = strictArityError(op, args);
   if (strictErr !== null) return strictErr;
@@ -2168,7 +3364,7 @@ export function checkApplication(
   // precomputed `opSig` it then reuses for partial application, so the signature is looked up once per
   // application.
   if (opSig !== undefined && opSig.length >= 1 && args.length !== opSig.length - 1) {
-    const hasTupleType = (env.types.get(op) ?? []).some((t) => opOf(t) !== "->");
+    const hasTupleType = (view.types.get(op) ?? []).some((t) => opOf(t) !== "->");
     // PeTTa-style partial application is allowed for grounded ops. User-declared typed functions keep
     // Hyperon's strict arity errors.
     const underAppliedPartial =
@@ -2577,10 +3773,11 @@ function matchConjCount(
 // ---------- get-doc ----------
 function getDocOf(env: MinEnv, w: World, atom: Atom): Atom {
   const atoms = selfAtoms(env, w);
+  const view = typeViewFor(env, w);
   const ty =
     atom.kind === "sym"
-      ? headOr(env.types.get(atom.name) ?? [], UNDEF)
-      : (env.exprTypes.find((p) => atomEq(p[0], atom))?.[1] ?? UNDEF);
+      ? headOr(view.types.get(atom.name) ?? [], UNDEF)
+      : (view.exprTypes.find((p) => atomEq(p[0], atom))?.[1] ?? UNDEF);
   const matchesDoc = (a: Atom): boolean =>
     opOf(a) === "@doc" && a.kind === "expr" && a.items.length >= 2 && atomEq(a.items[1]!, atom);
   // A program's own @doc (in its space) wins; the stdlib's @doc is kept out of the eval env and consulted
@@ -2638,6 +3835,7 @@ function getDocOf(env: MinEnv, w: World, atom: Atom): Atom {
 
 // ---------- the step function ----------
 function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[ItemBatch, St]> {
+  env = refreshEvaluationEnvironment(env, st.world);
   if (it.stack === null) return [[], st];
   const top = it.stack.head;
   const prev = it.stack.tail;
@@ -2674,22 +3872,17 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
       break;
     case "evalc":
       if (it2.length === 3) {
-        const x = inst(env, it.bnd, it2[1]!);
-        if (evalcUsesOuterContext(env, x)) return yield* evalOpG(env, st, prev, it2[1]!, it.bnd);
-        const sname = spaceName(st.world, inst(env, it.bnd, it2[2]!));
-        if (sname !== undefined && sname !== "&self") {
-          const view = namedSpaceEnv(env, st.world, sname);
-          return queryOpWithCandidates(
-            env,
-            st,
-            prev,
-            x,
-            it.bnd,
-            candidates(view, x),
-            inst(env, it.bnd, a),
-          );
-        }
-        return yield* evalOpG(env, st, prev, it2[1]!, it.bnd);
+        const requested = inst(env, it.bnd, it2[2]!);
+        const selected = selectEvaluationEnvironment(env, st.world, requested, UNDEF);
+        if (selected === undefined)
+          return [[finItem(prev, errAtom(inst(env, it.bnd, a), "evalc: not a space"), it.bnd)], st];
+        const [entered, next] = yield* evalOpG(selected, st, prev, it2[1]!, it.bnd);
+        const evaluationScope: EvaluationScope = {
+          env: selected,
+          boundary: prev,
+          ...(it.evaluationScope === undefined ? {} : { parent: it.evaluationScope }),
+        };
+        return [entered.map((item) => ({ ...item, evaluationScope })), next];
       }
       break;
     case "chain":
@@ -2729,13 +3922,25 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
         ];
       break;
     case "context-space":
-      if (it2.length === 1) return [[finItem(prev, sym("&self"), it.bnd)], st];
+      if (it2.length === 1) return [[finItem(prev, activeSpaceAtom(env), it.bnd)], st];
       break;
     case "metta":
-    case "capture":
     case "metta-thread": {
+      if (it2.length !== 4) break;
       const atom = it2[1]!;
-      const [pairs, st2] = yield* mettaEvalG(env, fuel, st, it.bnd, atom);
+      const expectedType = inst(env, it.bnd, it2[2]!);
+      const requested = inst(env, it.bnd, it2[3]!);
+      const selected = selectEvaluationEnvironment(env, st.world, requested, expectedType);
+      if (selected === undefined)
+        return [[finItem(prev, errAtom(inst(env, it.bnd, a), `${op}: not a space`), it.bnd)], st];
+      const [pairs, st2] = yield* mettaEvalExpectedG(
+        selected,
+        fuel,
+        st,
+        it.bnd,
+        atom,
+        expectedType,
+      );
       if (op === "metta-thread") {
         const out: Item[] = [];
         const scoped = scopeVars(env, it.bnd, prev);
@@ -2746,15 +3951,30 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
       }
       return [pairs.map((p) => finItem(prev, p[0], it.bnd)), st2];
     }
+    case "capture": {
+      if (it2.length !== 2) break;
+      const [pairs, st2] = yield* mettaEvalG(env, fuel, st, it.bnd, it2[1]!);
+      return [pairs.map((p) => finItem(prev, p[0], it.bnd)), st2];
+    }
     case "get-type":
     case "get-type-space": {
       // get-type uses &self; get-type-space looks up types in the named space's declarations.
+      if ((op === "get-type" && it2.length !== 2) || (op === "get-type-space" && it2.length !== 3))
+        break;
       let typeEnv = env;
       if (op === "get-type-space") {
-        const sname = spaceName(st.world, inst(env, it.bnd, it2[1]!));
-        if (sname !== undefined && sname !== "&self") {
-          typeEnv = namedSpaceEnv(env, st.world, sname);
-        }
+        const selected = selectEvaluationEnvironment(
+          env,
+          st.world,
+          inst(env, it.bnd, it2[1]!),
+          UNDEF,
+        );
+        if (selected === undefined)
+          return [
+            [finItem(prev, errAtom(inst(env, it.bnd, a), "get-type-space: not a space"), it.bnd)],
+            st,
+          ];
+        typeEnv = selected;
       }
       const x = op === "get-type-space" ? it2[2]! : it2[1]!;
       return yield* getTypeOpG(typeEnv, fuel, st, prev, inst(typeEnv, it.bnd, x), it.bnd);
@@ -2872,10 +4092,31 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
     case "transaction": {
       if (it2.length !== 2) break;
       const snapshotWorld = st.world;
-      const [pairs, st2] = yield* mettaEvalG(env, fuel, st, it.bnd, it2[1]!);
-      const committed = pairs.length > 0 && pairs.some((p) => !isErrorAtom(p[0]));
-      const world = committed ? st2.world : snapshotWorld;
-      return [pairs.map((p) => finItem(prev, p[0], it.bnd)), { counter: st2.counter, world }];
+      const mutationEnv = evaluationCacheEnvironment(env);
+      const snapshotEnv = snapshotEnvironmentMutations(mutationEnv);
+      const entered = cloneWorld(snapshotWorld);
+      entered.transactionDepth += 1;
+      let committed = false;
+      try {
+        const [pairs, st2] = yield* mettaEvalG(
+          env,
+          fuel,
+          { counter: st.counter, world: entered },
+          it.bnd,
+          it2[1]!,
+        );
+        committed = pairs.length > 0 && pairs.some((p) => !isErrorAtom(p[0]));
+        if (!committed)
+          return [
+            pairs.map((p) => finItem(prev, p[0], it.bnd)),
+            { counter: st2.counter, world: snapshotWorld },
+          ];
+        const world = cloneWorld(st2.world);
+        world.transactionDepth = snapshotWorld.transactionDepth;
+        return [pairs.map((p) => finItem(prev, p[0], it.bnd)), { counter: st2.counter, world }];
+      } finally {
+        if (!committed) restoreEnvironmentMutations(mutationEnv, snapshotEnv);
+      }
     }
     // TS-native concurrency (async-only; see docs/.../concurrency-primitives.md).
     case "par": {
@@ -2884,7 +4125,7 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
       const branches = it2.slice(1);
       pendingAsyncOp = "par";
       const results = (yield Promise.all(
-        branches.map((br) => mettaEvalAsync(env, fuel, st, it.bnd, br)),
+        branches.map((br) => mettaEvalAsyncOwned(env, fuel, st, it.bnd, br)),
       )) as EvalRes[];
       const out: Item[] = [];
       let counter = st.counter;
@@ -2894,7 +4135,7 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
         worlds.push(st2.world);
         if (st2.counter > counter) counter = st2.counter;
       }
-      return [out, { counter, world: mergeWorlds(st.world, worlds) }];
+      return [out, { counter, world: mergeWorlds(env, st.world, worlds) }];
     }
     case "race": {
       // First branch to produce a non-empty result wins; the losers are cancelled via the scope's
@@ -2908,7 +4149,7 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
         try {
           return await Promise.any(
             branches.map(async (br) => {
-              const r = await mettaEvalAsync(env, fuel, st, it.bnd, br, ac.signal);
+              const r = await mettaEvalAsyncOwned(env, fuel, st, it.bnd, br, ac.signal);
               if (r[0].length === 0) throw new Error("empty branch");
               return r;
             }),
@@ -2964,7 +4205,7 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
         env.mutexes.set(name, chained);
         await prior;
         try {
-          return await mettaEvalAsync(env, fuel, st, it.bnd, body);
+          return await mettaEvalAsyncOwned(env, fuel, st, it.bnd, body);
         } finally {
           release();
           // Drop the entry once this is the tail of the chain, so the map does not grow unbounded.
@@ -2978,6 +4219,7 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
       const id = st.counter;
       const w = cloneWorld(st.world);
       w.store.set(id, inst(env, it.bnd, it2[1]!));
+      w.generation = nextWorldGeneration(st.world);
       return [[finItem(prev, stateHandle(id), it.bnd)], { counter: id + 1, world: w }];
     }
     case "get-state": {
@@ -2995,6 +4237,7 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
       if (id !== undefined) {
         const w = cloneWorld(st.world);
         w.store.set(id, inst(env, it.bnd, it2[2]!));
+        w.generation = nextWorldGeneration(st.world);
         return [[finItem(prev, stateHandle(id), it.bnd)], { counter: st.counter, world: w }];
       }
       return [
@@ -3008,11 +4251,12 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
       const name = "&space-" + String(id);
       const w = cloneWorld(st.world);
       w.spaces.set(name, emptyLog);
+      w.generation = nextWorldGeneration(st.world);
       return [[finItem(prev, sym(name), it.bnd)], { counter: id + 1, world: w }];
     }
     case "fork-space": {
       if (it2.length !== 2) break;
-      const src = spaceName(st.world, inst(env, it.bnd, it2[1]!));
+      const src = contextualSpaceName(env, st.world, inst(env, it.bnd, it2[1]!));
       if (src === undefined)
         return [
           [finItem(prev, errAtom(inst(env, it.bnd, it2[1]!), "fork-space: not a space"), it.bnd)],
@@ -3024,12 +4268,13 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
       const name = "&space-" + String(id);
       const w = cloneWorld(st.world);
       w.spaces.set(name, logFromArray(srcAtoms));
+      w.generation = nextWorldGeneration(st.world);
       return [[finItem(prev, sym(name), it.bnd)], { counter: id + 1, world: w }];
     }
     case "add-atom":
       if (it2.length === 3) {
         const added = inst(env, it.bnd, it2[2]!);
-        if (opOf(added) === "=") disableTabling(env);
+        if (opOf(added) === "=") disableTabling(evaluationCacheEnvironment(env));
         return spaceMutate(env, st, prev, it2[1]!, it.bnd, (w, name) =>
           appendSpace(env, w, name, [added]),
         );
@@ -3038,7 +4283,7 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
     case "remove-atom":
       if (it2.length === 3) {
         const removed = inst(env, it.bnd, it2[2]!);
-        if (opOf(removed) === "=") disableTabling(env);
+        if (opOf(removed) === "=") disableTabling(evaluationCacheEnvironment(env));
         return spaceMutate(env, st, prev, it2[1]!, it.bnd, (w, name) =>
           eraseSpace(env, w, name, removed),
         );
@@ -3046,7 +4291,7 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
       break;
     case "get-atoms": {
       if (it2.length !== 2) break;
-      const name = spaceName(st.world, inst(env, it.bnd, it2[1]!));
+      const name = contextualSpaceName(env, st.world, inst(env, it.bnd, it2[1]!));
       if (name === undefined)
         return [
           [finItem(prev, errAtom(inst(env, it.bnd, it2[1]!), "get-atoms: not a space"), it.bnd)],
@@ -3071,6 +4316,7 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
           return [[finItem(prev, errAtom(a, "UnsignedIntegerIsExpected"), it.bnd)], st];
         const w = cloneWorld(st.world);
         w.maxStackDepth = Number(n);
+        w.generation = nextWorldGeneration(st.world);
         return [[finItem(prev, emptyExpr, it.bnd)], { counter: st.counter, world: w }];
       }
       return [[finItem(prev, emptyExpr, it.bnd)], st];
@@ -3081,57 +4327,84 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
       if (tok.kind === "sym") {
         const w = cloneWorld(st.world);
         w.tokens.set(tok.name, inst(env, it.bnd, it2[2]!));
+        w.generation = nextWorldGeneration(st.world);
         return [[finItem(prev, emptyExpr, it.bnd)], { counter: st.counter, world: w }];
       }
       return [[finItem(prev, errAtom(tok, "bind!: token must be a symbol"), it.bnd)], st];
     }
     case "import!": {
       if (it2.length !== 3) break;
-      const spaceAtom = inst(env, it.bnd, it2[1]!);
+      const requestedSpace = inst(env, it.bnd, it2[1]!);
+      const spaceAtom = contextualSpaceAtom(env, st.world, requestedSpace);
       const fileAtom = inst(env, it.bnd, it2[2]!);
-      const hostResult = yield* callHostImportG(env, spaceAtom, fileAtom);
+      const moduleName = importModuleName(fileAtom);
+      const catalogAtoms = moduleName === undefined ? undefined : env.imports.get(moduleName);
+      if (
+        st.world.transactionDepth > 0 &&
+        catalogAtoms === undefined &&
+        env.hostImport !== undefined
+      )
+        return [
+          [
+            finItem(
+              prev,
+              errAtom(inst(env, it.bnd, a), "import!: host imports are not transactional"),
+              it.bnd,
+            ),
+          ],
+          st,
+        ];
+      const hostResult =
+        catalogAtoms === undefined && st.world.transactionDepth === 0
+          ? yield* callHostImportG(env, st.world, spaceAtom, fileAtom)
+          : undefined;
       if (hostResult !== undefined && hostResult.tag !== "noReduce") {
         if (hostResult.tag === "ok") {
           const effects = applyReduceEffects(env, st, it.bnd, hostResult.effects);
           if (effects.tag === "error")
             return [[finItem(prev, errAtom(inst(env, it.bnd, a), effects.msg), it.bnd)], st];
-          return [hostResult.results.map((result) => finItem(prev, result, it.bnd)), effects.state];
+          const targetName = contextualSpaceName(env, st.world, spaceAtom);
+          if (targetName === undefined)
+            return [[finItem(prev, errAtom(spaceAtom, "import!: not a space"), it.bnd)], st];
+          const installed = recordModuleInstallation(
+            env,
+            st.world,
+            effects.state.world,
+            fileAtom,
+            "host",
+            targetName,
+          );
+          return [
+            hostResult.results.map((result) => finItem(prev, result, it.bnd)),
+            { counter: effects.state.counter, world: installed },
+          ];
         }
         if (hostResult.tag === "runtimeError")
           return [[finItem(prev, errAtom(inst(env, it.bnd, a), hostResult.msg), it.bnd)], st];
         return [[finItem(prev, errTextAtom(inst(env, it.bnd, a), hostResult.msg), it.bnd)], st];
       }
-      const moduleName =
-        fileAtom.kind === "sym"
-          ? fileAtom.name
-          : fileAtom.kind === "gnd" && fileAtom.value.g === "str"
-            ? fileAtom.value.s
-            : fileAtom.kind === "expr" &&
-                fileAtom.items.length === 2 &&
-                fileAtom.items[0]?.kind === "sym" &&
-                fileAtom.items[0].name === "library" &&
-                fileAtom.items[1]?.kind === "sym"
-              ? fileAtom.items[1].name
-              : fileAtom.kind === "expr" &&
-                  fileAtom.items.length === 2 &&
-                  fileAtom.items[0]?.kind === "sym" &&
-                  fileAtom.items[0].name === "library" &&
-                  fileAtom.items[1]?.kind === "gnd" &&
-                  fileAtom.items[1].value.g === "str"
-                ? fileAtom.items[1].value.s
-                : undefined;
-      const fileAtoms = moduleName !== undefined ? (env.imports.get(moduleName) ?? []) : [];
-      // Bring the module's type signatures into the env so type-directed evaluation sees them (a
-      // sig in a space's atom list is not consulted by `env.sigs`). Rules stay in the space and are
-      // read dynamically by candidate selection.
-      registerImportedTypes(env, fileAtoms);
+      const fileAtoms = catalogAtoms ?? [];
+      const targetName = contextualSpaceName(env, st.world, spaceAtom);
       // Only an import that actually brings in equations can invalidate tabling/compilation (those run off
       // the static rule index). A no-op import, a missing or unresolved module reference, or a data-only one,
       // leaves the compiled core valid, so it must not be switched off.
-      if (fileAtoms.some((a) => opOf(a) === "=")) disableTabling(env);
-      return spaceMutate(env, st, prev, it2[1]!, it.bnd, (w, name) =>
-        appendSpace(env, w, name, fileAtoms),
-      );
+      if (targetName === activeSpaceName(env) && fileAtoms.some((a) => opOf(a) === "="))
+        disableTabling(evaluationCacheEnvironment(env));
+      return spaceMutate(env, st, prev, it2[1]!, it.bnd, (w, name) => {
+        const appended = appendSpace(env, w, name, fileAtoms);
+        return moduleName === undefined || catalogAtoms === undefined
+          ? appended
+          : recordModuleInstallation(
+              env,
+              w,
+              appended,
+              fileAtom,
+              "catalog",
+              name,
+              moduleName,
+              moduleContentHash(fileAtoms),
+            );
+      });
     }
     default:
       break;
@@ -3162,6 +4435,93 @@ function indexSelfRules(w: World, atoms: readonly Atom[]): void {
     }
   }
 }
+function isTypeDeclaration(atom: Atom): atom is ExprAtom {
+  return atom.kind === "expr" && opOf(atom) === ":" && atom.items.length === 3;
+}
+
+function invalidateWorldTypeView(world: World): void {
+  world.hasTypeMutations = true;
+  world.typeView = undefined;
+  world.typeViewProgramVersion = undefined;
+  world.typeViewOwner = undefined;
+}
+
+function importModuleName(file: Atom): string | undefined {
+  if (file.kind === "sym") return file.name;
+  if (file.kind === "gnd" && file.value.g === "str") return file.value.s;
+  if (
+    file.kind === "expr" &&
+    file.items.length === 2 &&
+    file.items[0]?.kind === "sym" &&
+    file.items[0].name === "library"
+  ) {
+    const name = file.items[1];
+    if (name?.kind === "sym") return name.name;
+    if (name?.kind === "gnd" && name.value.g === "str") return name.value.s;
+  }
+  return undefined;
+}
+
+function moduleContentHash(atoms: readonly Atom[]): string {
+  const canonical = JSON.stringify(atoms.map(format));
+  return `sha256:${bytesToHex(sha256(utf8ToBytes(canonical)))}`;
+}
+
+function importWorldDelta(env: MinEnv, before: World, after: World): GroundedImportWorldDelta {
+  const owner = rootEvaluationEnvironment(env);
+  const addedAtoms: Array<{ readonly space: Atom; readonly atom: Atom }> = [];
+  const removedAtoms: Array<{ readonly space: Atom; readonly atom: Atom }> = [];
+  const names = new Set(["&self", ...before.spaces.keys(), ...after.spaces.keys()]);
+  for (const name of names) {
+    const beforeAtoms =
+      name === "&self" ? selfAtoms(owner, before) : namedSpaceAtoms(before.spaces.get(name));
+    const afterAtoms =
+      name === "&self" ? selfAtoms(owner, after) : namedSpaceAtoms(after.spaces.get(name));
+    const delta = multisetDelta(beforeAtoms, afterAtoms);
+    for (const atom of delta.added) addedAtoms.push({ space: sym(name), atom });
+    for (const atom of delta.removed) removedAtoms.push({ space: sym(name), atom });
+  }
+  const boundTokens: Array<{ readonly name: string; readonly atom: Atom }> = [];
+  for (const [name, atom] of after.tokens) {
+    const previous = before.tokens.get(name);
+    if (previous === undefined || !atomEq(previous, atom)) boundTokens.push({ name, atom });
+  }
+  return Object.freeze({
+    addedAtoms: Object.freeze(addedAtoms.map((delta) => Object.freeze(delta))),
+    removedAtoms: Object.freeze(removedAtoms.map((delta) => Object.freeze(delta))),
+    boundTokens: Object.freeze(boundTokens.map((delta) => Object.freeze(delta))),
+  });
+}
+
+function recordModuleInstallation(
+  env: MinEnv,
+  before: World,
+  after: World,
+  request: Atom,
+  source: GroundedModuleInstallation["source"],
+  targetSpace: string,
+  resolvedIdentity?: string,
+  contentHash?: string,
+): World {
+  const generation =
+    after.generation === before.generation ? nextWorldGeneration(before) : after.generation;
+  const record: GroundedModuleInstallation = Object.freeze({
+    request,
+    source,
+    ...(resolvedIdentity === undefined ? {} : { resolvedIdentity }),
+    ...(contentHash === undefined ? {} : { contentHash }),
+    targetSpace: sym(targetSpace),
+    previousGeneration: before.generation,
+    generation,
+    worldDelta: importWorldDelta(env, before, after),
+  });
+  return {
+    ...after,
+    generation,
+    moduleInstallations: Object.freeze([...after.moduleInstallations, record]),
+  };
+}
+
 function appendSpace(env: MinEnv, w0: World, name: string, atoms: Atom[]): World {
   // `&self` add-atom only touches `selfExtra` (and the rule index iff an equality is added), so SHARE the
   // unchanged spaces/store/tokens by reference rather than `cloneWorld`'s four fresh Maps. That copy was
@@ -3173,6 +4533,8 @@ function appendSpace(env: MinEnv, w0: World, name: string, atoms: Atom[]): World
     let selfExtra = w0.selfExtra;
     let flatSelfExtra = w0.flatSelfExtra;
     let copiedRules = false;
+    const typesChanged = atoms.some(isTypeDeclaration);
+    if (typesChanged) disableTabling(evaluationCacheEnvironment(env));
     for (const x of atoms) {
       if (opOf(x) === "=" && x.kind === "expr" && x.items.length === 3) {
         if (!copiedRules) {
@@ -3205,6 +4567,9 @@ function appendSpace(env: MinEnv, w0: World, name: string, atoms: Atom[]): World
       selfExtra = logAppendAll(selfExtra, atoms);
     }
     return {
+      generation: atoms.length === 0 ? w0.generation : nextWorldGeneration(w0),
+      moduleInstallations: w0.moduleInstallations,
+      transactionDepth: w0.transactionDepth,
       spaces: w0.spaces,
       store: w0.store,
       tokens: w0.tokens,
@@ -3216,12 +4581,20 @@ function appendSpace(env: MinEnv, w0: World, name: string, atoms: Atom[]): World
       removedStatic: w0.removedStatic,
       removedStaticHeads: w0.removedStaticHeads,
       removedStaticVarRules: w0.removedStaticVarRules,
+      hasTypeMutations: w0.hasTypeMutations || typesChanged,
+      typeView: typesChanged ? undefined : w0.typeView,
+      typeViewProgramVersion: typesChanged ? undefined : w0.typeViewProgramVersion,
+      typeViewOwner: typesChanged ? undefined : w0.typeViewOwner,
       maxStackDepth: w0.maxStackDepth,
     };
   }
   const spaces = new Map(w0.spaces);
   spaces.set(name, logAppendAll(spaces.get(name) ?? emptyLog, atoms));
-  return { ...w0, spaces };
+  return {
+    ...w0,
+    generation: atoms.length === 0 ? w0.generation : nextWorldGeneration(w0),
+    spaces,
+  };
 }
 function reindexRuntimeSelfRules(w: World): void {
   w.selfRules = new Map();
@@ -3232,9 +4605,11 @@ function reindexRuntimeSelfRules(w: World): void {
 
 function eraseSpace(env: MinEnv, w0: World, name: string, a: Atom): World {
   const w = cloneWorld(w0);
-  const erase1 = (xs: readonly Atom[]): Atom[] => {
+  const erase1 = (xs: readonly Atom[]): { readonly atoms: Atom[]; readonly removed: boolean } => {
     const i = xs.findIndex((y) => atomEq(y, a));
-    return i < 0 ? [...xs] : [...xs.slice(0, i), ...xs.slice(i + 1)];
+    return i < 0
+      ? { atoms: [...xs], removed: false }
+      : { atoms: [...xs.slice(0, i), ...xs.slice(i + 1)], removed: true };
   };
   if (name === "&self") {
     if (w.flatSelfExtra !== undefined) {
@@ -3242,6 +4617,11 @@ function eraseSpace(env: MinEnv, w0: World, name: string, a: Atom): World {
       if (next.size !== w.flatSelfExtra.size) {
         w.flatSelfExtra = next;
         reindexRuntimeSelfRules(w);
+        if (isTypeDeclaration(a)) {
+          invalidateWorldTypeView(w);
+          disableTabling(evaluationCacheEnvironment(env));
+        }
+        w.generation = nextWorldGeneration(w0);
         return w;
       }
     }
@@ -3250,8 +4630,24 @@ function eraseSpace(env: MinEnv, w0: World, name: string, a: Atom): World {
     if (i >= 0) {
       w.selfExtra = logFromArray([...xs.slice(0, i), ...xs.slice(i + 1)]);
       reindexRuntimeSelfRules(w);
-    } else if (hasStaticAtom(env, a)) addStaticRemoval(w, a);
-  } else w.spaces.set(name, logFromArray(erase1(namedSpaceAtoms(w.spaces.get(name)))));
+      if (isTypeDeclaration(a)) {
+        invalidateWorldTypeView(w);
+        disableTabling(evaluationCacheEnvironment(env));
+      }
+      w.generation = nextWorldGeneration(w0);
+    } else if (hasStaticAtom(env, a)) {
+      addStaticRemoval(w, a);
+      if (isTypeDeclaration(a)) {
+        invalidateWorldTypeView(w);
+        disableTabling(evaluationCacheEnvironment(env));
+      }
+      w.generation = nextWorldGeneration(w0);
+    }
+  } else {
+    const erased = erase1(namedSpaceAtoms(w.spaces.get(name)));
+    w.spaces.set(name, logFromArray(erased.atoms));
+    if (erased.removed) w.generation = nextWorldGeneration(w0);
+  }
   return w;
 }
 function spaceMutate(
@@ -3262,7 +4658,7 @@ function spaceMutate(
   b: Bindings,
   f: (w: World, name: string) => World,
 ): [Item[], St] {
-  const name = spaceName(st.world, inst(env, b, s));
+  const name = contextualSpaceName(env, st.world, inst(env, b, s));
   if (name === undefined) return [[finItem(prev, errAtom(inst(env, b, s), "not a space"), b)], st];
   return [[finItem(prev, emptyExpr, b)], { counter: st.counter, world: f(st.world, name) }];
 }
@@ -3279,20 +4675,20 @@ function applyReduceEffects(
     switch (effect.kind) {
       case "addAtom": {
         const space = inst(env, b, effect.space);
-        const name = spaceName(next.world, space);
+        const name = contextualSpaceName(env, next.world, space);
         if (name === undefined) return { tag: "error", msg: "async effect addAtom: not a space" };
         const atom = inst(env, b, effect.atom);
-        if (opOf(atom) === "=") disableTabling(env);
+        if (opOf(atom) === "=") disableTabling(evaluationCacheEnvironment(env));
         next = { counter: next.counter, world: appendSpace(env, next.world, name, [atom]) };
         break;
       }
       case "removeAtom": {
         const space = inst(env, b, effect.space);
-        const name = spaceName(next.world, space);
+        const name = contextualSpaceName(env, next.world, space);
         if (name === undefined)
           return { tag: "error", msg: "async effect removeAtom: not a space" };
         const atom = inst(env, b, effect.atom);
-        if (opOf(atom) === "=") disableTabling(env);
+        if (opOf(atom) === "=") disableTabling(evaluationCacheEnvironment(env));
         next = {
           counter: next.counter,
           world: eraseSpace(env, next.world, name, atom),
@@ -3302,6 +4698,7 @@ function applyReduceEffects(
       case "bindToken": {
         const w = cloneWorld(next.world);
         w.tokens.set(effect.name, inst(env, b, effect.atom));
+        w.generation = nextWorldGeneration(next.world);
         next = { counter: next.counter, world: w };
         break;
       }
@@ -3312,7 +4709,7 @@ function applyReduceEffects(
 
 function compiledAddAtom(env: MinEnv, st: St, space: Atom, added: Atom): St | undefined {
   if (opOf(added) === "=") return undefined;
-  const name = spaceName(st.world, space);
+  const name = contextualSpaceName(env, st.world, space);
   if (name === undefined) return undefined;
   return {
     counter: st.counter,
@@ -3357,7 +4754,7 @@ function compiledAddIfAbsent(
   if (!atom.ground || opOf(atom) === "=") return undefined;
   const w = st.world;
   if (w.store.size !== 0) return undefined;
-  const name = spaceName(w, space);
+  const name = contextualSpaceName(env, w, space);
   if (name === undefined) return undefined;
   if (name === "&self") {
     const k = headKey(atom);
@@ -3423,7 +4820,8 @@ function* getTypeOpG(
       if (typeMismatch(env, st.world, head.name, args) !== undefined) return [[], st];
       return yield* emit(st);
     }
-    const illTyped = getTypes(env, typePrep(env, st.world, head)).some((ft) => {
+    const view = typeViewFor(env, st.world);
+    const illTyped = getTypesWithView(env, view, typePrep(env, st.world, head)).some((ft) => {
       if (opOf(ft) === "->" && ft.kind === "expr")
         return typeCheckArgs(env, st.world, ft.items.slice(1, -1), 0, [], args) !== undefined;
       return false;
@@ -3443,7 +4841,7 @@ function matchSetup(
   pattern: Atom,
   b: Bindings,
 ): { getCandidates: (pInst: Atom) => CandidateSource; patterns: Atom[] } {
-  const sn = spaceName(st.world, inst(env, b, space));
+  const sn = contextualSpaceName(env, st.world, inst(env, b, space));
   const subbed = subTokens(st.world, pattern, env.intern);
   const patterns =
     opOf(subbed) === "," && subbed.kind === "expr"
@@ -3491,7 +4889,7 @@ function tryFastNamedOnceMatch(
   b: Bindings,
 ): { value: Atom | undefined; state: St } | undefined {
   if (body.kind !== "expr" || opOf(body) !== "match" || body.items.length !== 4) return undefined;
-  const sn = spaceName(st.world, inst(env, b, body.items[1]!));
+  const sn = contextualSpaceName(env, st.world, inst(env, b, body.items[1]!));
   if (sn === undefined || sn === "&self") return undefined;
   const subbed = subTokens(st.world, body.items[2]!, env.intern);
   if (opOf(subbed) === "," && subbed.kind === "expr") return undefined;
@@ -3531,13 +4929,13 @@ function tryFastNamedAddIfAbsent(
   );
   const addAtom = inst(env, b, add.items[2]!);
   if (!atomEq(matchSpace, addSpace) || !atomEq(matchAtom, addAtom)) return undefined;
-  const name = spaceName(st.world, matchSpace);
+  const name = contextualSpaceName(env, st.world, matchSpace);
   if (name === undefined || name === "&self") return undefined;
   const space = st.world.spaces.get(name) ?? emptyLog;
   if (!matchAtom.ground || logNonGround(space) !== 0 || st.world.store.size !== 0) return undefined;
   const checked: St = { counter: st.counter + logSize(space), world: st.world };
   if (idxCount(logGroundIdx(space), matchAtom) !== 0) return { added: false, state: checked };
-  if (opOf(addAtom) === "=") disableTabling(env);
+  if (opOf(addAtom) === "=") disableTabling(evaluationCacheEnvironment(env));
   return {
     added: true,
     state: {
@@ -3596,7 +4994,7 @@ function tryFastAddUniqueOrFailCall(
   const rules = candidatesW(env, st.world, call);
   if (rules.length !== 1 || !isCanonicalAddUniqueRule(rules[0]![0], rules[0]![1])) return undefined;
   const spaceAtom = inst(env, b, call.items[1]!);
-  const name = spaceName(st.world, spaceAtom);
+  const name = contextualSpaceName(env, st.world, spaceAtom);
   if (name === undefined || name === "&self") return undefined;
   const value = inst(env, b, call.items[2]!);
   const key = expr([sym("s"), expr([sym("repra"), value])]);
@@ -4274,10 +5672,10 @@ function* interpretLoopG(
   // collected into the returned array (which stays empty). An aggregate like `(length (collapse X))` uses
   // this to count results without ever materialising them. The array, the collapsed tuple, and the length
   // walk are all O(N) structures the fold avoids.
-  sink?: (pair: [Atom, Bindings]) => void,
-): Gen<[Array<[Atom, Bindings]>, St]> {
-  const done: Array<[Atom, Bindings]> = [];
-  const emit = (pair: [Atom, Bindings]): void => {
+  sink?: (pair: ContextualPair) => void,
+): Gen<[ContextualPair[], St]> {
+  const done: ContextualPair[] = [];
+  const emit = (pair: ContextualPair): void => {
     if (sink !== undefined) sink(pair);
     else done.push(pair);
   };
@@ -4331,7 +5729,31 @@ function* interpretLoopG(
       }
       return [done, cur];
     }
-    const it = stack.pop()!;
+    let it = stack.pop()!;
+    let evaluationScope = it.evaluationScope;
+    // The selected context belongs only to the nested reduction started by evalc. Once its finished value
+    // reaches the exact continuation stack that evalc entered from, resume that continuation in its parent
+    // context. Stack nodes are persistent, so pointer identity is the delimiter and cannot match by accident.
+    if (
+      evaluationScope !== undefined &&
+      it.stack !== null &&
+      it.stack.head.fin &&
+      it.stack.tail === evaluationScope.boundary
+    ) {
+      evaluationScope = evaluationScope.parent;
+      it =
+        evaluationScope === undefined
+          ? { stack: it.stack, bnd: it.bnd }
+          : { stack: it.stack, bnd: it.bnd, evaluationScope };
+    }
+    let activeEnv = env;
+    if (evaluationScope !== undefined) {
+      activeEnv = refreshEvaluationEnvironment(evaluationScope.env, cur.world);
+      if (activeEnv !== evaluationScope.env) {
+        evaluationScope = { ...evaluationScope, env: activeEnv };
+        it = { ...it, evaluationScope };
+      }
+    }
     // `(pragma! max-stack-depth N)` bounds how deep the interpreter stack may grow before a branch is cut
     // back to a StackOverflow atom (Hyperon's pragma; bounds memory, not steps). 0 (the default) disables
     // the check, so this costs nothing unless a program opts in. A finished branch is already a result, so
@@ -4340,24 +5762,39 @@ function* interpretLoopG(
       let depth = 0;
       for (let p = it.stack; p !== null; p = p.tail) depth++;
       if (depth >= cur.world.maxStackDepth) {
-        emit(isFinal(it) ? finalPair(env, it) : exhaustedPair(env, it));
+        emit(isFinal(it) ? finalPair(activeEnv, it) : exhaustedPair(activeEnv, it));
         continue;
       }
     }
-    const [results, st2] = yield* interpretStack1G(env, f - 1, cur, it);
+    const [results, st2] = yield* interpretStack1G(activeEnv, f - 1, cur, it);
     cur = st2;
     f -= 1;
     if (isItemSource(results)) {
-      beginSource(results, true);
+      if (evaluationScope === undefined) {
+        beginSource(results, true);
+      } else {
+        const sourceWithScope: ItemSource = {
+          endState: results.endState,
+          *foldItems(): Iterable<Item> {
+            for (const item of results.foldItems())
+              yield item.evaluationScope === undefined ? { ...item, evaluationScope } : item;
+          },
+        };
+        beginSource(sourceWithScope, true);
+      }
       continue;
     }
     // Finals stream out immediately in result order (inlined to keep the no-sink case a direct push, no
     // per-result closure). Non-finals collect in order, then push reversed so they pop in that same order.
     const more: Item[] = [];
-    for (const r of results) {
+    for (const raw of results) {
+      const r =
+        evaluationScope !== undefined && raw.evaluationScope === undefined
+          ? { ...raw, evaluationScope }
+          : raw;
       if (isFinal(r)) {
-        if (sink !== undefined) sink(finalPair(env, r));
-        else done.push(finalPair(env, r));
+        if (sink !== undefined) sink(finalPair(activeEnv, r));
+        else done.push(finalPair(activeEnv, r));
       } else more.push(r);
     }
     for (let i = more.length - 1; i >= 0; i--) stack.push(more[i]!);
@@ -4382,8 +5819,8 @@ function* reduceChildrenG(
   env: MinEnv,
   fuel: number,
   st: St,
-  pairs: Array<[Atom, Bindings]>,
-  onTerminal: (p: [Atom, Bindings]) => Array<[Atom, Bindings]> | undefined,
+  pairs: ContextualPair[],
+  onTerminal: (p: ContextualPair) => Array<[Atom, Bindings]> | undefined,
 ): Gen<[Array<[Atom, Bindings]>, St]> {
   const out: Array<[Atom, Bindings]> = [];
   let cur = st;
@@ -4392,7 +5829,8 @@ function* reduceChildrenG(
     if (term !== undefined) {
       out.push(...term);
     } else {
-      const [more, st3] = yield* mettaEvalG(env, fuel - 1, cur, p[1], p[0]);
+      const selected = refreshEvaluationEnvironment(p[2] ?? env, cur.world);
+      const [more, st3] = yield* mettaEvalG(selected, fuel - 1, cur, p[1], p[0]);
       cur = st3;
       out.push(...more);
     }
@@ -4762,7 +6200,8 @@ function prepareCollapseRoute(
   if (rules === undefined || rules.length !== 1) return undefined;
   const args = call.items.slice(1);
   if (args.some((arg) => !isNormalForm(env, st.world, arg))) return undefined;
-  if (typeMismatch(env, st.world, op, args, env.sigs.get(op)) !== undefined) return undefined;
+  if (typeMismatch(env, st.world, op, args, typeViewFor(env, st.world).sigs.get(op)) !== undefined)
+    return undefined;
 
   const [lhs, rhs] = rules[0]!;
   if (lhs.kind !== "expr" || lhs.items.length !== call.items.length || !canMatchShallow(lhs, call))
@@ -4849,7 +6288,7 @@ function tryCountAggregate(
   // `iterated` (and thus the counter) is identical. The flat store tallies columnar-ly (countHeadArity
   // mirrors `unifies` exactly); at most one of the two stores is non-empty, and summing keeps the tally
   // right either way.
-  const sn = spaceName(w, inst(env, bnd, match.items[1]!));
+  const sn = contextualSpaceName(env, w, inst(env, bnd, match.items[1]!));
   if (
     (sn === undefined || sn === "&self") &&
     w.store.size === 0 &&
@@ -5051,6 +6490,7 @@ const CHOICE_PLAN_GROUNDED_OPS = [
 ];
 
 function canRunChoicePlan(env: MinEnv, w: World): boolean {
+  const view = typeViewFor(env, w);
   if (env.varRulesVar.length > 0 || w.selfVarRules.length > 0) return false;
   for (const name of CHOICE_PLAN_GROUNDED_OPS) {
     const grounded = env.gt.get(name);
@@ -5061,9 +6501,9 @@ function canRunChoicePlan(env: MinEnv, w: World): boolean {
     if ((env.ruleIndex.get(name)?.length ?? 0) !== expectedRules) return false;
     if (w.selfRules.has(name) || staticRulesChangedFor(w, name)) return false;
   }
-  if (env.sigs.has("unique-atom")) return false;
+  if (view.sigs.has("unique-atom")) return false;
   for (const [name, expected] of CHOICE_PLAN_SIGNATURES) {
-    const actual = env.sigs.get(name);
+    const actual = view.sigs.get(name);
     if (
       actual === undefined ||
       actual.length !== expected.length ||
@@ -5164,7 +6604,11 @@ function tryFastUniqueChoiceFunction(
   op: string,
   args: readonly Atom[],
 ): Atom[] | undefined {
-  if (env.sigs.has(op) || world.selfRules.has(op) || staticRulesChangedFor(world, op))
+  if (
+    typeViewFor(env, world).sigs.has(op) ||
+    world.selfRules.has(op) ||
+    staticRulesChangedFor(world, op)
+  )
     return undefined;
   const rules = env.ruleIndex.get(op);
   if (rules?.length !== 1) return undefined;
@@ -5268,13 +6712,14 @@ function* reduceRulePairsG(
   queryVars: readonly string[],
   partB: Bindings,
   wApp: Atom,
-  pairs: readonly [Atom, Bindings][],
+  pairs: readonly ContextualPair[],
   opReturnsAtom: boolean,
 ): Gen<[Array<[Atom, Bindings]>, St]> {
   const out: Array<[Atom, Bindings]> = [];
   let cur = st;
   for (const p of pairs) {
-    const pb = mergeRestrict(env, queryVars, partB, p[1]);
+    const selected = refreshEvaluationEnvironment(p[2] ?? env, cur.world);
+    const pb = mergeRestrict(selected, queryVars, partB, p[1]);
     if (atomEq(p[0], notReducibleA) || atomEq(p[0], wApp)) {
       // wApp did not reduce (a constructor application / data term). Cache a ground one so the next visit
       // short-circuits instead of re-walking it.
@@ -5286,10 +6731,10 @@ function* reduceRulePairsG(
       // Terminal depth-cut: keep it as the result; re-evaluating it would re-cut and grow.
       out.push([p[0], pb]);
     } else {
-      const [more, st4] = yield* mettaEvalG(env, fuel - 1, cur, pb, p[0]);
+      const [more, st4] = yield* mettaEvalG(selected, fuel - 1, cur, pb, p[0]);
       cur = st4;
       for (const m of more) {
-        out.push([m[0], mergeRestrict(env, queryVars, pb, m[1])]);
+        out.push([m[0], mergeRestrict(selected, queryVars, pb, m[1])]);
       }
     }
     enforceDistinctLimit(env, out.length);
@@ -5304,6 +6749,7 @@ function* mettaEvalG(
   bnd: Bindings,
   a: Atom,
 ): Gen<[Array<[Atom, Bindings]>, St]> {
+  env = refreshEvaluationEnvironment(env, st.world);
   if (fuel <= 0)
     return [[[makeExpr(env, [sym("Error"), inst(env, bnd, a), sym("StackOverflow")]), bnd]], st];
   const w = inst(env, bnd, a);
@@ -5519,7 +6965,7 @@ function* mettaEvalG(
         );
         return flushReturn([[gint(BigInt(count)), lbnd]], stC);
       }
-      const opSig = env.sigs.get(op);
+      const opSig = typeViewFor(env, lst.world).sigs.get(op);
       const appErr = checkApplication(env, lst.world, op, args, opSig);
       if (appErr !== null) return flushReturn([[appErr, lbnd]], lst);
       if (
@@ -5862,7 +7308,12 @@ function* mettaEvalG(
             // via reduceTrampoline instead of recursing into mettaEvalG, so the native stack stays flat down a
             // deep tail-recursive chain. Defer this call's tabling key to pendingKeys: it shares the chain's
             // normal form, so flushReturn caches it (and every key above it) once the chain terminates.
-            if (partials.length === 1 && queryVars.length === 0 && pairs.length === 1) {
+            if (
+              partials.length === 1 &&
+              queryVars.length === 0 &&
+              pairs.length === 1 &&
+              pairs[0]![2] === undefined
+            ) {
               const p = pairs[0]!;
               // A StackOverflow cut is terminal, never a tail-call continuation. Re-feeding it into the
               // trampoline re-cuts at depth 1 and grows an (Error (eval …) StackOverflow) each iteration,
@@ -5934,7 +7385,7 @@ function* mettaEvalG(
       ]);
       // the interpret-tuple fallback: a tuple element equal to the whole term is already final.
       return yield* reduceChildrenG(env, fuel, st2, tupleRes, (p) =>
-        atomEq(p[0], w) ? [p] : undefined,
+        atomEq(p[0], w) ? [[p[0], p[1]]] : undefined,
       );
     }
     // a rule fired: every reduced result still needs evaluating to normal form.
@@ -5949,10 +7400,63 @@ function* mettaEvalG(
   return yield* reduceChildrenG(env, fuel, st1, pairs, (p) =>
     atomEq(p[0], notReducibleA) || atomEq(p[0], w)
       ? [[w, bnd]]
-      : returnsAtom(env, w) && !isEmbeddedOp(p[0])
-        ? [p]
+      : returnsAtom(env, st1.world, w) && !isEmbeddedOp(p[0])
+        ? [[p[0], p[1]]]
         : undefined,
   );
+}
+
+function mettaReturnsInputForExpectedType(atom: Atom, expectedType: Atom): boolean {
+  if (atom.kind === "var") return true;
+  if (expectedType.kind !== "sym") return false;
+  return expectedType.name === "Atom" || expectedType.name === metaType(atom);
+}
+
+function mettaTypeTerminal(atom: Atom): boolean {
+  return atomEq(atom, emptyA) || atomEq(atom, notReducibleA) || isErrorAtom(atom);
+}
+
+/** Apply Hyperon's `metta` expected-type contract around the ordinary type-directed evaluator. */
+function* mettaEvalExpectedG(
+  env: MinEnv,
+  fuel: number,
+  st: St,
+  bnd: Bindings,
+  atom: Atom,
+  expectedType: Atom,
+): Gen<[Array<[Atom, Bindings]>, St]> {
+  const input = inst(env, bnd, atom);
+  if (mettaReturnsInputForExpectedType(input, expectedType)) return [[[input, bnd]], st];
+  const [pairs, st2] = yield* mettaEvalG(env, fuel, st, bnd, atom);
+  if (atomEq(expectedType, UNDEF)) return [pairs, st2];
+
+  const out: Array<[Atom, Bindings]> = [];
+  for (const [result, resultBindings] of pairs) {
+    if (mettaTypeTerminal(result)) {
+      out.push([result, resultBindings]);
+      continue;
+    }
+    const actualTypes = getTypesForQuery(env, st2.world, result);
+    let matched: Bindings | undefined;
+    for (const actualType of actualTypes) {
+      matched = matchType(resultBindings, expectedType, actualType);
+      if (matched !== undefined) break;
+    }
+    if (matched !== undefined) {
+      out.push([result, matched]);
+      continue;
+    }
+    for (const actualType of actualTypes)
+      out.push([
+        makeExpr(env, [
+          sym("Error"),
+          result,
+          makeExpr(env, [sym("BadType"), expectedType, actualType]),
+        ]),
+        resultBindings,
+      ]);
+  }
+  return [out, st2];
 }
 
 // ---------- public API ----------
@@ -5996,6 +7500,25 @@ function mettaEval(
 /** Async type-directed evaluation: awaits async grounded operations (`env.agt`). An optional `signal`
  *  makes it cancellable (used by `race` to stop losing branches). */
 export function mettaEvalAsync(
+  env: MinEnv,
+  fuel: number,
+  st: St,
+  bnd: Bindings,
+  a: Atom,
+  signal?: AbortSignal,
+): Promise<[Array<[Atom, Bindings]>, St]> {
+  ensureCompiled(env, a);
+  const pinned = pinAsyncEvaluation(env, st);
+  return runGenAsync(mettaEvalG(pinned.env, fuel, pinned.state, bnd, a), signal)
+    .catch((e: unknown) => {
+      if (isNativeStackOverflow(e)) return stackOverflowResult(pinned.env, pinned.state, bnd, a);
+      throw e;
+    })
+    .finally(pinned.release);
+}
+
+/** Async evaluation for a runner that exclusively owns both `env` and `st` for the whole suspension. */
+export function mettaEvalAsyncOwned(
   env: MinEnv,
   fuel: number,
   st: St,

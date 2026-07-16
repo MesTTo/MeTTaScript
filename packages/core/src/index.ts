@@ -22,6 +22,7 @@ export * from "./eval";
 export * from "./runner";
 export * from "./host";
 export * from "./extensions";
+export * from "./revision-collection";
 export * from "./stdlib";
 export * from "./flat-kb";
 export * from "./flat-atomspace";

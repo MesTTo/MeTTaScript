@@ -28,6 +28,7 @@
     "build": "tsup src/index.ts src/host.ts --format esm --dts --clean && tsup src/runtime.ts --format esm --dts"
   },
   "dependencies": {
+    "@noble/hashes": "^1.8.0",
     "neverthrow": "^8.1.0"
   },
   "author": "MesTTo",
