@@ -1,3 +1,42 @@
+# MeTTa TS 1.1.7
+
+MeTTa TS 1.1.7 fixes a unification soundness bug in grounded substitution.
+
+## Substitution resolves to a fixpoint
+
+A specialized forward chainer emulating backward chaining on propositional
+calculus returned an extra spurious proof (GitHub issue #2). Applying a binding
+set as a substitution was single-pass: a variable whose value mentioned another
+still-bound variable left that inner variable unresolved, and a later scope
+restriction then dropped its binding and lost the derived constraint, so a freed
+type unified with the wrong axiom. `instantiate` now resolves to a fixpoint. The
+query returns the single proof that Hyperon 0.2.10 and PeTTa (SWI-Prolog) both
+produce.
+
+The resolution stays bounded and scalable: a variable chain is followed
+iteratively, so a four-million-link chain resolves rather than overflowing the
+stack; a name-to-value index makes a long chain linear rather than quadratic;
+binding cycles truncate deterministically; and a shared value DAG is resolved
+once by object identity, so a term with an exponential number of paths resolves
+in constant time with bounded memory.
+
+## Verification
+
+- Full test suite passes, with new fixpoint and backward-chaining regression
+  tests, each shown to fail on the single-pass version.
+- Core/ST conformance is unchanged from 1.1.6: 431 passed, 77 established
+  failures, 60 manifest expected failures, byte-identical failure set.
+- Performance is neutral against 1.1.6 on the nondeterminism benchmark suite.
+
+## Packages
+
+All public packages use version `1.1.7`:
+
+```bash
+npm install @metta-ts/core@1.1.7
+npm install -g @metta-ts/node@1.1.7
+```
+
 # MeTTa TS 1.1.6
 
 MeTTa TS 1.1.6 reduces the cold and loaded cost of compiled nondeterministic

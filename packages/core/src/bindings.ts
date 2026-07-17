@@ -162,6 +162,11 @@ export function makeValRel(x: string, a: Atom): ValRel {
   return valRel(x, a);
 }
 
+/** Build a single variable-equality relation. */
+export function makeEqRel(x: string, y: string): EqRel {
+  return eqRel(x, y);
+}
+
 /** Build a binding set from an explicit list of relations (newest-first). */
 export function fromRelations(rels: readonly BindingRel[]): Bindings {
   return rels;
