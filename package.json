@@ -19,6 +19,7 @@
     "bench": "pnpm -r --filter @metta-ts/core --filter @metta-ts/node --filter @metta-ts/browser build && node packages/node/bench/suite.mjs && node packages/node/bench/nondeterminism.mjs --engine=ts --runs=1 && node packages/node/bench/concurrency.mjs && node packages/browser/bench/concurrency.mjs",
     "bench:nondeterminism": "pnpm -r --filter @metta-ts/core --filter @metta-ts/node build && node packages/node/bench/nondeterminism.mjs",
     "bench:nested-index": "pnpm --filter @metta-ts/core build && node packages/node/bench/nested-static-index.mjs",
+    "bench:grounded-v2": "pnpm --filter @metta-ts/core build && node packages/node/bench/grounded-v2.mjs",
     "bench:scale": "pnpm -r --filter @metta-ts/core --filter @metta-ts/node build && node --stack-size=8000 packages/node/bench/scale-proof.mjs",
     "bench:prolog": "pnpm -r --filter @metta-ts/core --filter @metta-ts/hyperon --filter @metta-ts/prolog --filter @metta-ts/node build && node packages/node/bench/prolog.mjs"
   },

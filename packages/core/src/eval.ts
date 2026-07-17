@@ -15,6 +15,8 @@ import {
   atomVars,
   collectVars,
   type ExprAtom,
+  type GroundedExec,
+  type GroundedMatch,
   emptyExpr,
   expr,
   gint,
@@ -26,8 +28,10 @@ import {
   isErrorAtom,
   metaType,
   sym,
+  type VarAtom,
   variable,
   variableIdentity,
+  variableKey,
 } from "./atom";
 import { dedupAlphaStable, ExactAtomSet } from "./atom-set";
 import {
@@ -64,7 +68,13 @@ import {
   size,
   valEntries,
 } from "./bindings";
-import { bindingFrameFromLegacy, bindingFrameToLegacy, emptyBindingFrame } from "./binding-frame";
+import {
+  bindingFrameFromLegacy,
+  bindingFrameToLegacy,
+  emptyBindingFrame,
+  frameDeltaView,
+  type BindingFrame,
+} from "./binding-frame";
 import { BindingPacketRegistry } from "./binding-packet";
 import {
   DEFAULT_GROUNDED_CALL_CONTEXT,
@@ -110,6 +120,24 @@ import {
   GeneratorUnwindFailures,
 } from "./generator-lifecycle";
 import { instantiate } from "./instantiate";
+import {
+  groundedAnswerScopeFault,
+  groundedAtomScopeFault,
+  groundedEffectsScopeFault,
+  groundedV2AsyncAdapter,
+  groundedV2Registration,
+  groundedV2MatcherAdapter,
+  groundedV2SyncAdapter,
+  markGroundedV2Registration,
+  type GroundedAnswer,
+  type GroundedAnswerCursor,
+  type GroundedCallContextV2,
+  type GroundedOperationV2,
+  type GroundedOperationV2Options,
+  type GroundedOperationV2Registration,
+  type GroundedStart,
+} from "./grounded-v2";
+import { infrastructureFaultFromUnknown, type InfrastructureFaultOutcome } from "./eval-outcome";
 import { addVarBinding, matchAtoms, matchAtomsScoped, merge } from "./match";
 import { applyConsAtom, applyDeconsAtom } from "./minimal-instruction";
 import { addInt, type IntVal, subInt } from "./number";
@@ -128,6 +156,7 @@ import {
   SourceOrderedAsyncCursor,
   drainAsyncCursor,
   drainSyncCursor,
+  validateChildEvent,
   type AsyncSearchCursor,
   type SearchBatchEvent,
   type SearchDrainResult,
@@ -169,8 +198,15 @@ import {
 import { type ActiveTableEntry, TableSpace, type TableKey } from "./table-space";
 import { Trail, unifyTrail } from "./trail";
 import { tryFormatTransportAtom } from "./standard-syntax";
-import { isRuntimeId, RuntimeIdAllocator, type StateId } from "./trace";
-import { legacyFreshVariableSuffix, uniqueVariablesInAtoms } from "./variable-scope";
+import {
+  childTraceContext,
+  isRuntimeId,
+  rootTraceContext,
+  RuntimeIdAllocator,
+  type StateId,
+  type TraceContext,
+} from "./trace";
+import { legacyFreshVariableSuffix, uniqueVariablesInAtoms, VariableScope } from "./variable-scope";
 import { isWorkerReplaySafeAtom } from "./worker-replay";
 import { type Relation, wcoJoin, wcoJoinFold } from "./wcojoin";
 
@@ -271,6 +307,9 @@ interface AnswerEmissionLifecycle {
 interface MettaAnswerEmitter {
   readonly emitted: WeakSet<ContextualPair>;
   emittedCount: number;
+  omittedReturnCount: number;
+  /** Cursor delivery can discard answer bags after the same answers have crossed the pull boundary. */
+  readonly retainReturnedAnswers?: boolean;
   readonly lifecycle: AnswerEmissionLifecycle;
   readonly cursor?: CursorMode;
   readonly accept?: (pair: ContextualPair, state: St) => Gen<St>;
@@ -353,12 +392,37 @@ function* emitReturnedMettaAnswersG(
   pairs: readonly ContextualPair[],
   state: St,
   emittedAtStart = 0,
+  omittedAtStart = 0,
 ): Gen<St> {
   if (emitter.lifecycle.unwinding) return state;
-  const emittedDuringEvaluation = emitter.emittedCount - emittedAtStart;
+  const emittedDuringEvaluation =
+    emitter.emittedCount - emittedAtStart - (emitter.omittedReturnCount - omittedAtStart);
   if (emittedDuringEvaluation < 0 || emittedDuringEvaluation > pairs.length)
     throw new Error("streamed MeTTa answers do not match the returned answer bag");
   return yield* emitMettaAnswersG(emitter, pairs.slice(emittedDuringEvaluation), state);
+}
+
+/**
+ * Emit the un-streamed remainder of a returned bag, then record the whole bag as omitted when the
+ * emitter discards returned answers. Callers that skip their own `out.push` under the same flag
+ * keep `emittedCount - omittedReturnCount` consistent for every ancestor sharing this emitter.
+ */
+function* forwardReturnedMettaAnswersG(
+  emitter: MettaAnswerEmitter,
+  pairs: readonly ContextualPair[],
+  state: St,
+  emittedAtStart: number,
+  omittedAtStart: number,
+): Gen<St> {
+  const next = yield* emitReturnedMettaAnswersG(
+    emitter,
+    pairs,
+    state,
+    emittedAtStart,
+    omittedAtStart,
+  );
+  if (emitter.retainReturnedAnswers === false) emitter.omittedReturnCount += pairs.length;
+  return next;
 }
 interface CandidateSource extends Iterable<Atom> {
   readonly counterPadding?: number;
@@ -872,9 +936,21 @@ function* callHostImportG(
   world: World,
   space: Atom,
   file: Atom,
+  bindings: Bindings,
 ): Gen<ReduceResult | undefined> {
   const hostImport = env.hostImport;
   if (hostImport === undefined) return undefined;
+  const groundedV2 = groundedV2Registration(hostImport);
+  if (groundedV2 !== undefined)
+    return yield* collectGroundedV2LegacyG(
+      groundedV2,
+      env,
+      world,
+      "import!",
+      [space, file],
+      bindings,
+      makeExpr(env, [sym("import!"), space, file]),
+    );
   checkWorldDeadline(world, "import!");
   pendingAsyncOp = "import!";
   return (yield driverEffect(
@@ -924,6 +1000,33 @@ export interface Item {
   readonly bnd: Bindings;
   /** Dynamic evaluator selected by `evalc`, delimited by the continuation stack it entered from. */
   readonly evaluationScope?: EvaluationScope;
+  /** Owned pull continuation for a grounded V2 answer stream. */
+  readonly groundedV2?: MinimalGroundedV2Continuation;
+}
+interface MinimalGroundedV2Continuation {
+  readonly operation: string;
+  readonly subject: Atom;
+  readonly continuation: Stack;
+  readonly call: ActiveGroundedV2Call;
+  readonly context: GroundedCallContextV2;
+  readonly answers: GroundedAnswerCursor;
+  readonly isolation?: StreamingIsolatedBranches;
+  activeIsolatedAnswer: boolean;
+  closed: boolean;
+}
+interface StreamingIsolatedBranches {
+  readonly parent: St;
+  readonly contextIdentity: GroundedContextIdentity;
+  readonly sequence: number;
+  /** True when a downstream continuation owns each answer's state, so terminals are discarded. */
+  readonly acceptedDownstream: boolean;
+  nextIndex: number;
+  /** The branch currently handed to a continuation; released when its terminal is recorded. */
+  activeBranch: St | undefined;
+  /** Journal deltas of recorded terminals, retained only on the merge path and only when non-empty. */
+  readonly terminalDeltas: JournalWorldDelta[];
+  maxTerminalCounter: number;
+  finished: boolean;
 }
 interface EvaluationScope {
   readonly env: MinEnv;
@@ -1696,6 +1799,124 @@ export function registerAsyncGroundedOperation(
   invalidateGroundedRegistration(env);
 }
 
+function groundedV2RegistrationRecord(
+  operation: GroundedOperationV2,
+  options: GroundedOperationV2Options,
+): GroundedOperationV2Registration {
+  if (options.mode !== "sync" && options.mode !== "async")
+    throw new TypeError("grounded V2 mode must be 'sync' or 'async'");
+  const effects = normalizedGroundedEffectPolicy(options.effects);
+  const requiredCapabilities = [...new Set(options.requiredCapabilities ?? [])];
+  if (requiredCapabilities.some((capability) => capability.length === 0))
+    throw new TypeError("grounded V2 capabilities must not contain an empty name");
+  return Object.freeze({
+    operation,
+    options: Object.freeze({
+      mode: options.mode,
+      effects,
+      requiredCapabilities: Object.freeze(requiredCapabilities),
+    }),
+  });
+}
+
+function executableResults(result: ReduceResult): readonly Atom[] {
+  switch (result.tag) {
+    case "ok":
+      if (result.effects !== undefined && result.effects.length > 0)
+        throw new Error("direct grounded executable V2 calls cannot apply evaluator effects");
+      return result.results;
+    case "noReduce":
+      throw new Error("grounded executable V2 operation is stuck");
+    case "runtimeError":
+    case "incorrectArgument":
+      throw new Error(result.msg);
+  }
+}
+
+/** Create an executable grounded-atom function backed by the same V2 cursor protocol. */
+export function groundedExecutableV2(
+  operation: GroundedOperationV2,
+  options: GroundedOperationV2Options,
+): GroundedExec {
+  const registration = groundedV2RegistrationRecord(operation, options);
+  if (options.mode === "sync") {
+    const legacy = groundedV2SyncAdapter(registration);
+    return markGroundedV2Registration(
+      (args, context) => executableResults(legacy(args, context)),
+      registration,
+    );
+  }
+  const legacy = groundedV2AsyncAdapter(registration);
+  return markGroundedV2Registration(
+    async (args, context) => executableResults(await legacy(args, context)),
+    registration,
+  );
+}
+
+/** Create an `import!` host callback backed by the V2 cursor and fault protocol. */
+export function groundedHostImportV2(
+  operation: GroundedOperationV2,
+  options: GroundedOperationV2Options,
+): HostImportFn {
+  const registration = groundedV2RegistrationRecord(operation, options);
+  if (options.mode === "sync") {
+    const legacy = groundedV2SyncAdapter(registration);
+    return markGroundedV2Registration(
+      (space, file, context) => legacy([space, file], context),
+      registration,
+    );
+  }
+  const legacy = groundedV2AsyncAdapter(registration);
+  return markGroundedV2Registration(
+    async (space, file, context) => await legacy([space, file], context),
+    registration,
+  );
+}
+
+/** Create a finite custom matcher backed by the V2 termination and binding protocol. */
+export function groundedMatcherV2(
+  operation: GroundedOperationV2,
+  options: GroundedOperationV2Options,
+): GroundedMatch {
+  const registration = groundedV2RegistrationRecord(operation, options);
+  if (
+    registration.options.mode !== "sync" ||
+    registration.options.effects.classes.length !== 1 ||
+    registration.options.effects.classes[0] !== "pure"
+  )
+    throw new TypeError("grounded V2 custom matchers must be synchronous and pure");
+  return groundedV2MatcherAdapter(registration);
+}
+
+/** Register a pull-based grounded operation with an explicit execution and effect contract. */
+export function registerGroundedOperationV2(
+  env: MinEnv,
+  name: string,
+  operation: GroundedOperationV2,
+  options: GroundedOperationV2Options,
+): void {
+  const registration = groundedV2RegistrationRecord(operation, options);
+  retireCachedProgramSnapshot(env);
+  detachProgramCollectionsIfShared(env);
+  if (options.mode === "sync") {
+    env.agt.delete(name);
+    registerGroundedOperation(
+      env,
+      name,
+      groundedV2SyncAdapter(registration),
+      registration.options.effects,
+    );
+  } else {
+    env.gt.delete(name);
+    registerAsyncGroundedOperation(
+      env,
+      name,
+      groundedV2AsyncAdapter(registration),
+      registration.options.effects,
+    );
+  }
+}
+
 // ---------- higher-order specialization (after PeTTa's src/specializer.pl) ----------
 // A function passed to another as an argument blocks compilation: iterate's `$step` is called as
 // `($step $i $state)`, and the typed compiled core cannot type a call to an unknown `$step`. PeTTa's answer
@@ -2450,6 +2671,8 @@ interface WorldRuntimeContext {
   readonly nextSequence: number;
   readonly resources: ResourceLease;
   readonly cancellation: CancellationScope;
+  readonly ids: RuntimeIdAllocator;
+  readonly trace: TraceContext;
 }
 
 export interface BranchEffectSnapshot {
@@ -2480,6 +2703,7 @@ let worldRuntimeSequence = 0;
 function newWorldRuntimeContext(options: BranchRuntimeOptions = {}): WorldRuntimeContext {
   const branch = `run-${++worldRuntimeSequence}`;
   const resources = new ResourceLedger(options.resources).lease(branch);
+  const ids = new RuntimeIdAllocator(branch);
   return {
     branch,
     policy: "sequential-commit",
@@ -2489,6 +2713,8 @@ function newWorldRuntimeContext(options: BranchRuntimeOptions = {}): WorldRuntim
     nextSequence: 0,
     resources,
     cancellation: new CancellationScope(branch, options.signal),
+    ids,
+    trace: rootTraceContext(ids),
   };
 }
 
@@ -2576,6 +2802,7 @@ function forkWorldRuntime(
 ): World {
   const parent = worldRuntimeContext(source);
   if (debitBranch) consumeWorldResource(source, "branches", 1, branch);
+  const ids = parent.ids.fork(`branch-${++worldRuntimeSequence}`);
   worldRuntimeContexts.set(target, {
     branch,
     policy,
@@ -2585,6 +2812,8 @@ function forkWorldRuntime(
     nextSequence: 0,
     resources: parent.resources.fork(branch),
     cancellation: parent.cancellation.fork(branch),
+    ids,
+    trace: childTraceContext(ids, parent.trace),
   });
   return target;
 }
@@ -3827,6 +4056,26 @@ function assertJournalDeltasDoNotConflict(base: World, deltas: readonly JournalW
   }
 }
 
+/** Merge sibling journal deltas exactly like the one-shot world merge: conflict-check the whole
+ *  set against the base, then apply in branch order. */
+function mergeWorldJournalDeltas(
+  env: MinEnv,
+  base: World,
+  deltas: readonly JournalWorldDelta[],
+): World {
+  if (deltas.every((delta) => delta.generationDelta === 0 && delta.effects.length === 0))
+    return base;
+  assertJournalDeltasDoNotConflict(base, deltas);
+  let merged = base;
+  for (const delta of deltas) merged = applyJournalWorldDelta(env, merged, delta);
+  if (deltas.some((delta) => delta.generationDelta > 0))
+    merged.generation =
+      Math.max(base.generation, ...deltas.map((delta) => base.generation + delta.generationDelta)) +
+      1;
+  groundedContextIdentities.set(merged, groundedContextIdentity(base));
+  return merged;
+}
+
 function mergeWorldsUnchecked(env: MinEnv, base: World, branches: readonly World[]): World {
   const deltas = branches.map((branch) => captureWorldDelta(base, branch));
   if (
@@ -3834,16 +4083,8 @@ function mergeWorldsUnchecked(env: MinEnv, base: World, branches: readonly World
     deltas.every((delta) => delta.kind !== "journal" || delta.effects.length === 0)
   )
     return base;
-  if (deltas.every((delta): delta is JournalWorldDelta => delta.kind === "journal")) {
-    assertJournalDeltasDoNotConflict(base, deltas);
-    let merged = base;
-    for (const delta of deltas) merged = applyJournalWorldDelta(env, merged, delta);
-    if (branches.some((branch) => branch.generation !== base.generation))
-      merged.generation =
-        Math.max(base.generation, ...branches.map((branch) => branch.generation)) + 1;
-    groundedContextIdentities.set(merged, groundedContextIdentity(base));
-    return merged;
-  }
+  if (deltas.every((delta): delta is JournalWorldDelta => delta.kind === "journal"))
+    return mergeWorldJournalDeltas(env, base, deltas);
   // The concurrent-branch merge works on materialized arrays (par is off the hot path); the result is
   // rebuilt into a log. The atom order is preserved so merged `&self` content matches the array version.
   const baseSelf = runtimeAtoms(base);
@@ -4394,7 +4635,909 @@ function recordGroundedOperationEffects(
   }
 }
 
-function* evalOpG(env: MinEnv, st: St, prev: Stack, x: Atom, b: Bindings): Gen<[Item[], St]> {
+function groundedV2For(
+  env: MinEnv,
+  operation: string,
+): GroundedOperationV2Registration | undefined {
+  return groundedV2Registration(env.agt.get(operation) ?? env.gt.get(operation));
+}
+
+interface GroundedV2CallCache {
+  visibleKeys?: ReadonlySet<string>;
+  zeroDelta?: { readonly queryVars: readonly string[] | undefined; readonly bindings: Bindings };
+}
+
+interface ActiveGroundedV2Call {
+  readonly frame: BindingFrame;
+  readonly trace: TraceContext;
+  readonly resources: ResourceLease;
+  /** Per-call caches for values that are constant across the call's answers. */
+  readonly cache: GroundedV2CallCache;
+  context(signal: AbortSignal): GroundedCallContextV2;
+  close(): void;
+}
+
+function createGroundedV2Call(
+  env: MinEnv,
+  world: World,
+  operation: string,
+  originalArgs: readonly Atom[],
+  bindings: Bindings,
+): ActiveGroundedV2Call {
+  const converted = bindingFrameFromLegacy(bindings);
+  if (!converted.ok)
+    throw infrastructureFaultFromUnknown("grounded-context", new Error(converted.fault.message), {
+      bindings: emptyBindingFrame,
+    });
+  const runtime = worldRuntimeContext(world);
+  const trace = childTraceContext(runtime.ids, runtime.trace);
+  const resources = runtime.resources.fork(`${operation}-call`);
+  const scope = new VariableScope(runtime.ids.next("scope"));
+  const visibleVariables = Object.freeze(uniqueVariablesInAtoms(originalArgs));
+  const frozenOriginalArgs = Object.freeze(originalArgs.slice());
+  let closed = false;
+  return {
+    frame: converted.value,
+    trace,
+    resources,
+    cache: {},
+    context(signal: AbortSignal): GroundedCallContextV2 {
+      const base =
+        signal === NEVER_ABORTED_SIGNAL
+          ? groundedCallContextWithSignal(env, world, groundedRuntimeSignal(world, signal))
+          : groundedCallContextWithSignal(env, world, signal);
+      return Object.freeze({
+        currentSpace: base.currentSpace,
+        visibleSpaces: base.visibleSpaces,
+        expectedType: base.expectedType,
+        generation: base.generation,
+        get typeEnvironment() {
+          return base.typeEnvironment;
+        },
+        get groundingEnvironment() {
+          return base.groundingEnvironment;
+        },
+        get imports() {
+          return base.imports;
+        },
+        get moduleInstallations() {
+          return base.moduleInstallations;
+        },
+        capabilities: base.capabilities,
+        originalArgs: frozenOriginalArgs,
+        bindings: converted.value,
+        visibleVariables,
+        scope,
+        resources,
+        trace,
+        signal: base.signal,
+      });
+    },
+    close(): void {
+      if (closed) return;
+      closed = true;
+      resources.close();
+    },
+  };
+}
+
+function groundedV2Fault(
+  phase: string,
+  error: unknown,
+  call: ActiveGroundedV2Call,
+  subject: Atom,
+): InfrastructureFaultOutcome<BindingFrame> {
+  return infrastructureFaultFromUnknown(phase, error, {
+    bindings: call.frame,
+    subject,
+    trace: call.trace,
+  });
+}
+
+function* startGroundedV2G(
+  registration: GroundedOperationV2Registration,
+  world: World,
+  operation: string,
+  args: readonly Atom[],
+  call: ActiveGroundedV2Call,
+  subject: Atom,
+): Gen<GroundedStart> {
+  const invoke = (signal: AbortSignal): GroundedStart | Promise<GroundedStart> => {
+    const context = call.context(signal);
+    for (const capability of registration.options.requiredCapabilities ?? [])
+      if (!context.capabilities.has(capability))
+        throw groundedV2Fault(
+          "grounded-capability",
+          new Error(`${operation}: missing required capability '${capability}'`),
+          call,
+          subject,
+        );
+    return registration.operation(args, context);
+  };
+  try {
+    if (registration.options.mode === "sync") {
+      const start = invoke(NEVER_ABORTED_SIGNAL);
+      if (isPromiseLike(start))
+        throw new TypeError("synchronous grounded V2 operation returned a Promise");
+      checkWorldDeadline(world, operation);
+      return start;
+    }
+    pendingAsyncOp = operation;
+    return (yield driverEffect(
+      operation,
+      () => {
+        throw new AsyncInSyncError(operation);
+      },
+      async (signal) => {
+        const start = await invoke(signal);
+        checkWorldDeadline(world, operation);
+        return start;
+      },
+    )) as GroundedStart;
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "kind" in error &&
+      error.kind === "infrastructure-fault"
+    )
+      throw error;
+    throw groundedV2Fault("grounded-start", error, call, subject);
+  }
+}
+
+/**
+ * The finite work permit issued to one grounded pull: the scheduler remainder when a cursor is
+ * driving, the remaining step budget when one is configured, and the default search quantum
+ * otherwise. A pull is never issued an unbounded allowance.
+ */
+function groundedPullAllowance(world: World, scheduler: CursorMode | undefined): number {
+  if (scheduler !== undefined) {
+    const remaining = scheduler.budget.remaining;
+    if (remaining <= 0) throw new Error("grounded answer pull started without scheduler allowance");
+    return remaining;
+  }
+  const ledger = worldRuntimeContext(world).resources.ledger;
+  const limit = ledger.limit("steps");
+  if (limit === undefined) return DEFAULT_SEARCH_QUANTUM;
+  // An exhausted budget still issues one permit so the debit below reports the resource fault.
+  return Math.max(1, limit - ledger.used("steps"));
+}
+
+function* pullGroundedV2G(
+  answers: GroundedAnswerCursor,
+  world: World,
+  operation: string,
+  call: ActiveGroundedV2Call,
+  subject: Atom,
+  scheduler?: CursorMode,
+): Gen<SearchEvent<GroundedAnswer, void>> {
+  const maxSteps = groundedPullAllowance(world, scheduler);
+  let activeSignal: AbortSignal | undefined;
+  try {
+    if (answers.mode === "sync") {
+      checkWorldCancellation(world);
+      const event = validateChildEvent<GroundedAnswer, void>(answers.next({ maxSteps }), maxSteps);
+      checkWorldDeadline(world, operation);
+      return event;
+    }
+    pendingAsyncOp = operation;
+    return (yield driverEffect(
+      operation,
+      () => {
+        throw new AsyncInSyncError(operation);
+      },
+      async (signal) => {
+        activeSignal = signal;
+        const event = validateChildEvent<GroundedAnswer, void>(
+          await answers.next({ signal, maxSteps }),
+          maxSteps,
+        );
+        checkWorldDeadline(world, operation);
+        return event;
+      },
+    )) as SearchEvent<GroundedAnswer, void>;
+  } catch (error) {
+    if (activeSignal?.aborted === true && Object.is(error, activeSignal.reason)) throw error;
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "kind" in error &&
+      error.kind === "infrastructure-fault"
+    )
+      throw error;
+    throw groundedV2Fault("grounded-next", error, call, subject);
+  }
+}
+
+function* closeGroundedV2G(
+  cursor: GroundedAnswerCursor,
+  operation: string,
+  call: ActiveGroundedV2Call,
+  subject: Atom,
+  initiating: SchedulerUnwindFailure = { active: false, error: undefined },
+): Gen<void> {
+  if (cursor.closed) return;
+  const reason = { code: "parent-closed", message: `${operation} consumer closed` };
+  try {
+    if (cursor.mode === "sync") {
+      cursor.close(reason);
+      return;
+    }
+    pendingAsyncOp = operation;
+    yield driverEffect(
+      operation,
+      () => {
+        // A synchronous evaluation cannot join asynchronous cleanup. The cursor contract keeps a
+        // close failure on the cursor's sticky terminal, so initiation is still observed there;
+        // the rejection handler only prevents an unhandled-rejection crash for a producer this
+        // evaluation no longer owns. A synchronous throw still reaches the combiner below.
+        void cursor.close(reason).catch(() => undefined);
+        return undefined;
+      },
+      async () => await cursor.close(reason),
+    );
+  } catch (error) {
+    const cleanupFault = groundedV2Fault("grounded-close", error, call, subject);
+    if (!initiating.active) throw cleanupFault;
+    throw Object.is(error, initiating.error)
+      ? initiating.error
+      : combineInitiatingAndCleanupFailure(
+          initiating.error,
+          cleanupFault,
+          "grounded operation and cleanup both failed",
+        );
+  }
+}
+
+function atomCellCount(roots: readonly Atom[]): number {
+  const seen = new Set<Atom>();
+  const pending = [...roots];
+  while (pending.length > 0) {
+    const atom = pending.pop()!;
+    if (seen.has(atom)) continue;
+    seen.add(atom);
+    if (atom.kind === "expr")
+      for (let index = atom.items.length - 1; index >= 0; index--) pending.push(atom.items[index]!);
+  }
+  return seen.size;
+}
+
+function consumeGroundedPayloadResources(
+  world: World,
+  operation: string,
+  atoms: readonly Atom[],
+  result: boolean,
+): void {
+  const lease = worldRuntimeContext(world).resources;
+  if (!lease.ledger.tracked) return;
+  const fault = lease.tryConsumeMany(
+    {
+      ...(result ? { results: 1 } : {}),
+      "atom-cells": atomCellCount(atoms),
+    },
+    `${operation}-${result ? "answer" : "pre-effects"}`,
+  );
+  if (fault !== undefined) throw new ResourceLimitError(fault);
+}
+
+function reduceEffectAtoms(effects: readonly ReduceEffect[] | undefined): Atom[] {
+  if (effects === undefined) return [];
+  const atoms: Atom[] = [];
+  for (const effect of effects) {
+    if (effect.kind === "addAtom" || effect.kind === "removeAtom") atoms.push(effect.space);
+    atoms.push(effect.atom);
+  }
+  return atoms;
+}
+
+function instantiateReduceEffects(
+  frame: BindingFrame,
+  effects: readonly ReduceEffect[] | undefined,
+): readonly ReduceEffect[] | undefined {
+  if (effects === undefined || effects.length === 0) return effects;
+  return effects.map((effect) => {
+    switch (effect.kind) {
+      case "addAtom":
+      case "removeAtom":
+        return {
+          ...effect,
+          space: frame.instantiate(effect.space),
+          atom: frame.instantiate(effect.atom),
+        };
+      case "bindToken":
+        return { ...effect, atom: frame.instantiate(effect.atom) };
+    }
+  });
+}
+
+function checkedGroundedLanguageError(
+  error: Atom,
+  call: ActiveGroundedV2Call,
+  context: GroundedCallContextV2,
+  subject: Atom,
+): Atom {
+  const scopeFault = groundedAtomScopeFault(error, call.frame, context);
+  if (scopeFault !== undefined)
+    throw groundedV2Fault("grounded-bindings", new Error(scopeFault), call, subject);
+  return call.frame.instantiate(error);
+}
+
+function checkGroundedEffectsScope(
+  effects: readonly ReduceEffect[] | undefined,
+  call: ActiveGroundedV2Call,
+  context: GroundedCallContextV2,
+  subject: Atom,
+): void {
+  const scopeFault = groundedEffectsScopeFault(effects, call.frame, context);
+  if (scopeFault !== undefined)
+    throw groundedV2Fault("grounded-bindings", new Error(scopeFault), call, subject);
+}
+
+interface PreparedGroundedAnswer {
+  readonly atom: Atom;
+  readonly bindings: Bindings;
+  readonly effects?: readonly ReduceEffect[];
+  readonly resourceAtoms: readonly Atom[];
+}
+
+function answerVariablesWithinVisible(
+  call: ActiveGroundedV2Call,
+  context: GroundedCallContextV2,
+  answerVariables: readonly VarAtom[],
+): boolean {
+  if (answerVariables.length === 0) return true;
+  let visibleKeys = call.cache.visibleKeys;
+  if (visibleKeys === undefined) {
+    visibleKeys = new Set(context.visibleVariables.map(variableKey));
+    call.cache.visibleKeys = visibleKeys;
+  }
+  const keys = visibleKeys;
+  return answerVariables.every((variableAtom) => keys.has(variableKey(variableAtom)));
+}
+
+function preparedGroundedBindings(
+  env: MinEnv,
+  answer: GroundedAnswer,
+  call: ActiveGroundedV2Call,
+  context: GroundedCallContextV2,
+  merged: BindingFrame,
+  answerVariables: readonly VarAtom[],
+  subject: Atom,
+  queryVars: readonly string[] | undefined,
+): Bindings {
+  // A delta-free answer over caller-visible variables projects the same caller frame every time,
+  // so the projection and its legacy conversion are computed once per call, not once per answer.
+  const constantProjection =
+    answer.bindingDelta === undefined &&
+    answerVariablesWithinVisible(call, context, answerVariables);
+  if (constantProjection) {
+    const cached = call.cache.zeroDelta;
+    if (cached !== undefined && cached.queryVars === queryVars) return cached.bindings;
+  }
+  const projected = merged.project([...context.visibleVariables, ...answerVariables]);
+  if (!projected.ok)
+    throw groundedV2Fault("grounded-bindings", new Error(projected.fault.message), call, subject);
+  const legacy = bindingFrameToLegacy(projected.value);
+  const bindings = queryVars === undefined ? legacy : restrictBnd(env, queryVars, legacy);
+  if (constantProjection) call.cache.zeroDelta = { queryVars, bindings };
+  return bindings;
+}
+
+function prepareGroundedAnswer(
+  env: MinEnv,
+  answer: GroundedAnswer,
+  call: ActiveGroundedV2Call,
+  context: GroundedCallContextV2,
+  subject: Atom,
+  queryVars?: readonly string[],
+):
+  | { readonly kind: "answer"; readonly value: PreparedGroundedAnswer }
+  | { readonly kind: "conflict" } {
+  const scopeFault = groundedAnswerScopeFault(answer, call.frame, context);
+  if (scopeFault !== undefined)
+    throw groundedV2Fault("grounded-bindings", new Error(scopeFault), call, subject);
+  const merged =
+    answer.bindingDelta === undefined
+      ? { ok: true as const, value: call.frame }
+      : call.frame.merge(answer.bindingDelta);
+  if (!merged.ok) {
+    if (merged.fault.code === "conflict") return { kind: "conflict" };
+    throw groundedV2Fault("grounded-bindings", new Error(merged.fault.message), call, subject);
+  }
+  const answerVariables = uniqueVariablesInAtoms([answer.atom]);
+  const bindings = preparedGroundedBindings(
+    env,
+    answer,
+    call,
+    context,
+    merged.value,
+    answerVariables,
+    subject,
+    queryVars,
+  );
+  const effects = instantiateReduceEffects(merged.value, answer.effects);
+  const atom = merged.value.instantiate(answer.atom);
+  const resourceAtoms = [atom, ...reduceEffectAtoms(effects)];
+  if (answer.bindingDelta !== undefined) {
+    // Only the classes the delta touched carry newly published binding atoms.
+    const deltaView = frameDeltaView(call.frame, answer.bindingDelta);
+    if (deltaView !== undefined) {
+      for (const value of deltaView.values) resourceAtoms.push(merged.value.instantiate(value));
+    } else {
+      for (const bindingClass of answer.bindingDelta.classes())
+        if (bindingClass.value !== undefined)
+          resourceAtoms.push(merged.value.instantiate(bindingClass.value));
+    }
+  }
+  return {
+    kind: "answer",
+    value: {
+      atom,
+      bindings,
+      ...(effects === undefined ? {} : { effects }),
+      resourceAtoms,
+    },
+  };
+}
+
+function* collectGroundedV2LegacyG(
+  registration: GroundedOperationV2Registration,
+  env: MinEnv,
+  world: World,
+  operation: string,
+  args: readonly Atom[],
+  bindings: Bindings,
+  subject: Atom,
+): Gen<ReduceResult> {
+  const call = createGroundedV2Call(env, world, operation, args, bindings);
+  let cursor: GroundedAnswerCursor | undefined;
+  const unwind: SchedulerUnwindFailure = { active: false, error: undefined };
+  try {
+    const context = call.context(NEVER_ABORTED_SIGNAL);
+    const start = yield* startGroundedV2G(registration, world, operation, args, call, subject);
+    if (start.tag === "host-fault") throw start.fault;
+    if (start.tag === "stuck") return { tag: "noReduce" };
+    if (start.tag === "language-error") {
+      const error = checkedGroundedLanguageError(start.error, call, context, subject);
+      consumeGroundedPayloadResources(world, operation, [error], true);
+      return { tag: "ok", results: [error] };
+    }
+    cursor = start.answers;
+    if (cursor.mode !== registration.options.mode)
+      throw groundedV2Fault(
+        "grounded-start",
+        new TypeError(
+          `${operation}: ${registration.options.mode} operation returned ${cursor.mode} cursor`,
+        ),
+        call,
+        subject,
+      );
+    const results: Atom[] = [];
+    checkGroundedEffectsScope(start.preEffects, call, context, subject);
+    const instantiatedPreEffects = instantiateReduceEffects(call.frame, start.preEffects);
+    consumeGroundedPayloadResources(
+      world,
+      operation,
+      reduceEffectAtoms(instantiatedPreEffects),
+      false,
+    );
+    const effects: ReduceEffect[] = [...(instantiatedPreEffects ?? [])];
+    for (;;) {
+      const event = yield* pullGroundedV2G(cursor, world, operation, call, subject);
+      consumeWorldResource(world, "steps", event.steps, `${operation}-pull`);
+      if (event.kind === "pending") continue;
+      if (event.kind === "exhausted")
+        return effects.length === 0 ? { tag: "ok", results } : { tag: "ok", results, effects };
+      if (event.kind === "cancelled")
+        throw {
+          kind: "cancelled",
+          reason: event.reason,
+          bindings: call.frame,
+          subject,
+          trace: call.trace,
+        };
+      if (event.kind === "fault")
+        throw groundedV2Fault("grounded-next", event.error, call, subject);
+      const prepared = prepareGroundedAnswer(env, event.value, call, context, subject);
+      if (prepared.kind === "conflict") continue;
+      consumeGroundedPayloadResources(world, operation, prepared.value.resourceAtoms, true);
+      results.push(prepared.value.atom);
+      if (prepared.value.effects !== undefined) effects.push(...prepared.value.effects);
+    }
+  } catch (error) {
+    unwind.active = true;
+    unwind.error = error;
+    throw error;
+  } finally {
+    try {
+      if (cursor !== undefined) yield* closeGroundedV2G(cursor, operation, call, subject, unwind);
+    } finally {
+      call.close();
+    }
+  }
+}
+
+function* closeMinimalGroundedV2G(
+  continuation: MinimalGroundedV2Continuation,
+  initiating: SchedulerUnwindFailure = { active: false, error: undefined },
+): Gen<void> {
+  if (continuation.closed) return;
+  continuation.closed = true;
+  try {
+    yield* closeGroundedV2G(
+      continuation.answers,
+      continuation.operation,
+      continuation.call,
+      continuation.subject,
+      initiating,
+    );
+  } finally {
+    releaseStreamingIsolatedBranches(continuation.isolation);
+    continuation.call.close();
+  }
+}
+
+function* resumeMinimalGroundedV2G(
+  env: MinEnv,
+  st: St,
+  continuation: MinimalGroundedV2Continuation,
+  cursor?: CursorMode,
+): Gen<[Item[], St]> {
+  let handedOff = false;
+  let current = st;
+  const unwind: SchedulerUnwindFailure = { active: false, error: undefined };
+  if (continuation.isolation !== undefined) {
+    if (continuation.activeIsolatedAnswer) {
+      recordStreamingIsolatedTerminal(continuation.isolation, st);
+      continuation.activeIsolatedAnswer = false;
+    }
+    current = continuation.isolation.parent;
+  }
+  try {
+    for (;;) {
+      const event = yield* pullGroundedV2G(
+        continuation.answers,
+        current.world,
+        continuation.operation,
+        continuation.call,
+        continuation.subject,
+        cursor,
+      );
+      consumeWorldResource(current.world, "steps", event.steps, `${continuation.operation}-pull`);
+      yield* chargeSchedulerStepsG(cursor, current, event.steps);
+      if (event.kind === "pending") continue;
+      if (event.kind === "exhausted") {
+        if (continuation.isolation !== undefined)
+          current = finishStreamingIsolatedBranches(env, continuation.isolation);
+        return [[], current];
+      }
+      if (event.kind === "cancelled")
+        throw {
+          kind: "cancelled",
+          reason: event.reason,
+          bindings: continuation.call.frame,
+          subject: continuation.subject,
+          trace: continuation.call.trace,
+        };
+      if (event.kind === "fault")
+        throw groundedV2Fault(
+          "grounded-next",
+          event.error,
+          continuation.call,
+          continuation.subject,
+        );
+      const prepared = prepareGroundedAnswer(
+        env,
+        event.value,
+        continuation.call,
+        continuation.context,
+        continuation.subject,
+      );
+      if (prepared.kind === "conflict") continue;
+      if (continuation.isolation !== undefined)
+        current = allocateStreamingIsolatedBranch(continuation.isolation);
+      consumeGroundedPayloadResources(
+        current.world,
+        continuation.operation,
+        prepared.value.resourceAtoms,
+        true,
+      );
+      const applied = applyReduceEffects(
+        env,
+        current,
+        prepared.value.bindings,
+        prepared.value.effects,
+      );
+      const answer =
+        applied.tag === "error" ? errAtom(continuation.subject, applied.msg) : prepared.value.atom;
+      if (applied.tag === "ok") current = applied.state;
+      const retained: Item = {
+        stack: null,
+        bnd: prepared.value.bindings,
+        groundedV2: continuation,
+      };
+      continuation.activeIsolatedAnswer = continuation.isolation !== undefined;
+      handedOff = true;
+      return [
+        [
+          evalResult(
+            continuation.continuation,
+            answer,
+            prepared.value.bindings,
+            continuation.subject,
+          ),
+          retained,
+        ],
+        current,
+      ];
+    }
+  } catch (error) {
+    unwind.active = true;
+    unwind.error = error;
+    throw error;
+  } finally {
+    if (!handedOff) yield* closeMinimalGroundedV2G(continuation, unwind);
+  }
+}
+
+function* startMinimalGroundedV2G(
+  registration: GroundedOperationV2Registration,
+  env: MinEnv,
+  st: St,
+  previous: Stack,
+  subject: ExprAtom,
+  operation: string,
+  originalArgs: readonly Atom[],
+  args: readonly Atom[],
+  bindings: Bindings,
+  cursor?: CursorMode,
+): Gen<[Item[], St]> {
+  const call = createGroundedV2Call(env, st.world, operation, originalArgs, bindings);
+  let answers: GroundedAnswerCursor | undefined;
+  let handedOff = false;
+  const unwind: SchedulerUnwindFailure = { active: false, error: undefined };
+  try {
+    const context = call.context(NEVER_ABORTED_SIGNAL);
+    const start = yield* startGroundedV2G(registration, st.world, operation, args, call, subject);
+    recordGroundedOperationEffects(st.world, operation, registration.options.effects, []);
+    if (start.tag === "host-fault") throw start.fault;
+    if (start.tag === "language-error") {
+      const error = checkedGroundedLanguageError(start.error, call, context, subject);
+      consumeGroundedPayloadResources(st.world, operation, [error], true);
+      return [[finItem(previous, error, bindings)], st];
+    }
+    if (start.tag === "stuck") return queryOp(env, st, previous, subject, bindings);
+    answers = start.answers;
+    if (answers.mode !== registration.options.mode)
+      throw groundedV2Fault(
+        "grounded-start",
+        new TypeError(
+          `${operation}: ${registration.options.mode} operation returned ${answers.mode} cursor`,
+        ),
+        call,
+        subject,
+      );
+    checkGroundedEffectsScope(start.preEffects, call, context, subject);
+    const instantiatedPreEffects = instantiateReduceEffects(call.frame, start.preEffects);
+    consumeGroundedPayloadResources(
+      st.world,
+      operation,
+      reduceEffectAtoms(instantiatedPreEffects),
+      false,
+    );
+    const preEffects = applyReduceEffects(env, st, bindings, instantiatedPreEffects);
+    if (preEffects.tag === "error")
+      return [[finItem(previous, errAtom(subject, preEffects.msg), bindings)], st];
+    const isolation = beginStreamingIsolatedBranches(preEffects.state, false);
+    const continuation: MinimalGroundedV2Continuation = {
+      operation,
+      subject,
+      continuation: previous,
+      call,
+      context,
+      answers,
+      ...(isolation === undefined ? {} : { isolation }),
+      activeIsolatedAnswer: false,
+      closed: false,
+    };
+    handedOff = true;
+    return yield* resumeMinimalGroundedV2G(env, preEffects.state, continuation, cursor);
+  } catch (error) {
+    unwind.active = true;
+    unwind.error = error;
+    throw error;
+  } finally {
+    if (!handedOff) {
+      try {
+        if (answers !== undefined)
+          yield* closeGroundedV2G(answers, operation, call, subject, unwind);
+      } finally {
+        call.close();
+      }
+    }
+  }
+}
+
+function* reduceGroundedV2ApplicationG(
+  registration: GroundedOperationV2Registration,
+  env: MinEnv,
+  fuel: number,
+  st: St,
+  partB: Bindings,
+  callBindings: Bindings,
+  wApp: ExprAtom,
+  operation: string,
+  originalArgs: readonly Atom[],
+  groundedArgs: readonly Atom[],
+  queryVars: readonly string[],
+  opReturnsAtom: boolean,
+  cursor?: CursorMode,
+  emitter?: MettaAnswerEmitter,
+): Gen<[Array<[Atom, Bindings]>, St]> {
+  const policy = registration.options.effects;
+  if (groundedEffectRejected(st.world, policy))
+    return [
+      [
+        [
+          errTextAtom(
+            wApp,
+            `${operation}: irreversible effect is not allowed in an isolated branch`,
+          ),
+          partB,
+        ],
+      ],
+      st,
+    ];
+  const call = createGroundedV2Call(env, st.world, operation, originalArgs, callBindings);
+  let answers: GroundedAnswerCursor | undefined;
+  let isolation: StreamingIsolatedBranches | undefined;
+  let current = st;
+  const out: Array<[Atom, Bindings]> = [];
+  const unwind: SchedulerUnwindFailure = { active: false, error: undefined };
+  try {
+    const context = call.context(NEVER_ABORTED_SIGNAL);
+    const start = yield* startGroundedV2G(
+      registration,
+      st.world,
+      operation,
+      groundedArgs,
+      call,
+      wApp,
+    );
+    recordGroundedOperationEffects(st.world, operation, policy, []);
+    if (start.tag === "host-fault") throw start.fault;
+    if (start.tag === "language-error") {
+      const error = checkedGroundedLanguageError(start.error, call, context, wApp);
+      consumeGroundedPayloadResources(current.world, operation, [error], true);
+      return [[[error, partB]], current];
+    }
+    if (start.tag === "stuck")
+      return yield* finishDirectGroundedApplicationG(
+        env,
+        fuel,
+        current,
+        partB,
+        wApp,
+        queryVars,
+        opReturnsAtom,
+        { tag: "noReduce" },
+        cursor,
+        emitter,
+      );
+    answers = start.answers;
+    if (answers.mode !== registration.options.mode)
+      throw groundedV2Fault(
+        "grounded-start",
+        new TypeError(
+          `${operation}: ${registration.options.mode} operation returned ${answers.mode} cursor`,
+        ),
+        call,
+        wApp,
+      );
+    checkGroundedEffectsScope(start.preEffects, call, context, wApp);
+    const instantiatedPreEffects = instantiateReduceEffects(call.frame, start.preEffects);
+    consumeGroundedPayloadResources(
+      current.world,
+      operation,
+      reduceEffectAtoms(instantiatedPreEffects),
+      false,
+    );
+    const preEffects = applyReduceEffects(env, current, partB, instantiatedPreEffects);
+    if (preEffects.tag === "error") return [[[errAtom(wApp, preEffects.msg), partB]], current];
+    current = preEffects.state;
+    isolation = beginStreamingIsolatedBranches(current, emitter?.accept !== undefined);
+    if (isolation !== undefined) current = isolation.parent;
+
+    for (;;) {
+      const event = yield* pullGroundedV2G(answers, current.world, operation, call, wApp, cursor);
+      consumeWorldResource(current.world, "steps", event.steps, `${operation}-pull`);
+      yield* chargeSchedulerStepsG(cursor, current, event.steps);
+      if (event.kind === "pending") continue;
+      if (event.kind === "exhausted") {
+        if (isolation !== undefined) current = finishStreamingIsolatedBranches(env, isolation);
+        return [out, current];
+      }
+      if (event.kind === "cancelled")
+        throw {
+          kind: "cancelled",
+          reason: event.reason,
+          bindings: call.frame,
+          subject: wApp,
+          trace: call.trace,
+        };
+      if (event.kind === "fault") throw groundedV2Fault("grounded-next", event.error, call, wApp);
+
+      const prepared = prepareGroundedAnswer(env, event.value, call, context, wApp, queryVars);
+      if (prepared.kind === "conflict") continue;
+      const resultAtom = prepared.value.atom;
+      consumeGroundedPayloadResources(current.world, operation, prepared.value.resourceAtoms, true);
+      if (isolation !== undefined) current = allocateStreamingIsolatedBranch(isolation);
+      const answerBindings = prepared.value.bindings;
+      const applied = applyReduceEffects(env, current, answerBindings, prepared.value.effects);
+      const emittedAtStart = emitter?.emittedCount ?? 0;
+      const omittedAtStart = emitter?.omittedReturnCount ?? 0;
+      let reduced: Array<[Atom, Bindings]>;
+      if (applied.tag === "error") {
+        reduced = [[errAtom(wApp, applied.msg), answerBindings]];
+      } else if (opReturnsAtom && !isEmbeddedOp(resultAtom)) {
+        current = applied.state;
+        reduced = [[resultAtom, answerBindings]];
+      } else if (isErrorAtom(resultAtom)) {
+        current = applied.state;
+        reduced = [[resultAtom, answerBindings]];
+      } else {
+        current = applied.state;
+        [reduced, current] = yield* mettaEvalG(
+          env,
+          fuel - 1,
+          current,
+          answerBindings,
+          resultAtom,
+          cursor,
+          emitter,
+        );
+      }
+      const returned = reduced.map((pair): [Atom, Bindings] => [
+        pair[0],
+        mergeRestrict(env, queryVars, answerBindings, pair[1]),
+      ]);
+      if (emitter?.retainReturnedAnswers !== false) out.push(...returned);
+      if (emitter !== undefined)
+        current = yield* forwardReturnedMettaAnswersG(
+          emitter,
+          returned,
+          current,
+          emittedAtStart,
+          omittedAtStart,
+        );
+      if (isolation !== undefined) {
+        recordStreamingIsolatedTerminal(isolation, current);
+        current = isolation.parent;
+      }
+    }
+  } catch (error) {
+    unwind.active = true;
+    unwind.error = error;
+    throw error;
+  } finally {
+    try {
+      if (answers !== undefined) yield* closeGroundedV2G(answers, operation, call, wApp, unwind);
+    } finally {
+      releaseStreamingIsolatedBranches(isolation);
+      call.close();
+    }
+  }
+}
+
+function* evalOpG(
+  env: MinEnv,
+  st: St,
+  prev: Stack,
+  x: Atom,
+  b: Bindings,
+  cursor?: CursorMode,
+): Gen<[Item[], St]> {
   const x2 = inst(env, b, x);
   const op = opOf(x2);
   if (op === "collapse" && x2.kind === "expr" && x2.items.length === 2) {
@@ -4438,6 +5581,20 @@ function* evalOpG(env: MinEnv, st: St, prev: Stack, x: Atom, b: Bindings): Gen<[
         ],
         st,
       ];
+    const groundedV2 = groundedV2For(env, op!);
+    if (groundedV2 !== undefined)
+      return yield* startMinimalGroundedV2G(
+        groundedV2,
+        env,
+        st,
+        prev,
+        x2,
+        op!,
+        x.kind === "expr" ? x.items.slice(1) : x2.items.slice(1),
+        args,
+        b,
+        cursor,
+      );
     const r = yield* callGroundedG(env, st.world, op!, args);
     if (r.tag === "ok") {
       recordGroundedOperationEffects(st.world, op!, effectPolicy, r.results);
@@ -4456,7 +5613,8 @@ function* evalOpG(env: MinEnv, st: St, prev: Stack, x: Atom, b: Bindings): Gen<[
   if (x2.kind === "expr" && x2.items.length > 0) {
     const head = x2.items[0]!;
     if (head.kind === "gnd" && head.exec !== undefined) {
-      const effectPolicy: GroundedEffectPolicy = {
+      const groundedV2 = groundedV2Registration(head.exec);
+      const effectPolicy: GroundedEffectPolicy = groundedV2?.options.effects ?? {
         classes: ["host-io"],
         speculative: false,
       };
@@ -4477,6 +5635,19 @@ function* evalOpG(env: MinEnv, st: St, prev: Stack, x: Atom, b: Bindings): Gen<[
       const args = x2.items
         .slice(1)
         .map((a) => resolveStates(st.world, subTokens(st.world, a, env.intern)));
+      if (groundedV2 !== undefined)
+        return yield* startMinimalGroundedV2G(
+          groundedV2,
+          env,
+          st,
+          prev,
+          x2,
+          "<grounded-exec>",
+          x.kind === "expr" ? x.items.slice(1) : x2.items.slice(1),
+          args,
+          b,
+          cursor,
+        );
       pendingAsyncOp = "<grounded-exec>";
       type GroundedExecResult =
         | { readonly tag: "ok"; readonly results: readonly Atom[] }
@@ -5523,6 +6694,8 @@ function* interpretStack1G(
   cursor?: CursorMode,
 ): Gen<[ItemBatch, St]> {
   env = refreshEvaluationEnvironment(env, st.world);
+  if (it.groundedV2 !== undefined)
+    return yield* resumeMinimalGroundedV2G(env, st, it.groundedV2, cursor);
   if (it.stack === null) return [[], st];
   const top = it.stack.head;
   const prev = it.stack.tail;
@@ -5554,7 +6727,7 @@ function* interpretStack1G(
   const it2 = a.kind === "expr" ? a.items : [];
   switch (op) {
     case "eval":
-      if (it2.length === 2) return yield* evalOpG(env, st, prev, it2[1]!, it.bnd);
+      if (it2.length === 2) return yield* evalOpG(env, st, prev, it2[1]!, it.bnd, cursor);
       break;
     case "evalc":
       if (it2.length === 3) {
@@ -5562,7 +6735,7 @@ function* interpretStack1G(
         const selected = selectEvaluationEnvironment(env, st.world, requested, UNDEF);
         if (selected === undefined)
           return [[finItem(prev, errAtom(inst(env, it.bnd, a), "evalc: not a space"), it.bnd)], st];
-        const [entered, next] = yield* evalOpG(selected, st, prev, it2[1]!, it.bnd);
+        const [entered, next] = yield* evalOpG(selected, st, prev, it2[1]!, it.bnd, cursor);
         const evaluationScope: EvaluationScope = {
           env: selected,
           boundary: prev,
@@ -5819,6 +6992,7 @@ function* interpretStack1G(
         const transactionEmitter: MettaAnswerEmitter = {
           emitted: new WeakSet(),
           emittedCount: 0,
+          omittedReturnCount: 0,
           lifecycle: { unwinding: false },
           accept: function* (pair, answerState): Gen<St> {
             answerPaths.push({ pair, state: answerState });
@@ -6173,7 +7347,7 @@ function* interpretStack1G(
         ];
       const hostResult =
         catalogAtoms === undefined && !hostImportRejected && st.world.transactionDepth === 0
-          ? yield* callHostImportG(env, st.world, spaceAtom, fileAtom)
+          ? yield* callHostImportG(env, st.world, spaceAtom, fileAtom, it.bnd)
           : undefined;
       if (hostResult !== undefined && hostResult.tag !== "noReduce") {
         if (hostResult.tag === "ok") {
@@ -7594,100 +8768,139 @@ function* interpretLoopG(
     return stack.length > 0;
   };
   let f = fuel;
-  for (;;) {
-    const hasWork = pullSourceItem();
-    if (cursorNeedsFlush(0)) yield* flushCursor();
-    if (!hasWork) break;
-    if (f <= 0) {
-      for (let i = stack.length - 1; i >= 0; i--) {
-        const it = stack[i]!;
-        emit(isFinal(it) ? finalPair(env, it) : exhaustedPair(env, it));
-      }
+  const unwind: SchedulerUnwindFailure = { active: false, error: undefined };
+  try {
+    for (;;) {
+      const hasWork = pullSourceItem();
       if (cursorNeedsFlush(0)) yield* flushCursor();
-      return [done, cur];
-    }
-    let it = stack.pop()!;
-    checkWorldCancellation(cur.world);
-    consumeWorldResource(cur.world, "steps", 1, "minimal-transition");
-    checkWorldDeadline(cur.world, "minimal-transition");
-    let evaluationScope = it.evaluationScope;
-    // The selected context belongs only to the nested reduction started by evalc. Once its finished value
-    // reaches the exact continuation stack that evalc entered from, resume that continuation in its parent
-    // context. Stack nodes are persistent, so pointer identity is the delimiter and cannot match by accident.
-    if (
-      evaluationScope !== undefined &&
-      it.stack !== null &&
-      it.stack.head.fin &&
-      it.stack.tail === evaluationScope.boundary
-    ) {
-      evaluationScope = evaluationScope.parent;
-      it =
-        evaluationScope === undefined
-          ? { stack: it.stack, bnd: it.bnd }
-          : { stack: it.stack, bnd: it.bnd, evaluationScope };
-    }
-    let activeEnv = env;
-    if (evaluationScope !== undefined) {
-      activeEnv = refreshEvaluationEnvironment(evaluationScope.env, cur.world);
-      if (activeEnv !== evaluationScope.env) {
-        evaluationScope = { ...evaluationScope, env: activeEnv };
-        it = { ...it, evaluationScope };
+      if (!hasWork) break;
+      if (f <= 0) {
+        for (let i = stack.length - 1; i >= 0; i--) {
+          const it = stack[i]!;
+          emit(isFinal(it) ? finalPair(env, it) : exhaustedPair(env, it));
+        }
+        if (cursorNeedsFlush(0)) yield* flushCursor();
+        return [done, cur];
       }
-    }
-    // `(pragma! max-stack-depth N)` bounds how deep the interpreter stack may grow before a branch is cut
-    // back to a StackOverflow atom (Hyperon's pragma; bounds memory, not steps). 0 (the default) disables
-    // the check, so this costs nothing unless a program opts in. A finished branch is already a result, so
-    // it is returned as-is rather than turned into an error.
-    const resourceStackLimit = worldRuntimeContext(cur.world).resources.ledger.limit("stack-depth");
-    if (cur.world.maxStackDepth > 0 || resourceStackLimit !== undefined) {
-      let depth = 0;
-      for (let p = it.stack; p !== null; p = p.tail) depth++;
-      if (resourceStackLimit !== undefined) {
-        const lease = worldRuntimeContext(cur.world).resources;
-        const fault = lease.tryObserve("stack-depth", depth, "minimal-transition");
-        if (fault !== undefined) throw new ResourceLimitError(fault);
+      let it = stack.pop()!;
+      checkWorldCancellation(cur.world);
+      consumeWorldResource(cur.world, "steps", 1, "minimal-transition");
+      checkWorldDeadline(cur.world, "minimal-transition");
+      let evaluationScope = it.evaluationScope;
+      // The selected context belongs only to the nested reduction started by evalc. Once its finished value
+      // reaches the exact continuation stack that evalc entered from, resume that continuation in its parent
+      // context. Stack nodes are persistent, so pointer identity is the delimiter and cannot match by accident.
+      if (
+        evaluationScope !== undefined &&
+        it.stack !== null &&
+        it.stack.head.fin &&
+        it.stack.tail === evaluationScope.boundary
+      ) {
+        evaluationScope = evaluationScope.parent;
+        it =
+          evaluationScope === undefined
+            ? { stack: it.stack, bnd: it.bnd }
+            : { stack: it.stack, bnd: it.bnd, evaluationScope };
       }
-      if (cur.world.maxStackDepth > 0 && depth >= cur.world.maxStackDepth) {
-        emit(isFinal(it) ? finalPair(activeEnv, it) : exhaustedPair(activeEnv, it));
+      let activeEnv = env;
+      if (evaluationScope !== undefined) {
+        activeEnv = refreshEvaluationEnvironment(evaluationScope.env, cur.world);
+        if (activeEnv !== evaluationScope.env) {
+          evaluationScope = { ...evaluationScope, env: activeEnv };
+          it = { ...it, evaluationScope };
+        }
+      }
+      // `(pragma! max-stack-depth N)` bounds how deep the interpreter stack may grow before a branch is cut
+      // back to a StackOverflow atom (Hyperon's pragma; bounds memory, not steps). 0 (the default) disables
+      // the check, so this costs nothing unless a program opts in. A finished branch is already a result, so
+      // it is returned as-is rather than turned into an error.
+      const resourceStackLimit = worldRuntimeContext(cur.world).resources.ledger.limit(
+        "stack-depth",
+      );
+      if (cur.world.maxStackDepth > 0 || resourceStackLimit !== undefined) {
+        let depth = 0;
+        for (let p = it.stack; p !== null; p = p.tail) depth++;
+        if (resourceStackLimit !== undefined) {
+          const lease = worldRuntimeContext(cur.world).resources;
+          const fault = lease.tryObserve("stack-depth", depth, "minimal-transition");
+          if (fault !== undefined) throw new ResourceLimitError(fault);
+        }
+        if (cur.world.maxStackDepth > 0 && depth >= cur.world.maxStackDepth) {
+          emit(isFinal(it) ? finalPair(activeEnv, it) : exhaustedPair(activeEnv, it));
+          if (cursorNeedsFlush(1)) yield* flushCursor();
+          continue;
+        }
+      }
+      const [results, st2] = yield* interpretStack1G(activeEnv, f - 1, cur, it, cursor);
+      cur = st2;
+      f -= 1;
+      if (isItemSource(results)) {
+        if (evaluationScope === undefined) {
+          beginSource(results, true);
+        } else {
+          const sourceWithScope: ItemSource = {
+            endState: results.endState,
+            *foldItems(): Iterable<Item> {
+              for (const item of results.foldItems())
+                yield item.evaluationScope === undefined ? { ...item, evaluationScope } : item;
+            },
+          };
+          beginSource(sourceWithScope, true);
+        }
         if (cursorNeedsFlush(1)) yield* flushCursor();
         continue;
       }
-    }
-    const [results, st2] = yield* interpretStack1G(activeEnv, f - 1, cur, it, cursor);
-    cur = st2;
-    f -= 1;
-    if (isItemSource(results)) {
-      if (evaluationScope === undefined) {
-        beginSource(results, true);
-      } else {
-        const sourceWithScope: ItemSource = {
-          endState: results.endState,
-          *foldItems(): Iterable<Item> {
-            for (const item of results.foldItems())
-              yield item.evaluationScope === undefined ? { ...item, evaluationScope } : item;
-          },
-        };
-        beginSource(sourceWithScope, true);
+      // Finals stream out immediately in result order (inlined to keep the no-sink case a direct push, no
+      // per-result closure). Non-finals collect in order, then push reversed so they pop in that same order.
+      const more: Item[] = [];
+      for (const raw of results) {
+        const r =
+          evaluationScope !== undefined && raw.evaluationScope === undefined
+            ? { ...raw, evaluationScope }
+            : raw;
+        if (isFinal(r)) {
+          if (pendingAnswers !== undefined) pendingAnswers.push(finalPair(activeEnv, r));
+          else if (sink !== undefined) sink(finalPair(activeEnv, r));
+          else done.push(finalPair(activeEnv, r));
+        } else more.push(r);
       }
+      for (let i = more.length - 1; i >= 0; i--) stack.push(more[i]!);
       if (cursorNeedsFlush(1)) yield* flushCursor();
-      continue;
     }
-    // Finals stream out immediately in result order (inlined to keep the no-sink case a direct push, no
-    // per-result closure). Non-finals collect in order, then push reversed so they pop in that same order.
-    const more: Item[] = [];
-    for (const raw of results) {
-      const r =
-        evaluationScope !== undefined && raw.evaluationScope === undefined
-          ? { ...raw, evaluationScope }
-          : raw;
-      if (isFinal(r)) {
-        if (pendingAnswers !== undefined) pendingAnswers.push(finalPair(activeEnv, r));
-        else if (sink !== undefined) sink(finalPair(activeEnv, r));
-        else done.push(finalPair(activeEnv, r));
-      } else more.push(r);
+  } catch (error) {
+    unwind.active = true;
+    unwind.error = error;
+    throw error;
+  } finally {
+    const continuations = new Set<MinimalGroundedV2Continuation>();
+    for (const item of stack) if (item.groundedV2 !== undefined) continuations.add(item.groundedV2);
+    for (const suspendedWork of suspended)
+      for (const item of suspendedWork.stack)
+        if (item.groundedV2 !== undefined) continuations.add(item.groundedV2);
+    const cleanupFailures: unknown[] = [];
+    for (const continuation of continuations) {
+      try {
+        yield* closeMinimalGroundedV2G(continuation);
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
     }
-    for (let i = more.length - 1; i >= 0; i--) stack.push(more[i]!);
-    if (cursorNeedsFlush(1)) yield* flushCursor();
+    for (const iterator of [source, ...suspended.map((entry) => entry.source)]) {
+      try {
+        iterator?.return?.();
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+    }
+    if (cleanupFailures.length > 0) {
+      const cleanup = aggregateCleanupFailures(cleanupFailures, "minimal worklist cleanup failed");
+      if (!unwind.active) throw cleanup;
+      throw combineInitiatingAndCleanupFailure(
+        unwind.error,
+        cleanup,
+        "minimal worklist evaluation and cleanup both failed",
+      );
+    }
   }
   return [done, cur];
 }
@@ -7986,8 +9199,7 @@ function choiceEffectAnalysis(env: MinEnv, world: World): ChoiceEffectAnalysis {
     for (const dependent of reverseDependencies.get(dependency) ?? []) {
       const previous = summaries.get(dependent)!;
       const next = combineChoiceEffects(previous, dependencyEffects);
-      if (next.stateful === previous.stateful && next.serialized === previous.serialized)
-        continue;
+      if (next.stateful === previous.stateful && next.serialized === previous.serialized) continue;
       summaries.set(dependent, next);
       if (!queued.has(dependent)) {
         queued.add(dependent);
@@ -9130,9 +10342,12 @@ function* evaluateChoiceBranchesG(
     return [[[errTextAtom(call, `${operation} expects one expression`), bindings]], state];
   if (operation === "superpose") {
     const out: Array<[Atom, Bindings]> = [];
+    const retainReturned = emitter?.retainReturnedAnswers;
     const sourceEmitter: MettaAnswerEmitter = {
       emitted: new WeakSet(),
       emittedCount: 0,
+      omittedReturnCount: 0,
+      ...(retainReturned === undefined ? {} : { retainReturnedAnswers: retainReturned }),
       lifecycle: emitter?.lifecycle ?? { unwinding: false },
       accept: function* (pair, answerState): Gen<St> {
         const expanded: ContextualPair[] =
@@ -9149,8 +10364,12 @@ function* evaluateChoiceBranchesG(
                   ? [errTextAtom(call, "superpose expects one expression"), pair[1]]
                   : [errTextAtom(call, "superpose expects one expression"), pair[1], pair[2]],
               ];
-        for (const expandedPair of expanded) out.push([expandedPair[0], expandedPair[1]]);
-        return yield* emitMettaAnswersG(emitter, expanded, answerState);
+        if (retainReturned !== false)
+          for (const expandedPair of expanded) out.push([expandedPair[0], expandedPair[1]]);
+        const next = yield* emitMettaAnswersG(emitter, expanded, answerState);
+        if (emitter !== undefined && retainReturned === false)
+          emitter.omittedReturnCount += expanded.length;
+        return next;
       },
     };
     const [sourcePairs, sourceState] = yield* mettaEvalG(
@@ -9173,6 +10392,8 @@ function* evaluateChoiceBranchesG(
     const out: Array<[Atom, Bindings]> = [];
     let current = state;
     for (const branch of branches) {
+      const emittedAtStart = emitter?.emittedCount ?? 0;
+      const omittedAtStart = emitter?.omittedReturnCount ?? 0;
       const [pairs, terminal] = yield* mettaEvalG(
         env,
         fuel,
@@ -9182,11 +10403,17 @@ function* evaluateChoiceBranchesG(
         cursor,
         emitter,
       );
-      out.push(...pairs);
+      if (emitter?.retainReturnedAnswers !== false) out.push(...pairs);
       current =
         emitter === undefined
           ? terminal
-          : yield* emitReturnedMettaAnswersG(emitter, pairs, terminal);
+          : yield* forwardReturnedMettaAnswersG(
+              emitter,
+              pairs,
+              terminal,
+              emittedAtStart,
+              omittedAtStart,
+            );
     }
     return [out, current];
   }
@@ -9213,10 +10440,11 @@ function* evaluateChoiceBranchesG(
               )
             : event.value.state;
           const pair: [Atom, Bindings] = [event.value.atom, event.value.bindings];
-          out.push(pair);
+          if (emitter?.retainReturnedAnswers !== false) out.push(pair);
           if (emitter !== undefined) {
             const continuationStart = current;
             current = yield* emitMettaAnswersG(emitter, [pair], current);
+            if (emitter.retainReturnedAnswers === false) emitter.omittedReturnCount += 1;
             if (hasContinuation) {
               continuationCounter = current.counter;
               continuationDeltas.push(captureBranchStateDelta(continuationStart, current));
@@ -9324,7 +10552,7 @@ function directAsyncGroundedApplication(
 ): DirectAsyncGroundedApplication | undefined {
   if (input.kind !== "expr" || input.items[0]?.kind !== "sym") return undefined;
   const op = input.items[0].name;
-  if (!env.agt.has(op)) return undefined;
+  if (!env.agt.has(op) || groundedV2For(env, op) !== undefined) return undefined;
   if (pettaOpNames.has(op) && hasRuleFor(env, state.world, state.counter, input)) return undefined;
   const args = input.items.slice(1);
   const signature = typeViewFor(env, state.world).sigs.get(op);
@@ -9461,6 +10689,35 @@ function* mettaEvalUncachedG(
     isNormalForm(env, st.world, w)
   )
     return [[[w, bnd]], st];
+  if (w.kind === "expr" && w.items.length > 0) {
+    const head = w.items[0]!;
+    const executableV2 =
+      head.kind === "gnd" && head.exec !== undefined
+        ? groundedV2Registration(head.exec)
+        : undefined;
+    if (executableV2 !== undefined) {
+      const originalArgs = a.kind === "expr" ? a.items.slice(1) : w.items.slice(1);
+      const groundedArgs = w.items
+        .slice(1)
+        .map((argument) => resolveStates(st.world, subTokens(st.world, argument, env.intern)));
+      return yield* reduceGroundedV2ApplicationG(
+        executableV2,
+        env,
+        fuel,
+        st,
+        bnd,
+        bnd,
+        w,
+        "<grounded-exec>",
+        originalArgs,
+        groundedArgs,
+        queryVarsOf(originalArgs),
+        false,
+        cursor,
+        emitter,
+      );
+    }
+  }
   if (w.kind === "expr" && w.items.length > 0 && w.items[0]!.kind === "sym") {
     // Tail-call trampoline. A ground operator-headed call usually reduces in a linear chain (every
     // tail-recursive MeTTa function: count, iterate, a Peano walk). Reducing each step by recursing into
@@ -9710,6 +10967,8 @@ function* mettaEvalUncachedG(
         }
       }
       const originalArgs = prepared?.originalArgs ?? args;
+      const groundedOriginalArgs =
+        prepared?.originalArgs ?? (la.kind === "expr" ? la.items.slice(1) : args);
       const queryVars = prepared?.queryVars ?? queryVarsOf(args);
       // Reuse the one signature lookup (opSig, from the applicability check above) across argMask and the
       // per-result returnsAtom check in the reduce loop below.
@@ -9726,6 +10985,7 @@ function* mettaEvalUncachedG(
       if (
         prepared === undefined &&
         env.agt.has(op) &&
+        groundedV2For(env, op) === undefined &&
         !(pettaOpNames.has(op) && hasRuleFor(env, lst.world, lst.counter, lw)) &&
         args.every(
           (argument, index) =>
@@ -9758,6 +11018,7 @@ function* mettaEvalUncachedG(
         )
       ) {
         const streamedOut: Array<[Atom, Bindings]> = [];
+        let streamedAnswerCount = 0;
         const partialCounts = args.map(() => 0);
         const recordPartial = (depth: number): void => {
           const count = (partialCounts[depth - 1] ?? 0) + 1;
@@ -9775,6 +11036,7 @@ function* mettaEvalUncachedG(
               ? lw
               : makeExpr(env, [sym(op), ...accAtoms]);
             const emittedAtStart = emitter?.emittedCount ?? 0;
+            const omittedAtStart = emitter?.omittedReturnCount ?? 0;
             const [answers, reducedState] = yield* mettaEvalG(
               env,
               fuel,
@@ -9785,11 +11047,18 @@ function* mettaEvalUncachedG(
               emitter,
               { originalArgs: args, queryVars, signature: sig },
             );
-            streamedOut.push(...answers);
-            enforceDistinctLimit(env, streamedOut.length);
+            if (emitter?.retainReturnedAnswers !== false) streamedOut.push(...answers);
+            streamedAnswerCount += answers.length;
+            enforceDistinctLimit(env, streamedAnswerCount);
             return emitter === undefined
               ? reducedState
-              : yield* emitReturnedMettaAnswersG(emitter, answers, reducedState, emittedAtStart);
+              : yield* forwardReturnedMettaAnswersG(
+                  emitter,
+                  answers,
+                  reducedState,
+                  emittedAtStart,
+                  omittedAtStart,
+                );
           }
 
           const argument = args[index]!;
@@ -9803,9 +11072,12 @@ function* mettaEvalUncachedG(
             );
           }
 
+          const retainReturned = emitter?.retainReturnedAnswers;
           const argumentEmitter: MettaAnswerEmitter = {
             emitted: new WeakSet(),
             emittedCount: 0,
+            omittedReturnCount: 0,
+            ...(retainReturned === undefined ? {} : { retainReturnedAnswers: retainReturned }),
             lifecycle: emitter?.lifecycle ?? { unwinding: false },
             accept: function* (pair, answerState): Gen<St> {
               recordPartial(index + 1);
@@ -9886,6 +11158,36 @@ function* mettaEvalUncachedG(
             out.push([makeExpr(env, [sym("partial"), sym(op), makeExpr(env, partAtoms)]), partB]);
             continue;
           }
+        }
+        const groundedV2 = groundedV2For(env, op);
+        if (
+          groundedV2 !== undefined &&
+          !(pettaOpNames.has(op) && hasRuleFor(env, cur2.world, cur2.counter, wApp))
+        ) {
+          const groundedArgs = partAtoms.map((argument) =>
+            resolveStates(cur2.world, subTokens(cur2.world, argument, env.intern)),
+          );
+          const mergedCallBindings = merge(lbnd, partB);
+          const [answers, groundedState] = yield* reduceGroundedV2ApplicationG(
+            groundedV2,
+            env,
+            fuel,
+            cur2,
+            partB,
+            mergedCallBindings[0] ?? partB,
+            wApp,
+            op,
+            groundedOriginalArgs,
+            groundedArgs,
+            queryVars,
+            opReturnsAtom,
+            cursor,
+            emitter,
+          );
+          cur2 = groundedState;
+          out.push(...answers);
+          enforceDistinctLimit(env, out.length);
+          continue;
         }
         const fastTilePuzzle = cooperativeSearch
           ? undefined
@@ -10239,35 +11541,101 @@ function* mettaEvalUncachedG(
     );
     const reduced = ruleRes.filter((p) => !atomEq(p[0], w) && !atomEq(p[0], notReducibleA));
     if (reduced.length === 0) {
+      const tupleWork: Item[] = [
+        {
+          stack: admitAtom(
+            makeExpr(env, [sym("eval"), makeExpr(env, [sym("interpret-tuple"), w, sym("&self")])]),
+            null,
+          ),
+          bnd,
+        },
+      ];
+      // the interpret-tuple fallback: a tuple element equal to the whole term is already final.
+      const finalTupleElement = (p: ContextualPair): Array<[Atom, Bindings]> | undefined =>
+        atomEq(p[0], w) ? [[p[0], p[1]]] : undefined;
+      if (cooperativeSearch) {
+        // Stream the tuple's item cross-product through evaluator continuations, mirroring the
+        // stdlib interpret-tuple chain: items evaluate left to right, each combination rebuilds
+        // the tuple and reduces it as soon as it exists. A nested consumer such as `once` can
+        // then close the unvisited tail, and no alternative bag is retained after its answers
+        // cross the emitter boundary.
+        const out: Array<[Atom, Bindings]> = [];
+        const retainReturned = emitter?.retainReturnedAnswers;
+        const evaluateTupleItems = function* (
+          index: number,
+          state: St,
+          accItems: readonly Atom[],
+          accB: Bindings,
+        ): Gen<St> {
+          if (index === w.items.length) {
+            const rebuilt = accItems.every((item, itemIndex) => item === w.items[itemIndex])
+              ? w
+              : makeExpr(env, [...accItems]);
+            const pair: ContextualPair = [rebuilt, accB];
+            const term = finalTupleElement(pair);
+            let produced: Array<[Atom, Bindings]>;
+            let next = state;
+            if (term !== undefined) {
+              produced = term;
+            } else {
+              const [more, reducedState] = yield* mettaEvalG(
+                env,
+                fuel - 1,
+                state,
+                accB,
+                rebuilt,
+                cursor,
+              );
+              produced = more;
+              next = reducedState;
+            }
+            if (retainReturned !== false) out.push(...produced);
+            if (emitter !== undefined) {
+              next = yield* emitMettaAnswersG(emitter, produced, next);
+              if (retainReturned === false) emitter.omittedReturnCount += produced.length;
+            }
+            return next;
+          }
+          const item = w.items[index]!;
+          const itemEmitter: MettaAnswerEmitter = {
+            emitted: new WeakSet(),
+            emittedCount: 0,
+            omittedReturnCount: 0,
+            retainReturnedAnswers: false,
+            lifecycle: emitter?.lifecycle ?? { unwinding: false },
+            accept: function* (pair, answerState): Gen<St> {
+              const merged = merge(accB, pair[1]);
+              return yield* evaluateTupleItems(
+                index + 1,
+                answerState,
+                [...accItems, pair[0]],
+                merged.length > 0 ? merged[0]! : pair[1],
+              );
+            },
+          };
+          const [answers, itemState] = yield* mettaEvalG(
+            env,
+            fuel - 1,
+            state,
+            accB,
+            item,
+            cursor,
+            itemEmitter,
+          );
+          return yield* emitReturnedMettaAnswersG(itemEmitter, answers, itemState);
+        };
+        const tupleState = yield* evaluateTupleItems(0, st1, [], bnd);
+        return [out, tupleState];
+      }
       const [tupleRes, st2] = yield* interpretLoopG(
         env,
         fuel,
         st1,
-        [
-          {
-            stack: admitAtom(
-              makeExpr(env, [
-                sym("eval"),
-                makeExpr(env, [sym("interpret-tuple"), w, sym("&self")]),
-              ]),
-              null,
-            ),
-            bnd,
-          },
-        ],
+        tupleWork,
         undefined,
         nestedCursorMode(cursor),
       );
-      // the interpret-tuple fallback: a tuple element equal to the whole term is already final.
-      return yield* reduceChildrenG(
-        env,
-        fuel,
-        st2,
-        tupleRes,
-        (p) => (atomEq(p[0], w) ? [[p[0], p[1]]] : undefined),
-        cursor,
-        emitter,
-      );
+      return yield* reduceChildrenG(env, fuel, st2, tupleRes, finalTupleElement, cursor, emitter);
     }
     // a rule fired: every reduced result still needs evaluating to normal form.
     return yield* reduceChildrenG(env, fuel, st1, reduced, () => undefined, cursor, emitter);
@@ -10492,6 +11860,8 @@ function mettaCursorEmitter(
     ? {
         emitted: new WeakSet(),
         emittedCount: 0,
+        omittedReturnCount: 0,
+        retainReturnedAnswers: false,
         lifecycle: delivery.lifecycle,
         ...(cursorMode === undefined ? {} : { cursor: cursorMode }),
       }
@@ -12409,6 +13779,88 @@ function isolatedBranchStates(state: St, count: number): IsolatedBranchSet {
     parent: reserved.parent,
     branches,
   };
+}
+
+function beginStreamingIsolatedBranches(
+  state: St,
+  acceptedDownstream: boolean,
+): StreamingIsolatedBranches | undefined {
+  if (worldRuntimeContext(state.world).policy !== "isolated-branches") return undefined;
+  const reserved = reserveBranchGroup(state, 1);
+  return {
+    parent: reserved.parent,
+    contextIdentity: reserved.contextIdentity!,
+    sequence: reserved.sequence!,
+    acceptedDownstream,
+    nextIndex: 0,
+    activeBranch: undefined,
+    terminalDeltas: [],
+    maxTerminalCounter: reserved.parent.counter,
+    finished: false,
+  };
+}
+
+function allocateStreamingIsolatedBranch(owner: StreamingIsolatedBranches): St {
+  if (owner.activeBranch !== undefined)
+    throw new Error("streaming isolated branch allocated before the previous terminal");
+  const index = owner.nextIndex++;
+  const parentWorld = owner.parent.world;
+  const label = `fanout-${owner.sequence}-${index}`;
+  consumeWorldResource(parentWorld, "branches", 1, label);
+  const world = forkWorldView(
+    parentWorld,
+    {
+      ids: parentWorld.allocation.ids.fork(label),
+      branchScoped: true,
+    },
+    owner.contextIdentity,
+  );
+  forkWorldRuntime(
+    parentWorld,
+    world,
+    nextWorldRuntimeBranch(parentWorld, label),
+    "isolated-branches",
+    "reject",
+    false,
+  );
+  const branch = { counter: owner.parent.counter, world };
+  owner.activeBranch = branch;
+  return branch;
+}
+
+/**
+ * Fold one finished per-answer branch into the group and release its runtime immediately.
+ * Accepted-downstream groups discard the terminal; merge groups keep only its journal delta, so
+ * live state stays bounded by the answers' real effects instead of one world per answer.
+ */
+function recordStreamingIsolatedTerminal(owner: StreamingIsolatedBranches, terminal: St): void {
+  owner.maxTerminalCounter = Math.max(owner.maxTerminalCounter, terminal.counter);
+  owner.activeBranch = undefined;
+  if (!owner.acceptedDownstream) {
+    const delta = captureWorldDelta(owner.parent.world, terminal.world);
+    if (delta.kind !== "journal")
+      throw new Error(
+        "streaming isolated branch lost its journal ancestry before its terminal was recorded",
+      );
+    if (delta.effects.length > 0 || delta.generationDelta > 0) owner.terminalDeltas.push(delta);
+  }
+  releaseChildWorldRuntimes(owner.parent.world, [terminal.world]);
+}
+
+function finishStreamingIsolatedBranches(env: MinEnv, owner: StreamingIsolatedBranches): St {
+  if (owner.finished) throw new Error("streaming isolated branches finished twice");
+  owner.finished = true;
+  const counter = Math.max(owner.parent.counter, owner.maxTerminalCounter);
+  if (owner.acceptedDownstream) return { counter, world: owner.parent.world };
+  return { counter, world: mergeWorldJournalDeltas(env, owner.parent.world, owner.terminalDeltas) };
+}
+
+function releaseStreamingIsolatedBranches(owner: StreamingIsolatedBranches | undefined): void {
+  if (owner === undefined || owner.finished) return;
+  owner.finished = true;
+  if (owner.activeBranch !== undefined)
+    releaseChildWorldRuntimes(owner.parent.world, [owner.activeBranch.world]);
+  owner.activeBranch = undefined;
 }
 
 function restoreAllocationAuthority(base: St, branch: St): St {

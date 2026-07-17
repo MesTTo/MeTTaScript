@@ -267,7 +267,12 @@ function nextOptions(maxSteps: number, signal: AbortSignal | undefined): SearchN
   };
 }
 
-function validateChildEvent<T, R>(event: unknown, allowance: number): SearchEvent<T, R> {
+/**
+ * Check one child-cursor reply against the allowance its pull was issued. A malformed object,
+ * unknown kind, missing payload, or step report outside `[0, allowance]` becomes a `fault` event
+ * that consumes the whole allowance, so a misbehaving child cannot bypass its caller's quota.
+ */
+export function validateChildEvent<T, R>(event: unknown, allowance: number): SearchEvent<T, R> {
   try {
     if (typeof event !== "object" || event === null)
       throw new TypeError("child cursor returned a non-object event");

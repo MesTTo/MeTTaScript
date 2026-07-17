@@ -237,3 +237,68 @@ Versus PeTTa:
 On PeTTa's own naive default this was about 3000x on eval and the gap grows without bound with `n`; even against PeTTa manually tabled we are competitive-to-faster on total wall-clock, with no manual annotation required. Use the automatic-tabling section above for the current end-to-end `runProgram` recursion snapshot.
 
 The source backend (`new Function`, spec P4) is deferred by measurement: the closure backend already runs `fib(33)` in 0.4 ms, far past PeTTa, so the injection-safety and compile-cost machinery of a source backend is not warranted to hit the target. It can be revisited if a workload needs it.
+
+## Grounded V2 pull-based operation protocol (U8)
+
+Grounded V2 replaces eager grounded result collection with owned answer cursors: `once` closes an
+unvisited producer tail, dispatched answers are not retained by wrapper emitters, per-answer
+binding cost follows the delta rather than the caller frame, and isolated per-answer branch worlds
+fold into journal deltas as they finish. `packages/node/bench/grounded-v2.mjs` asserts each law
+with exact producer, pull, and close counters and a scaling series (5-run medians for section 1,
+3-run medians for section 3). Reproduce with:
+
+```bash
+pnpm bench:grounded-v2
+perf stat -e task-clock,cycles,instructions,branches,branch-misses,cache-references,cache-misses \
+  node packages/node/bench/grounded-v2.mjs
+/usr/bin/time -v node packages/node/bench/grounded-v2.mjs
+```
+
+Measured 2026-07-17 on the Ryzen 9 9950X reference host, Node v22.22.1.
+
+`once` over an N-answer grounded producer. The V1 collector performs exactly N producer steps;
+the V2 stream performs exactly one pull and one joined close at every N (counter-asserted):
+
+| N       | V1 collect (N steps) | V2 stream (1 pull + close) |
+| ------- | -------------------- | -------------------------- |
+| 1,000   | 1.18 ms              | 0.42 ms                    |
+| 10,000  | 2.17 ms              | 0.22 ms                    |
+| 100,000 | 21.46 ms             | 0.17 ms                    |
+
+Streamed retention while draining every answer through a cursor, gc-settled heap growth. The
+residual column (after close and environment drop) proves no object-graph retention survives:
+heap-snapshot retainer analysis attributes the isolated shape's mid-drain growth to V8's
+weakly-held internalized-string table lagging over per-answer branch and scope identity labels,
+not to reachable answers, worlds, or branches.
+
+| shape              | peak N=4096 | peak N=16384 | residual N=4096 | residual N=16384 |
+| ------------------ | ----------- | ------------ | --------------- | ---------------- |
+| root stream        | 202 KiB     | 173 KiB      | 82 KiB          | 25 KiB           |
+| superpose wrapper  | 257 KiB     | 292 KiB      | 143 KiB         | 59 KiB           |
+| hyperpose isolated | 723 KiB     | 2,342 KiB    | 31 KiB          | 17 KiB           |
+
+Marginal per-answer cost across caller frame sizes B (the once-per-call frame conversion is
+subtracted by measuring the 8-answer versus 1,032-answer difference). Before the persistent
+binding-frame overlay this marginal tracked B (measured 16.9 ms per answer at B=512 and
+282.7 ms per answer at B=2048 on the previous representation, per-answer O(B) and worse);
+it is now flat within noise:
+
+| caller frame B | with delta | zero delta |
+| -------------- | ---------- | ---------- |
+| 512            | 15.6 µs    | 4.1 µs     |
+| 2,048          | 8.7 µs     | 2.1 µs     |
+| 8,192          | 13.4 µs    | 2.5 µs     |
+
+Process-level counters for the complete benchmark run (`perf stat`, single run):
+
+| counter          | value          |
+| ---------------- | -------------- |
+| task clock       | 4,348.09 ms    |
+| elapsed          | 1.956 s        |
+| cycles           | 23,812,296,444 |
+| instructions     | 52,435,699,434 |
+| branches         | 11,377,336,408 |
+| branch misses    | 138,495,838    |
+| cache references | 1,941,401,340  |
+| cache misses     | 213,767,627    |
+| max resident set | 274,788 KiB    |

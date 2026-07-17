@@ -60,4 +60,49 @@ metta.registerOperation("pair", (args: Atom[]) => [args[0]!, args[1]!]);
 metta.run("!(pair A B)")[0].map(String); // [ 'A', 'B' ]
 ```
 
+## Streaming operations with bindings (core API)
+
+`registerOperation` collects every result eagerly. The low-level `@metta-ts/core` API also has a pull-based registration, `registerGroundedOperationV2`, for operations that produce many (or unbounded) alternatives, bind caller variables, or attach effects to one specific alternative. The minimal MeTTa document lists grounded operations returning bindings as future work; this is that surface in MeTTa TS.
+
+```ts
+import {
+  buildEnv,
+  preludeAtoms,
+  stdlibAtoms,
+  stdTable,
+  registerGroundedOperationV2,
+  groundedSyncAnswers,
+  mettaEval,
+  initSt,
+  parseAll,
+  standardTokenizer,
+  format,
+  gint,
+} from "@metta-ts/core";
+
+const env = buildEnv([...preludeAtoms(), ...stdlibAtoms()], stdTable());
+
+registerGroundedOperationV2(
+  env,
+  "naturals",
+  () => ({
+    tag: "answers",
+    answers: groundedSyncAnswers(
+      (function* () {
+        for (let n = 0; ; n += 1) yield { atom: gint(n) };
+      })(),
+    ),
+  }),
+  { mode: "sync", effects: { classes: ["pure"], speculative: true } },
+);
+
+const query = parseAll("!(once (naturals))", standardTokenizer())[0].atom;
+const [pairs] = mettaEval(env, 100_000, initSt(), [], query);
+console.log(pairs.map(([atom]) => format(atom))); // [ '0' ]: one pull, tail closed
+```
+
+The operation returns a cursor instead of an array, so the evaluator pulls answers one at a time: `once` above observes one answer and closes the infinite tail instead of enumerating it. An answer can also carry a `bindingDelta` built from `context.bindings` (the caller's binding frame) to bind caller variables per alternative, and an `effects` list applied only on that alternative's branch. Registrations declare their mode, effect classes, and required capabilities explicitly.
+
+The high-level `MeTTa.registerOperation` and `registerAsyncOperation` remain the eager array API. The full protocol contract (cursor ownership, pull allowances, binding deltas, and scope rules) is specified in the repository's `docs/minimal-metta-runtime.md`.
+
 Next: pass whole TypeScript objects, not just primitives, into the atomspace. See **[Embedding TypeScript objects](/typescript/embedding-objects)**.

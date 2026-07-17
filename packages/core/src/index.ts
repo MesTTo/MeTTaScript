@@ -23,6 +23,7 @@ export * from "./builtins";
 export * from "./eval";
 export * from "./effect-journal";
 export * from "./search-cursor";
+export * from "./grounded-v2";
 export * from "./runner";
 export * from "./host";
 export * from "./extensions";

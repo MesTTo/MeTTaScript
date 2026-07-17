@@ -22,6 +22,7 @@ import {
   relations,
 } from "./bindings";
 import { mapAtomVariables, mapExpressionChildren } from "./map-expression";
+import { ForkableMap } from "./persistent-collection";
 import { parseRuntimeId } from "./trace";
 
 /** A logic variable as seen by a binding frame. Its display name is never its scoped identity. */
@@ -54,10 +55,28 @@ interface VariableNode {
   readonly variable: FrameVariable;
   readonly parent: string;
   readonly rank: number;
+  /** The class member that sorts first, maintained on root nodes and stale on children. */
+  readonly canonical: FrameVariable;
   readonly value?: Atom;
 }
 
-const FRAME_NODES = new WeakMap<BindingFrame, ReadonlyMap<string, VariableNode>>();
+// Node stores share structure across frames: a builder forks the store in constant time and each
+// write replaces one hash-trie path, so deriving a frame costs the touched nodes, not the frame.
+const FRAME_NODES = new WeakMap<BindingFrame, ForkableMap<string, VariableNode>>();
+
+interface FrameDeltaRecord {
+  readonly base: BindingFrame;
+  readonly touched: ReadonlySet<string>;
+}
+
+// Provenance journal for derived frames: which frame a builder started from and which variable
+// keys its constraint writes touched. Consumers use it to merge and validate only the delta.
+const FRAME_DELTAS = new WeakMap<BindingFrame, FrameDeltaRecord>();
+
+const EMPTY_TOUCHED: ReadonlySet<string> = new Set();
+
+/** Guard for provenance-chain walks; real derivation chains are a handful of operations long. */
+const MAX_DELTA_CHAIN = 64;
 
 function frameVariable(variableAtom: VarAtom): FrameVariable {
   const id = variableIdentity(variableAtom);
@@ -80,13 +99,13 @@ function compareFrameVariables(a: FrameVariable, b: FrameVariable): number {
   return frameVariableKey(a).localeCompare(frameVariableKey(b));
 }
 
-function nodesOf(frame: BindingFrame): ReadonlyMap<string, VariableNode> {
+function nodesOf(frame: BindingFrame): ForkableMap<string, VariableNode> {
   const nodes = FRAME_NODES.get(frame);
   if (nodes === undefined) throw new Error("BindingFrame invariant: missing node store");
   return nodes;
 }
 
-function frameFromNodes(nodes: ReadonlyMap<string, VariableNode>): BindingFrame {
+function frameFromNodes(nodes: ForkableMap<string, VariableNode>): BindingFrame {
   const frame = new BindingFrame();
   FRAME_NODES.set(frame, nodes);
   return frame;
@@ -109,13 +128,7 @@ function collectVariables(atom: Atom, into: Map<string, FrameVariable>): void {
   }
 }
 
-function immutableNodes(nodes: Map<string, VariableNode>): ReadonlyMap<string, VariableNode> {
-  const copy = new Map<string, VariableNode>();
-  for (const [key, node] of nodes) copy.set(key, Object.freeze({ ...node }));
-  return copy;
-}
-
-function readonlyRoot(nodes: ReadonlyMap<string, VariableNode>, key: string): string {
+function readonlyRoot(nodes: ForkableMap<string, VariableNode>, key: string): string {
   let current = key;
   for (;;) {
     const node = nodes.get(current);
@@ -127,19 +140,34 @@ function readonlyRoot(nodes: ReadonlyMap<string, VariableNode>, key: string): st
 }
 
 class BindingFrameBuilder {
-  readonly nodes: Map<string, VariableNode>;
+  readonly nodes: ForkableMap<string, VariableNode>;
+  readonly touched = new Set<string>();
 
   constructor(frame: BindingFrame) {
-    this.nodes = new Map(nodesOf(frame));
+    this.nodes = nodesOf(frame).fork();
+  }
+
+  #write(key: string, node: VariableNode): void {
+    this.nodes.set(key, Object.freeze(node));
+    this.touched.add(key);
+  }
+
+  /** A path-compression rewrite changes no constraint and stays out of the delta journal. */
+  #writeCompressed(key: string, node: VariableNode): void {
+    this.nodes.set(key, Object.freeze(node));
   }
 
   ensure(variableRef: FrameVariable): string {
     const key = frameVariableKey(variableRef);
     const existing = this.nodes.get(key);
     if (existing === undefined) {
-      this.nodes.set(key, { variable: variableRef, parent: key, rank: 0 });
+      this.#write(key, { variable: variableRef, parent: key, rank: 0, canonical: variableRef });
     } else if (variableRef.displayName < existing.variable.displayName) {
-      this.nodes.set(key, { ...existing, variable: variableRef });
+      this.#write(key, { ...existing, variable: variableRef });
+      const root = this.find(key);
+      const rootNode = this.nodes.get(root)!;
+      if (frameVariableKey(rootNode.canonical) === key)
+        this.#write(root, { ...rootNode, canonical: variableRef });
     }
     return key;
   }
@@ -163,7 +191,7 @@ class BindingFrameBuilder {
     }
     for (const child of path) {
       const node = this.nodes.get(child)!;
-      if (node.parent !== current) this.nodes.set(child, { ...node, parent: current });
+      if (node.parent !== current) this.#writeCompressed(child, { ...node, parent: current });
     }
     return current;
   }
@@ -211,7 +239,7 @@ class BindingFrameBuilder {
       };
     }
     this.ensureAtomVariables(value);
-    this.nodes.set(root, { ...rootNode, value });
+    this.#write(root, { ...this.nodes.get(root)!, value });
     return undefined;
   }
 
@@ -263,15 +291,21 @@ class BindingFrameBuilder {
     const child = this.nodes.get(childRoot)!;
     const value = parent.value ?? child.value;
     const rank = parent.rank === child.rank ? parent.rank + 1 : parent.rank;
-    this.nodes.set(parentRoot, {
+    const canonical =
+      compareFrameVariables(parent.canonical, child.canonical) <= 0
+        ? parent.canonical
+        : child.canonical;
+    this.#write(parentRoot, {
       ...parent,
       rank,
+      canonical,
       ...(value === undefined ? {} : { value }),
     });
-    this.nodes.set(childRoot, {
+    this.#write(childRoot, {
       variable: child.variable,
       parent: parentRoot,
       rank: child.rank,
+      canonical: child.canonical,
     });
     return undefined;
   }
@@ -333,12 +367,14 @@ class BindingFrameBuilder {
       : this.bindVariable(representative, bindingClass.value);
   }
 
-  finish(): BindingFrame {
-    return frameFromNodes(immutableNodes(this.nodes));
+  finish(base?: BindingFrame): BindingFrame {
+    const frame = frameFromNodes(this.nodes);
+    if (base !== undefined) FRAME_DELTAS.set(frame, { base, touched: this.touched });
+    return frame;
   }
 }
 
-function canonicalMembers(nodes: ReadonlyMap<string, VariableNode>): Map<string, FrameVariable[]> {
+function canonicalMembers(nodes: ForkableMap<string, VariableNode>): Map<string, FrameVariable[]> {
   const grouped = new Map<string, FrameVariable[]>();
   for (const [key, node] of nodes) {
     const root = readonlyRoot(nodes, key);
@@ -350,18 +386,9 @@ function canonicalMembers(nodes: ReadonlyMap<string, VariableNode>): Map<string,
   return grouped;
 }
 
-function canonicalVariablesByRoot(
-  grouped: ReadonlyMap<string, readonly FrameVariable[]>,
-): Map<string, FrameVariable> {
-  const canonical = new Map<string, FrameVariable>();
-  for (const [root, members] of grouped) canonical.set(root, members[0]!);
-  return canonical;
-}
-
 function resolveAtom(
   frame: BindingFrame,
   atom: Atom,
-  canonicalByRoot: ReadonlyMap<string, FrameVariable>,
   visitingRoots: Set<string>,
   expressionMemo: Map<ExprAtom, Atom>,
 ): Atom {
@@ -372,25 +399,84 @@ function resolveAtom(
     if (!nodes.has(key)) return atom;
     const root = readonlyRoot(nodes, key);
     const node = nodes.get(root)!;
-    if (node.value === undefined)
-      return frameVariableAtom(canonicalByRoot.get(root) ?? node.variable);
+    if (node.value === undefined) return frameVariableAtom(node.canonical);
     if (visitingRoots.has(root))
       throw new Error("BindingFrame invariant: cyclic frame reached during instantiation");
     visitingRoots.add(root);
-    const result = resolveAtom(frame, node.value, canonicalByRoot, visitingRoots, expressionMemo);
+    const result = resolveAtom(frame, node.value, visitingRoots, expressionMemo);
     visitingRoots.delete(root);
     return result;
   }
   if (atom.kind !== "expr") return atom;
   return mapExpressionChildren(atom, expressionMemo, (item) =>
-    resolveAtom(frame, item, canonicalByRoot, visitingRoots, expressionMemo),
+    resolveAtom(frame, item, visitingRoots, expressionMemo),
   );
+}
+
+/**
+ * The variable keys `frame` touched since `base`, when `frame` is a recorded monotone derivation
+ * of `base` (each step a `unify`, `bind`, `equate`, or `merge` on the previous frame). Returns
+ * `undefined` for unrelated frames.
+ */
+export function frameTouchedSince(
+  base: BindingFrame,
+  frame: BindingFrame,
+): ReadonlySet<string> | undefined {
+  if (frame === base) return EMPTY_TOUCHED;
+  const record = FRAME_DELTAS.get(frame);
+  if (record === undefined) return undefined;
+  if (record.base === base) return record.touched;
+  const touched = new Set<string>(record.touched);
+  let current = record.base;
+  for (let hops = 1; hops < MAX_DELTA_CHAIN; hops += 1) {
+    const next = FRAME_DELTAS.get(current);
+    if (next === undefined) return undefined;
+    for (const key of next.touched) touched.add(key);
+    if (next.base === base) return touched;
+    current = next.base;
+  }
+  return undefined;
+}
+
+export interface FrameDeltaView {
+  /** Every member of a class the derivation touched. */
+  readonly variables: readonly FrameVariable[];
+  /** The raw value of each touched class that carries one. */
+  readonly values: readonly Atom[];
+}
+
+/**
+ * The members and raw class values `frame` added or changed relative to `base`. Untouched classes
+ * came from `base` unchanged, so a consumer that already trusts `base` only needs this view.
+ * Returns `undefined` when `frame` is not a recorded derivation of `base`.
+ */
+export function frameDeltaView(
+  base: BindingFrame,
+  frame: BindingFrame,
+): FrameDeltaView | undefined {
+  const touched = frameTouchedSince(base, frame);
+  if (touched === undefined) return undefined;
+  const nodes = nodesOf(frame);
+  const variables: FrameVariable[] = [];
+  const values: Atom[] = [];
+  const seenRoots = new Set<string>();
+  for (const key of touched) {
+    const node = nodes.get(key);
+    if (node === undefined) continue;
+    variables.push(node.variable);
+    const root = readonlyRoot(nodes, key);
+    if (seenRoots.has(root)) continue;
+    seenRoots.add(root);
+    const value = nodes.get(root)!.value;
+    if (value !== undefined) values.push(value);
+  }
+  return { variables, values };
 }
 
 /** Immutable finite-tree constraint graph over legacy or scoped variables. */
 export class BindingFrame {
   constructor() {
-    FRAME_NODES.set(this, new Map());
+    FRAME_NODES.set(this, new ForkableMap());
   }
 
   get variableCount(): number {
@@ -407,7 +493,6 @@ export class BindingFrame {
   classes(): readonly BindingClassSnapshot[] {
     const nodes = nodesOf(this);
     const grouped = canonicalMembers(nodes);
-    const canonicalByRoot = canonicalVariablesByRoot(grouped);
     const snapshots: BindingClassSnapshot[] = [];
     for (const [root, members] of grouped) {
       const value = nodes.get(root)!.value;
@@ -416,9 +501,7 @@ export class BindingFrame {
         members: [...members],
         ...(value === undefined
           ? {}
-          : {
-              value: resolveAtom(this, value, canonicalByRoot, new Set([root]), new Map()),
-            }),
+          : { value: resolveAtom(this, value, new Set([root]), new Map()) }),
       });
     }
     snapshots.sort((a, b) => compareFrameVariables(a.representative, b.representative));
@@ -428,7 +511,7 @@ export class BindingFrame {
   unify(left: Atom, right: Atom): BindingFrameResult {
     const builder = new BindingFrameBuilder(this);
     const fault = builder.unify(left, right);
-    return fault === undefined ? { ok: true, value: builder.finish() } : { ok: false, fault };
+    return fault === undefined ? { ok: true, value: builder.finish(this) } : { ok: false, fault };
   }
 
   bind(variableAtom: VarAtom, value: Atom): BindingFrameResult {
@@ -440,12 +523,15 @@ export class BindingFrame {
   }
 
   merge(other: BindingFrame): BindingFrameResult {
+    // A frame derived from this one by monotone operations already contains every constraint of
+    // this frame, so the merge result is the derived frame itself.
+    if (frameTouchedSince(this, other) !== undefined) return { ok: true, value: other };
     const builder = new BindingFrameBuilder(this);
     for (const bindingClass of other.classes()) {
       const fault = builder.replayClass(bindingClass);
       if (fault !== undefined) return { ok: false, fault };
     }
-    return { ok: true, value: builder.finish() };
+    return { ok: true, value: builder.finish(this) };
   }
 
   /** Rename variable identities while preserving complete equivalence classes and checked values. */
@@ -471,10 +557,8 @@ export class BindingFrame {
   }
 
   instantiate(atom: Atom): Atom {
-    const nodes = nodesOf(this);
-    const grouped = canonicalMembers(nodes);
-    const canonicalByRoot = canonicalVariablesByRoot(grouped);
-    return resolveAtom(this, atom, canonicalByRoot, new Set(), new Map());
+    if (atom.ground) return atom;
+    return resolveAtom(this, atom, new Set(), new Map());
   }
 
   resolve(variableAtom: VarAtom): Atom | undefined {
@@ -485,33 +569,44 @@ export class BindingFrame {
 
   /** Keep requested variables and the transitive variables needed by their resolved values. */
   project(variables: readonly VarAtom[]): BindingFrameResult {
-    const classes = this.classes();
-    const classByMember = new Map<string, BindingClassSnapshot>();
-    for (const bindingClass of classes)
-      for (const member of bindingClass.members)
-        classByMember.set(frameVariableKey(member), bindingClass);
-
+    const nodes = nodesOf(this);
     const included = new Map<string, FrameVariable>();
+    const rootValues = new Map<string, Atom | undefined>();
+    const expressionMemo = new Map<ExprAtom, Atom>();
     const pending = variables.map(frameVariable);
     while (pending.length > 0) {
       const next = pending.pop()!;
       const key = frameVariableKey(next);
-      if (included.has(key)) continue;
-      const bindingClass = classByMember.get(key);
-      if (bindingClass === undefined) continue;
+      if (included.has(key) || !nodes.has(key)) continue;
       included.set(key, next);
-      if (bindingClass.value !== undefined) {
+      const root = readonlyRoot(nodes, key);
+      if (rootValues.has(root)) continue;
+      const raw = nodes.get(root)!.value;
+      let resolved: Atom | undefined;
+      if (raw !== undefined) {
+        resolved = resolveAtom(this, raw, new Set([root]), expressionMemo);
         const dependencies = new Map<string, FrameVariable>();
-        collectVariables(bindingClass.value, dependencies);
+        collectVariables(resolved, dependencies);
         for (const dependency of dependencies.values()) pending.push(dependency);
       }
+      rootValues.set(root, resolved);
     }
 
+    const keptByRoot = new Map<string, FrameVariable[]>();
+    for (const [key, variableRef] of included) {
+      const root = readonlyRoot(nodes, key);
+      const kept = keptByRoot.get(root);
+      if (kept === undefined) keptByRoot.set(root, [variableRef]);
+      else kept.push(variableRef);
+    }
     const builder = new BindingFrameBuilder(new BindingFrame());
-    for (const bindingClass of classes) {
-      const kept = bindingClass.members.filter((member) => included.has(frameVariableKey(member)));
-      if (kept.length === 0) continue;
-      const fault = builder.replayClass(bindingClass, kept);
+    for (const [root, kept] of keptByRoot) {
+      kept.sort(compareFrameVariables);
+      const value = rootValues.get(root);
+      const fault = builder.replayClass(
+        { representative: kept[0]!, members: kept, ...(value === undefined ? {} : { value }) },
+        kept,
+      );
       if (fault !== undefined) return { ok: false, fault };
     }
     return { ok: true, value: builder.finish() };

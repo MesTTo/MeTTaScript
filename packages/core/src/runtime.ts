@@ -16,6 +16,7 @@ export * from "./effect-journal";
 export * from "./trace";
 export * from "./eval-outcome";
 export * from "./search-cursor";
+export * from "./grounded-v2";
 export * from "./variable-scope";
 export * from "./binding-frame";
 export * from "./binding-packet";
