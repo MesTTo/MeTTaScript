@@ -27,6 +27,7 @@ export default defineConfig({
       { text: "eDSL", link: "/edsl/overview" },
       { text: "Visual editor", link: "/tools/grapher" },
       { text: "Advanced", link: "/advanced/concurrency" },
+      { text: "Experimental", link: "/guide/experimental" },
       { text: "Reference", link: "/reference/packages" },
       { text: "Playground", link: "/playground" },
       { text: "GitHub", link: "https://github.com/MesTTo/MeTTa-TS" },
@@ -37,8 +38,15 @@ export default defineConfig({
         items: [
           { text: "Introduction", link: "/guide/introduction" },
           { text: "Getting started", link: "/guide/getting-started" },
-          { text: "Experimental features", link: "/guide/experimental" },
           { text: "Playground", link: "/playground" },
+        ],
+      },
+      {
+        text: "Experimental",
+        collapsed: false,
+        items: [
+          { text: "Overview", link: "/guide/experimental" },
+          { text: "Streaming grounded operations", link: "/experimental/streaming-operations" },
         ],
       },
       {
