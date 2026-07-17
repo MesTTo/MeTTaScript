@@ -1,6 +1,6 @@
 # Minimal MeTTa runtime contract
 
-The `beta` runtime separates logical answers from control and host failures. Existing APIs still return `Atom[]` or `[Atom, Bindings]` pairs. Outcome, resource, trace, and snapshot types are available from `@metta-ts/core/runtime`. Search cursor types and evaluator cursor factories are exported from `@metta-ts/core`.
+The `experimental` runtime separates logical answers from control and host failures. Existing APIs still return `Atom[]` or `[Atom, Bindings]` pairs. Outcome, resource, trace, and snapshot types are available from `@metta-ts/core/runtime`. Search cursor types and evaluator cursor factories are exported from `@metta-ts/core`.
 
 ## Outcomes
 
