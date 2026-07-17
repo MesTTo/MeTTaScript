@@ -1,3 +1,86 @@
+# MeTTa TS 1.2.0-experimental.0
+
+This is an experimental prerelease on the `experimental` npm dist-tag, not the
+default `latest`. It carries the in-progress Minimal MeTTa runtime and the
+Grounded V2 operation protocol for early adopters; the surface may still change
+before 1.2.0. Install it explicitly:
+
+```bash
+npm install @metta-ts/core@experimental
+npm install @metta-ts/hyperon@experimental
+```
+
+`npm install @metta-ts/core` continues to resolve the stable 1.1.6 release.
+
+## Grounded operation V2 and streaming operations
+
+Grounded operations can now return an owned, pull-based answer stream with
+per-answer binding deltas and effects, rather than an eagerly collected array.
+The runner exposes `MeTTa.registerStreamingOperation` and
+`registerAsyncStreamingOperation`: the function returns an iterable (or async
+iterable) of answers and the evaluator pulls one at a time, so a consumer such as
+`once` stops the producer instead of draining it. Each answer may bind the call's
+argument variables and attach effects applied only on that answer's branch. The
+low-level `registerGroundedOperationV2` protocol underneath owns and closes every
+cursor exactly once, bounds each pull with a finite allowance, and rejects foreign
+variables in answers. This is MeTTa TS's implementation of the Minimal MeTTa
+document's unimplemented "grounded operations returning bindings" future work; it
+has no upstream parity oracle, so its ownership, retention, and binding-delta
+behavior are pinned by an executable law suite and a protocol fuzzer.
+
+## Cursor streaming through interpreted evaluation
+
+A `metta`/`metta-thread` call under a cooperative cursor and interpreted rule
+alternatives now stream one answer per pull, so `once` over a large interpreted
+producer performs one step and closes the tail. A single-answer chain keeps its
+direct tail-call path; a producer fault after one delivered answer still delivers
+that answer first.
+
+## Minimal MeTTa runtime foundations
+
+Typed runtime foundations for the minimal machine: scoped variables and canonical
+persistent binding frames, binding capture and replay, coherent evaluation
+contexts with logical snapshots, explicit Minimal MeTTa control semantics,
+resumable search cursors with owned concurrency, and persistent branch worlds with
+bounded effect replay.
+
+## eval.ts modularization
+
+The core evaluator file was split from about 15,000 lines into a 4,400-line core
+plus sixteen leaf-ward modules (machine types, terms, environment, world,
+specializer, type views, generator driver, query, concurrent merge, tabling,
+cursor constructors, world mutation, matching, fast paths, scheduler glue, and the
+eval operation), with the public API preserved through the facade. The change is
+mechanical and behavior-preserving.
+
+## Correctness: substitution resolves to a fixpoint
+
+A specialized forward chainer emulating backward chaining on propositional
+calculus returned an extra spurious proof (GitHub issue #2). Applying a binding
+set as a substitution was single-pass, so a variable whose value mentioned another
+still-bound variable left that inner variable unresolved; a later scope
+restriction then dropped its binding and lost the derived constraint. `instantiate`
+now resolves to a fixpoint. The query returns the single proof that Hyperon 0.2.10
+and PeTTa (SWI-Prolog) both produce. The resolution stays bounded and scalable: a
+variable chain is followed iteratively (a four-million-link chain resolves rather
+than overflowing the stack), a name-to-value index makes a long chain linear rather
+than quadratic, binding cycles truncate deterministically, and a shared value DAG
+is resolved once by object identity, so a term with an exponential number of paths
+resolves in constant time with bounded memory.
+
+## Verification
+
+- Full test suite: 147 files pass, 1,849 tests pass, 38 optional live integration
+  tests skipped. The Grounded V2 protocol adds an executable law suite, a scripted
+  cursor fuzzer, and a disjoint-set binding oracle. The substitution fix adds
+  fixpoint and backward-chaining regression tests, each shown to fail on the
+  single-pass version.
+- Core/ST conformance is unchanged from 1.1.6: 431 passed, 77 established
+  failures, 60 manifest expected failures, byte-identical failure set.
+- Performance is neutral against 1.1.6 on the nondeterminism benchmark suite;
+  the substitution change adds asymptotic headroom (linear chains, DAG sharing)
+  with no measured regression.
+
 # MeTTa TS 1.1.6
 
 MeTTa TS 1.1.6 reduces the cold and loaded cost of compiled nondeterministic

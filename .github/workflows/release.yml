@@ -23,6 +23,23 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm -r build
-      - run: pnpm -r --filter "./packages/*" publish --access public --provenance --no-git-checks
+      # Route the npm dist-tag by the semver prerelease identifier: stable versions stay on
+      # `latest`, `-experimental.*` versions publish to the opt-in `experimental` channel, and
+      # any other prerelease lands on `next`. Without an explicit tag npm would point `latest`
+      # at a prerelease.
+      - name: Resolve npm dist-tag
+        id: channel
+        run: |
+          VERSION=$(node -p "require('./packages/core/package.json').version")
+          case "$VERSION" in
+            *-experimental*) TAG=experimental ;;
+            *-*) TAG=next ;;
+            *) TAG=latest ;;
+          esac
+          echo "Publishing $VERSION to dist-tag $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - run: >
+          pnpm -r --filter "./packages/*" publish --access public --provenance
+          --no-git-checks --tag ${{ steps.channel.outputs.tag }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
