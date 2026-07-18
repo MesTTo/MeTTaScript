@@ -148,6 +148,53 @@ const MAP_FILTER_CASES: readonly DiffCase[] = [
   },
 ];
 
+const COMPILED_ROUTE_CASES: readonly DiffCase[] = [
+  {
+    name: "compiled numeric map and filter route",
+    src: `
+      (= (dbl $x) (* $x 2))
+      (= (even-num $x) (== (% $x 2) 0))
+      !(map-atom (1 2 3) $x (dbl $x))
+      !(filter-atom (1 2 3 4) $x (even-num $x))
+    `,
+  },
+  {
+    name: "compiled nondeterministic map route",
+    src: `
+      (= (pick-num $x) $x)
+      (= (pick-num $x) (* $x 10))
+      !(map-atom (1 2) $x (pick-num $x))
+    `,
+  },
+  {
+    name: "compiled map falls back per element when a call bails",
+    src: `
+      (= (dbl $x) (* $x 2))
+      !(map-atom (1 nope 2) $x (dbl $x))
+    `,
+  },
+  {
+    name: "compiled arithmetic fold route",
+    src: `
+      (= (add2 $a $b) (+ $a $b))
+      !(foldl-atom (1 2 3 4) 0 $a $b (add2 $a $b))
+    `,
+  },
+  {
+    name: "bare let fold step stays on the metta wrapper",
+    src: `
+      !(foldl-atom (1 2) 0 $a $b (let $x (+ $a $b) $x))
+    `,
+  },
+  {
+    name: "user function with let body can route",
+    src: `
+      (= (add-let $a $b) (let $x (+ $a $b) $x))
+      !(foldl-atom (1 2) 0 $a $b (add-let $a $b))
+    `,
+  },
+];
+
 const CHILD = String.raw`
   import { expr, variable } from "./packages/core/src/atom";
   import { setOutputSink, setRawSink, stdTable } from "./packages/core/src/builtins";
@@ -265,5 +312,18 @@ describe("native map-atom and filter-atom", () => {
     expect(
       runWithEnv(MAP_FILTER_CASES, { METTA_NATIVE_MAP: "1", METTA_NATIVE_FILTER: "1" }),
     ).toEqual(runWithEnv(MAP_FILTER_CASES, { METTA_NATIVE_MAP: "0", METTA_NATIVE_FILTER: "0" }));
+  }, 60_000);
+});
+
+describe("compiled per-element list-op routing", () => {
+  it("matches the native metta-wrapper route up to variable renaming", () => {
+    const nativeEnv = {
+      METTA_NATIVE_FOLD: "1",
+      METTA_NATIVE_MAP: "1",
+      METTA_NATIVE_FILTER: "1",
+    };
+    expect(
+      runWithEnv(COMPILED_ROUTE_CASES, { ...nativeEnv, METTA_GROUNDED_COMPILED: "1" }),
+    ).toEqual(runWithEnv(COMPILED_ROUTE_CASES, { ...nativeEnv, METTA_GROUNDED_COMPILED: "0" }));
   }, 60_000);
 });

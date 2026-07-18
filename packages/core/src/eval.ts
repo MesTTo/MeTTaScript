@@ -1923,6 +1923,7 @@ const STANDARD_FILTER_RHS =
 const nativeFoldEnabled = (): boolean => readEnv("METTA_NATIVE_FOLD") !== "0";
 const nativeMapEnabled = (): boolean => readEnv("METTA_NATIVE_MAP") !== "0";
 const nativeFilterEnabled = (): boolean => readEnv("METTA_NATIVE_FILTER") !== "0";
+const groundedCompiledEnabled = (): boolean => readEnv("METTA_GROUNDED_COMPILED") !== "0";
 
 function canUseNativeFoldlAtom(env: MinEnv, w: World): boolean {
   if (!nativeFoldEnabled()) return false;
@@ -1988,14 +1989,25 @@ function* evalFoldlAtomCallG(
       cur = { counter: cur.counter + 1, world: cur.world };
       const op1 = applySubst([[aVar.name, branch.acc]], op!);
       const op2 = applySubst([[bVar.name, elem]], op1);
-      const [accPairs, st2] = yield* mettaEvalG(
-        env,
-        fuel - 1,
-        cur,
-        branch.bnd,
-        makeExpr(env, [sym("metta"), op2, UNDEF, sym("&self")]),
-      );
-      cur = st2;
+      const op2Head = opOf(op2);
+      let compiled: { readonly pairs: Array<[Atom, Bindings]>; readonly state: St } | undefined;
+      if (op2Head !== "let" && op2Head !== "let*")
+        compiled = yield* evalGroundedCompiledExprG(env, fuel, cur, branch.bnd, op2);
+      let accPairs: Array<[Atom, Bindings]>;
+      if (compiled !== undefined) {
+        accPairs = compiled.pairs;
+        cur = compiled.state;
+      } else {
+        const [fallbackPairs, st2] = yield* mettaEvalG(
+          env,
+          fuel - 1,
+          cur,
+          branch.bnd,
+          makeExpr(env, [sym("metta"), op2, UNDEF, sym("&self")]),
+        );
+        accPairs = fallbackPairs;
+        cur = st2;
+      }
       for (const [acc, accBnd] of accPairs) {
         next.push({
           acc,
@@ -2079,6 +2091,80 @@ function boolValue(a: Atom): boolean | undefined {
   return a.kind === "gnd" && a.value.g === "bool" ? a.value.b : undefined;
 }
 
+function* reduceCompiledResultsG(
+  env: MinEnv,
+  fuel: number,
+  st: St,
+  queryVars: readonly string[],
+  partB: Bindings,
+  wApp: Atom,
+  cr: CompiledRunResult,
+  opReturnsAtom: boolean,
+  cursor?: CursorMode,
+): Gen<[Array<[Atom, Bindings]>, St]> {
+  const out: Array<[Atom, Bindings]> = [];
+  let cur = st;
+  const impResult = cr.state !== undefined;
+  if (cr.state !== undefined) cur = cr.state;
+  else if (cr.counterDelta !== 0)
+    cur = {
+      counter: cur.counter + cr.counterDelta,
+      world: cur.world,
+    };
+  for (const r of cr.results) {
+    const pb = mergeRestrict(env, queryVars, partB, r.bnd);
+    if (atomEq(r.atom, notReducibleA) || atomEq(r.atom, wApp)) {
+      out.push([wApp, partB]);
+    } else if ((opReturnsAtom || impResult) && !isEmbeddedOp(r.atom)) {
+      out.push([r.atom, pb]);
+    } else {
+      const [more, st4] = yield* mettaEvalG(env, fuel - 1, cur, pb, r.atom, cursor);
+      cur = st4;
+      for (const m of more) out.push([m[0], mergeRestrict(env, queryVars, pb, m[1])]);
+    }
+  }
+  return [out, cur];
+}
+
+function* evalGroundedCompiledExprG(
+  env: MinEnv,
+  fuel: number,
+  st: St,
+  bnd: Bindings,
+  atom: Atom,
+): Gen<{ readonly pairs: Array<[Atom, Bindings]>; readonly state: St } | undefined> {
+  if (!groundedCompiledEnabled() || atom.kind !== "expr" || atom.items.length === 0)
+    return undefined;
+  const head = atom.items[0]!;
+  if (head.kind !== "sym") return undefined;
+  const op = head.name;
+  if (
+    env.compiled?.has(op) !== true ||
+    st.world.selfRules.has(op) ||
+    staticRulesChangedFor(st.world, op) ||
+    st.world.selfVarRules.length !== 0
+  )
+    return undefined;
+  const args = atom.items.slice(1);
+  const sig = typeViewFor(env, st.world).sigs.get(op);
+  if (checkApplication(env, st.world, op, args, sig) !== null) return undefined;
+  const cr = runCompiled(env, op, args, st, COMPILED_IMPURE_OPS, undefined, fuel);
+  if (cr === undefined) return undefined;
+  const opReturnsAtom =
+    sig !== undefined && sig.length > 0 && atomEq(sig[sig.length - 1]!, sym("Atom"));
+  const [pairs, state] = yield* reduceCompiledResultsG(
+    env,
+    fuel,
+    st,
+    queryVarsOf(args),
+    bnd,
+    atom,
+    cr,
+    opReturnsAtom,
+  );
+  return { pairs, state };
+}
+
 function* sealedTemplatesG(
   env: MinEnv,
   st: St,
@@ -2136,14 +2222,22 @@ function* evalMapAtomCallG(
     const next: MapFilterBranch[] = [];
     for (const branch of branches) {
       const mapExpr = applySubst([[v.name, item]], sealed);
-      const [mappedPairs, st2] = yield* mettaEvalG(
-        env,
-        fuel - 1,
-        cur,
-        branch.bnd,
-        makeExpr(env, [sym("metta"), mapExpr, UNDEF, sym("&self")]),
-      );
-      cur = st2;
+      const compiled = yield* evalGroundedCompiledExprG(env, fuel, cur, branch.bnd, mapExpr);
+      let mappedPairs: Array<[Atom, Bindings]>;
+      if (compiled !== undefined) {
+        mappedPairs = compiled.pairs;
+        cur = compiled.state;
+      } else {
+        const [fallbackPairs, st2] = yield* mettaEvalG(
+          env,
+          fuel - 1,
+          cur,
+          branch.bnd,
+          makeExpr(env, [sym("metta"), mapExpr, UNDEF, sym("&self")]),
+        );
+        mappedPairs = fallbackPairs;
+        cur = st2;
+      }
       for (const [mapped, mappedBnd] of mappedPairs) {
         const mappedValue = inst(env, mappedBnd, mapped);
         const mappedList: NativeList = { head: mappedValue, tail: branch.list };
@@ -2197,14 +2291,22 @@ function* evalFilterAtomCallG(
     const next: FilterBranch[] = [];
     for (const branch of branches) {
       const filterExpr = applySubst([[v.name, item]], sealed);
-      const [filteredPairs, st2] = yield* mettaEvalG(
-        env,
-        fuel - 1,
-        cur,
-        branch.bnd,
-        makeExpr(env, [sym("metta"), filterExpr, UNDEF, sym("&self")]),
-      );
-      cur = st2;
+      const compiled = yield* evalGroundedCompiledExprG(env, fuel, cur, branch.bnd, filterExpr);
+      let filteredPairs: Array<[Atom, Bindings]>;
+      if (compiled !== undefined) {
+        filteredPairs = compiled.pairs;
+        cur = compiled.state;
+      } else {
+        const [fallbackPairs, st2] = yield* mettaEvalG(
+          env,
+          fuel - 1,
+          cur,
+          branch.bnd,
+          makeExpr(env, [sym("metta"), filterExpr, UNDEF, sym("&self")]),
+        );
+        filteredPairs = fallbackPairs;
+        cur = st2;
+      }
       for (const [filtered, filteredBnd] of filteredPairs) {
         const keep = boolValue(inst(env, filteredBnd, filtered));
         if (keep === undefined) {
@@ -3396,38 +3498,19 @@ function* mettaEvalUncachedG(
             cr = runCompiled(env, op, partAtoms, cur2, COMPILED_IMPURE_OPS, undefined, fuel);
           }
           if (cr !== undefined) {
-            // A compiled holder returns the one-step rule-application results (the instantiated RHSs) plus
-            // the counter advance the candidate scan would have cost. Reduce each result to normal form
-            // exactly as the interpreted rule-application path does (the `pairs` loop below), so a RHS with
-            // reducible subterms (a recursive call, a grounded op) finishes evaluating and the fresh-variable
-            // counter stays in lockstep.
-            // An impure compiled body runs the slot machine to completion (every recursive call resolves
-            // through the holder, every grounded op is computed) or BAILs; it never returns a half-reduced
-            // term. So its result is already normal form and the re-reduce below only re-walks it. For a
-            // deep binary build (matespace rewriteK) that re-walk is the dominant cost and advances the
-            // fresh-variable counter past what the build needed. Skip it. The result stays alpha-equivalent
-            // to the interpreted path (the gensym counter only names fresh vars, so a different count yields
-            // a consistently-renamed term, never a captured one), which is exactly the equality the oracle
-            // and LeaTTa check (`alphaEq`). Pure compiled results keep the re-reduce (unchanged).
-            const impResult = cr.state !== undefined;
-            if (cr.state !== undefined) cur2 = cr.state;
-            else if (cr.counterDelta !== 0)
-              cur2 = {
-                counter: cur2.counter + cr.counterDelta,
-                world: cur2.world,
-              };
-            for (const r of cr.results) {
-              const pb = mergeRestrict(env, queryVars, partB, r.bnd);
-              if (atomEq(r.atom, notReducibleA) || atomEq(r.atom, wApp)) {
-                out.push([wApp, partB]);
-              } else if ((opReturnsAtom || impResult) && !isEmbeddedOp(r.atom)) {
-                out.push([r.atom, pb]);
-              } else {
-                const [more, st4] = yield* mettaEvalG(env, fuel - 1, cur2, pb, r.atom, cursor);
-                cur2 = st4;
-                for (const m of more) out.push([m[0], mergeRestrict(env, queryVars, pb, m[1])]);
-              }
-            }
+            const [handled, st4] = yield* reduceCompiledResultsG(
+              env,
+              fuel,
+              cur2,
+              queryVars,
+              partB,
+              wApp,
+              cr,
+              opReturnsAtom,
+              cursor,
+            );
+            cur2 = st4;
+            out.push(...handled);
             continue;
           }
         }
