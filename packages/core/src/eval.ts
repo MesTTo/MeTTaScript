@@ -1914,7 +1914,15 @@ function isInertData(env: MinEnv, w: World, t: Atom, exprHeads: ReadonlySet<stri
 const STANDARD_FOLDL_LHS = "(foldl-atom $list $init $a $b $op)";
 const STANDARD_FOLDL_RHS =
   "(function (eval (if-equal $list () (return $init) (chain (decons-atom $list) $ht (unify ($head $tail) $ht (chain (eval (atom-subst $init $a $op)) $op1 (chain (eval (atom-subst $head $b $op1)) $op2 (chain (metta $op2 %Undefined% &self) $newacc (chain (eval (foldl-atom $tail $newacc $a $b $op)) $r (return $r))))) (return $init))))))";
+const STANDARD_MAP_LHS = "(map-atom $list $var $map)";
+const STANDARD_MAP_RHS =
+  "(function (chain (decons-atom $list) $ht (unify ($head $tail) $ht (chain (eval (sealed ($var) $map)) $sealedmap (chain (eval (map-atom $tail $var $sealedmap)) $tail-mapped (chain (eval (atom-subst $head $var $sealedmap)) $map-expr (chain (metta $map-expr %Undefined% &self) $head-mapped (chain (cons-atom $head-mapped $tail-mapped) $res (return $res)))))) (return ()))))";
+const STANDARD_FILTER_LHS = "(filter-atom $list $var $filter)";
+const STANDARD_FILTER_RHS =
+  "(function (chain (decons-atom $list) $ht (unify ($head $tail) $ht (chain (eval (sealed ($var) $filter)) $sealedfilter (chain (eval (filter-atom $tail $var $sealedfilter)) $tail-filtered (chain (eval (atom-subst $head $var $sealedfilter)) $filter-expr (chain (metta $filter-expr %Undefined% &self) $is-filtered (eval (if $is-filtered (chain (cons-atom $head $tail-filtered) $res (return $res)) (return $tail-filtered))))))) (return ()))))";
 const nativeFoldEnabled = (): boolean => readEnv("METTA_NATIVE_FOLD") !== "0";
+const nativeMapEnabled = (): boolean => readEnv("METTA_NATIVE_MAP") !== "0";
+const nativeFilterEnabled = (): boolean => readEnv("METTA_NATIVE_FILTER") !== "0";
 
 function canUseNativeFoldlAtom(env: MinEnv, w: World): boolean {
   if (!nativeFoldEnabled()) return false;
@@ -1924,6 +1932,26 @@ function canUseNativeFoldlAtom(env: MinEnv, w: World): boolean {
   if (foldlRules.length !== 1) return false;
   const [foldlLhs, foldlRhs] = foldlRules[0]!;
   return format(foldlLhs) === STANDARD_FOLDL_LHS && format(foldlRhs) === STANDARD_FOLDL_RHS;
+}
+
+function canUseNativeMapAtom(env: MinEnv, w: World): boolean {
+  if (!nativeMapEnabled()) return false;
+  if (env.varRulesVar.length > 0 || w.selfVarRules.length > 0 || w.selfRules.has("map-atom"))
+    return false;
+  const mapRules = visibleStaticRulesForHead(env, w, "map-atom");
+  if (mapRules.length !== 1) return false;
+  const [mapLhs, mapRhs] = mapRules[0]!;
+  return format(mapLhs) === STANDARD_MAP_LHS && format(mapRhs) === STANDARD_MAP_RHS;
+}
+
+function canUseNativeFilterAtom(env: MinEnv, w: World): boolean {
+  if (!nativeFilterEnabled()) return false;
+  if (env.varRulesVar.length > 0 || w.selfVarRules.length > 0 || w.selfRules.has("filter-atom"))
+    return false;
+  const filterRules = visibleStaticRulesForHead(env, w, "filter-atom");
+  if (filterRules.length !== 1) return false;
+  const [filterLhs, filterRhs] = filterRules[0]!;
+  return format(filterLhs) === STANDARD_FILTER_LHS && format(filterRhs) === STANDARD_FILTER_RHS;
 }
 
 interface FoldlBranch {
@@ -1989,6 +2017,237 @@ function* evalFoldlAtomCallG(
   cur = { counter: cur.counter + branches.length, world: cur.world };
   return {
     pairs: branches.map((branch) => [branch.acc, branch.bnd]),
+    state: cur,
+  };
+}
+
+interface NativeListNode {
+  readonly head: Atom;
+  readonly tail: NativeList;
+}
+
+type NativeList = NativeListNode | null;
+
+interface MapFilterBranch {
+  readonly list: NativeList;
+  readonly bnd: Bindings;
+}
+
+type FilterResult =
+  | { readonly kind: "list"; readonly list: NativeList }
+  | { readonly kind: "atom"; readonly atom: Atom };
+
+interface FilterBranch {
+  readonly result: FilterResult;
+  readonly bnd: Bindings;
+}
+
+function nativeListToExpr(env: MinEnv, list: NativeList): ExprAtom {
+  const items: Atom[] = [];
+  for (let node = list; node !== null; node = node.tail) items.push(node.head);
+  return makeExpr(env, items);
+}
+
+function mapFilterContinuationVars(
+  items: readonly Atom[],
+  sealed: readonly Atom[],
+  upto: number,
+  result: Atom,
+  v: Atom,
+): readonly string[] {
+  return atomVars(expr([expr(items.slice(0, upto)), expr(sealed.slice(0, upto)), result, v]));
+}
+
+function restrictMapFilterBnd(
+  env: MinEnv,
+  items: readonly Atom[],
+  sealed: readonly Atom[],
+  upto: number,
+  result: () => Atom,
+  v: Atom,
+  bnd: Bindings,
+): Bindings {
+  if (size(bnd) === 0) return emptyBindings;
+  return restrictBnd(env, mapFilterContinuationVars(items, sealed, upto, result(), v), bnd);
+}
+
+function filterResultAtom(env: MinEnv, result: FilterResult): Atom {
+  return result.kind === "list" ? nativeListToExpr(env, result.list) : result.atom;
+}
+
+function boolValue(a: Atom): boolean | undefined {
+  return a.kind === "gnd" && a.value.g === "bool" ? a.value.b : undefined;
+}
+
+function* sealedTemplatesG(
+  env: MinEnv,
+  st: St,
+  items: readonly Atom[],
+  v: Atom,
+  tmpl: Atom,
+  bnd: Bindings,
+): Gen<
+  | {
+      readonly sealed: readonly Atom[];
+      readonly bnd: Bindings;
+      readonly state: St;
+    }
+  | undefined
+> {
+  let cur = st;
+  const sealed: Atom[] = [];
+  let nextTemplate = tmpl;
+  for (let i = 0; i < items.length; i++) {
+    cur = { counter: cur.counter + 1, world: cur.world };
+    const sealedResult = yield* callGroundedG(env, cur.world, "sealed", [
+      makeExpr(env, [v]),
+      nextTemplate,
+    ]);
+    if (sealedResult.tag !== "ok" || sealedResult.results.length !== 1) return undefined;
+    const nextSealed = sealedResult.results[0]!;
+    sealed.push(nextSealed);
+    nextTemplate = nextSealed;
+  }
+  cur = { counter: cur.counter + 1, world: cur.world };
+  return { sealed, bnd, state: cur };
+}
+
+function* evalMapAtomCallG(
+  env: MinEnv,
+  fuel: number,
+  st: St,
+  args: readonly Atom[],
+  bnd: Bindings,
+): Gen<{ readonly pairs: Array<[Atom, Bindings]>; readonly state: St } | undefined> {
+  if (args.length !== 3) return undefined;
+  const [list, v, tmpl] = args;
+  if (list?.kind !== "expr" || v?.kind !== "var" || tmpl === undefined) return undefined;
+  const needsSeal = atomVars(tmpl).some((name) => name !== v.name);
+  const descended = needsSeal
+    ? yield* sealedTemplatesG(env, st, list.items, v, tmpl, bnd)
+    : undefined;
+  if (needsSeal && descended === undefined) return undefined;
+  const templates = descended?.sealed ?? [];
+  let cur = descended?.state ?? st;
+  let branches: MapFilterBranch[] = [{ list: null, bnd: descended?.bnd ?? bnd }];
+  for (let i = list.items.length - 1; i >= 0 && branches.length > 0; i--) {
+    const item = list.items[i]!;
+    const sealed = needsSeal ? templates[i]! : tmpl;
+    const next: MapFilterBranch[] = [];
+    for (const branch of branches) {
+      const mapExpr = applySubst([[v.name, item]], sealed);
+      const [mappedPairs, st2] = yield* mettaEvalG(
+        env,
+        fuel - 1,
+        cur,
+        branch.bnd,
+        makeExpr(env, [sym("metta"), mapExpr, UNDEF, sym("&self")]),
+      );
+      cur = st2;
+      for (const [mapped, mappedBnd] of mappedPairs) {
+        const mappedValue = inst(env, mappedBnd, mapped);
+        const mappedList: NativeList = { head: mappedValue, tail: branch.list };
+        next.push({
+          list: mappedList,
+          bnd: restrictMapFilterBnd(
+            env,
+            list.items,
+            templates,
+            i,
+            () => nativeListToExpr(env, mappedList),
+            v,
+            mappedBnd,
+          ),
+        });
+      }
+    }
+    enforceDistinctLimit(env, next.length);
+    branches = next;
+  }
+  return {
+    pairs: branches.map((branch) => [nativeListToExpr(env, branch.list), branch.bnd]),
+    state: cur,
+  };
+}
+
+function* evalFilterAtomCallG(
+  env: MinEnv,
+  fuel: number,
+  st: St,
+  args: readonly Atom[],
+  bnd: Bindings,
+): Gen<{ readonly pairs: Array<[Atom, Bindings]>; readonly state: St } | undefined> {
+  if (args.length !== 3) return undefined;
+  const [list, v, tmpl] = args;
+  if (list?.kind !== "expr" || v?.kind !== "var" || tmpl === undefined) return undefined;
+  const needsSeal = atomVars(tmpl).some((name) => name !== v.name);
+  const descended = needsSeal
+    ? yield* sealedTemplatesG(env, st, list.items, v, tmpl, bnd)
+    : undefined;
+  if (needsSeal && descended === undefined) return undefined;
+  const templates = descended?.sealed ?? [];
+  let cur = descended?.state ?? st;
+  let branches: FilterBranch[] = [
+    { result: { kind: "list", list: null }, bnd: descended?.bnd ?? bnd },
+  ];
+  const noReturnTarget = makeExpr(env, [sym("filter-atom"), list, v, tmpl]);
+  for (let i = list.items.length - 1; i >= 0 && branches.length > 0; i--) {
+    const item = list.items[i]!;
+    const sealed = needsSeal ? templates[i]! : tmpl;
+    const next: FilterBranch[] = [];
+    for (const branch of branches) {
+      const filterExpr = applySubst([[v.name, item]], sealed);
+      const [filteredPairs, st2] = yield* mettaEvalG(
+        env,
+        fuel - 1,
+        cur,
+        branch.bnd,
+        makeExpr(env, [sym("metta"), filterExpr, UNDEF, sym("&self")]),
+      );
+      cur = st2;
+      for (const [filtered, filteredBnd] of filteredPairs) {
+        const keep = boolValue(inst(env, filteredBnd, filtered));
+        if (keep === undefined) {
+          next.push({
+            result: { kind: "atom", atom: errAtom(noReturnTarget, "NoReturn") },
+            bnd: emptyBindings,
+          });
+          continue;
+        }
+        const filteredResult: FilterResult =
+          branch.result.kind === "atom"
+            ? keep
+              ? {
+                  kind: "atom",
+                  atom: errAtom(
+                    makeExpr(env, [sym("cons-atom"), item, branch.result.atom]),
+                    "cons-atom: expected expression tail",
+                  ),
+                }
+              : branch.result
+            : {
+                kind: "list",
+                list: keep ? { head: item, tail: branch.result.list } : branch.result.list,
+              };
+        next.push({
+          result: filteredResult,
+          bnd: restrictMapFilterBnd(
+            env,
+            list.items,
+            templates,
+            i,
+            () => filterResultAtom(env, filteredResult),
+            v,
+            filteredBnd,
+          ),
+        });
+      }
+    }
+    enforceDistinctLimit(env, next.length);
+    branches = next;
+  }
+  return {
+    pairs: branches.map((branch) => [filterResultAtom(env, branch.result), branch.bnd]),
     state: cur,
   };
 }
@@ -3010,6 +3269,24 @@ function* mettaEvalUncachedG(
           if (folded !== undefined) {
             cur2 = folded.state;
             for (const [value, rb] of folded.pairs)
+              out.push([value, mergeRestrict(env, queryVars, partB, rb)]);
+            continue;
+          }
+        }
+        if (!cooperativeSearch && op === "map-atom" && canUseNativeMapAtom(env, cur2.world)) {
+          const mapped = yield* evalMapAtomCallG(env, fuel, cur2, partAtoms, partB);
+          if (mapped !== undefined) {
+            cur2 = mapped.state;
+            for (const [value, rb] of mapped.pairs)
+              out.push([value, mergeRestrict(env, queryVars, partB, rb)]);
+            continue;
+          }
+        }
+        if (!cooperativeSearch && op === "filter-atom" && canUseNativeFilterAtom(env, cur2.world)) {
+          const filtered = yield* evalFilterAtomCallG(env, fuel, cur2, partAtoms, partB);
+          if (filtered !== undefined) {
+            cur2 = filtered.state;
+            for (const [value, rb] of filtered.pairs)
               out.push([value, mergeRestrict(env, queryVars, partB, rb)]);
             continue;
           }

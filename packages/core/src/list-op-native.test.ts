@@ -86,6 +86,68 @@ const INERT_CASES: readonly DiffCase[] = [
   },
 ];
 
+const MAP_FILTER_CASES: readonly DiffCase[] = [
+  {
+    name: "ground map and filter over data lists",
+    src: `
+      !(map-atom (1 2 3) $x (eval (* $x 2)))
+      !(filter-atom (1 2 3 4) $x (eval (== (% $x 2) 0)))
+    `,
+  },
+  {
+    name: "nondeterministic map keeps prelude cartesian order",
+    src: `
+      !(map-atom (a b) $x (superpose ($x (pair $x))))
+    `,
+  },
+  {
+    name: "free variables from map keep the same fresh names",
+    src: `
+      (= (fresh-out) $fresh)
+      !(map-atom (a b) $x (foo $y))
+      !(fresh-out)
+    `,
+  },
+  {
+    name: "two sequential map-atoms keep the counter aligned",
+    src: `
+      (= (fresh-out) $fresh)
+      !(map-atom (a b) $x (foo $y))
+      !(map-atom (c) $x (bar $z))
+      !(fresh-out)
+    `,
+  },
+  {
+    name: "nested, empty, and single-item lists",
+    src: `
+      !(map-atom ((a b) () (c)) $x (wrap $x))
+      !(map-atom () $x (wrap $x))
+      !(filter-atom (solo) $x True)
+    `,
+  },
+  {
+    name: "filter keeps original elements and nondeterministic order",
+    src: `
+      !(filter-atom (1 2) $x (superpose (True False)))
+    `,
+  },
+  {
+    name: "filter non-Bool predicate follows the prelude",
+    src: `
+      !(filter-atom (1 2) $x maybe)
+    `,
+  },
+  {
+    name: "user-function map and filter stay byte-identical",
+    src: `
+      (= (dbl $x) (* $x 2))
+      (= (even-num $x) (== (% $x 2) 0))
+      !(map-atom (1 2 3) $x (dbl $x))
+      !(filter-atom (1 2 3 4) $x (even-num $x))
+    `,
+  },
+];
+
 const CHILD = String.raw`
   import { expr, variable } from "./packages/core/src/atom";
   import { setOutputSink, setRawSink, stdTable } from "./packages/core/src/builtins";
@@ -195,5 +257,13 @@ describe("inert data tuple short-circuit", () => {
     expect(runWithEnv(INERT_CASES, { METTA_CTOR_SC: "1" })).toEqual(
       runWithEnv(INERT_CASES, { METTA_CTOR_SC: "0" }),
     );
+  }, 60_000);
+});
+
+describe("native map-atom and filter-atom", () => {
+  it("matches the prelude recursion up to variable renaming", () => {
+    expect(
+      runWithEnv(MAP_FILTER_CASES, { METTA_NATIVE_MAP: "1", METTA_NATIVE_FILTER: "1" }),
+    ).toEqual(runWithEnv(MAP_FILTER_CASES, { METTA_NATIVE_MAP: "0", METTA_NATIVE_FILTER: "0" }));
   }, 60_000);
 });
