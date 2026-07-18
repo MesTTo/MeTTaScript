@@ -3,11 +3,21 @@
 // SPDX-License-Identifier: MIT
 
 import { canonicalize } from "./alpha";
-import { type Atom, atomEq, emptyExpr, expr, type ExprAtom, gint, isErrorAtom, sym } from "./atom";
+import {
+  type Atom,
+  atomEq,
+  atomVars,
+  emptyExpr,
+  expr,
+  type ExprAtom,
+  gint,
+  isErrorAtom,
+  sym,
+} from "./atom";
 import { dedupAlphaStable } from "./atom-set";
 import { emptyLog, logFromArray } from "./atomlog";
 import { bindingFrameFromLegacy, bindingFrameToLegacy, emptyBindingFrame } from "./binding-frame";
-import { type Bindings, emptyBindings } from "./bindings";
+import { type Bindings, emptyBindings, size } from "./bindings";
 import { pettaOpNames, type ReduceResult } from "./builtins";
 import { runChoicePlan, runDistinctChoicePlan } from "./choice-plan";
 import {
@@ -106,6 +116,7 @@ import {
   type St,
   type Stack,
   type StreamingIsolatedBranches,
+  type World,
 } from "./eval/machine";
 import {
   argumentMayProduceAlternatives,
@@ -231,6 +242,7 @@ import {
   snapshotEnvironmentMutations,
   staticRulesChangedFor,
   staticRuleSetChanged,
+  visibleStaticRulesForHead,
 } from "./eval/specializer";
 import {
   canRunChoicePlan,
@@ -308,6 +320,7 @@ import {
 } from "./grounded-v2";
 import { merge } from "./match";
 import { applyConsAtom, applyDeconsAtom } from "./minimal-instruction";
+import { format } from "./parser";
 import { type CancellationReason, ResourceLimitError } from "./resources";
 import {
   type AsyncSearchCursor,
@@ -324,8 +337,10 @@ import {
   type SyncSearchCursor,
 } from "./search-cursor";
 import { runStructuredTaskGroup } from "./structured-task-group";
+import { applySubst } from "./substitution";
 import { type ActiveTableEntry } from "./table-space";
 import { keyWellFormed, MODED_IMPURE_OPS } from "./tabling";
+import { readEnv } from "./env";
 import { evalOpG } from "./eval/evalop";
 export { checkApplication } from "./eval/matchops";
 export {
@@ -1853,6 +1868,88 @@ function* tryCollapseRouteG(
 
 // ---------- mettaEval (type-directed metta-call loop) ----------
 
+const STANDARD_FOLDL_LHS = "(foldl-atom $list $init $a $b $op)";
+const STANDARD_FOLDL_RHS =
+  "(function (eval (if-equal $list () (return $init) (chain (decons-atom $list) $ht (unify ($head $tail) $ht (chain (eval (atom-subst $init $a $op)) $op1 (chain (eval (atom-subst $head $b $op1)) $op2 (chain (metta $op2 %Undefined% &self) $newacc (chain (eval (foldl-atom $tail $newacc $a $b $op)) $r (return $r))))) (return $init))))))";
+const nativeFoldEnabled = (): boolean => readEnv("METTA_NATIVE_FOLD") !== "0";
+
+function canUseNativeFoldlAtom(env: MinEnv, w: World): boolean {
+  if (!nativeFoldEnabled()) return false;
+  if (env.varRulesVar.length > 0 || w.selfVarRules.length > 0 || w.selfRules.has("foldl-atom"))
+    return false;
+  const foldlRules = visibleStaticRulesForHead(env, w, "foldl-atom");
+  if (foldlRules.length !== 1) return false;
+  const [foldlLhs, foldlRhs] = foldlRules[0]!;
+  return format(foldlLhs) === STANDARD_FOLDL_LHS && format(foldlRhs) === STANDARD_FOLDL_RHS;
+}
+
+interface FoldlBranch {
+  readonly acc: Atom;
+  readonly bnd: Bindings;
+}
+
+function foldlContinuationVars(
+  tail: readonly Atom[],
+  acc: Atom,
+  aVar: Atom,
+  bVar: Atom,
+  op: Atom,
+): readonly string[] {
+  return atomVars(expr([expr(tail), acc, aVar, bVar, op]));
+}
+
+function* evalFoldlAtomCallG(
+  env: MinEnv,
+  fuel: number,
+  st: St,
+  args: readonly Atom[],
+  bnd: Bindings,
+): Gen<{ readonly pairs: Array<[Atom, Bindings]>; readonly state: St } | undefined> {
+  if (args.length !== 5) return undefined;
+  const [list, init, aVar, bVar, op] = args;
+  if (list?.kind !== "expr" || aVar?.kind !== "var" || bVar?.kind !== "var") return undefined;
+  let cur = st;
+  let branches: FoldlBranch[] = [{ acc: init!, bnd }];
+  for (let i = 0; i < list.items.length && branches.length > 0; i++) {
+    const elem = list.items[i]!;
+    const next: FoldlBranch[] = [];
+    for (const branch of branches) {
+      cur = { counter: cur.counter + 1, world: cur.world };
+      const op1 = applySubst([[aVar.name, branch.acc]], op!);
+      const op2 = applySubst([[bVar.name, elem]], op1);
+      const [accPairs, st2] = yield* mettaEvalG(
+        env,
+        fuel - 1,
+        cur,
+        branch.bnd,
+        makeExpr(env, [sym("metta"), op2, UNDEF, sym("&self")]),
+      );
+      cur = st2;
+      for (const [acc, accBnd] of accPairs) {
+        next.push({
+          acc,
+          bnd:
+            size(accBnd) === 0
+              ? emptyBindings
+              : restrictBnd(
+                  env,
+                  foldlContinuationVars(list.items.slice(i + 1), acc, aVar, bVar, op!),
+                  accBnd,
+                ),
+        });
+      }
+    }
+    enforceDistinctLimit(env, next.length);
+    branches = next;
+  }
+
+  cur = { counter: cur.counter + branches.length, world: cur.world };
+  return {
+    pairs: branches.map((branch) => [branch.acc, branch.bnd]),
+    state: cur,
+  };
+}
+
 function* reduceRulePairsG(
   env: MinEnv,
   fuel: number,
@@ -2865,6 +2962,15 @@ function* mettaEvalUncachedG(
         const wApp = partAtoms.every((p, i) => p === args[i])
           ? lw
           : makeExpr(env, [sym(op), ...partAtoms]);
+        if (!cooperativeSearch && op === "foldl-atom" && canUseNativeFoldlAtom(env, cur2.world)) {
+          const folded = yield* evalFoldlAtomCallG(env, fuel, cur2, partAtoms, partB);
+          if (folded !== undefined) {
+            cur2 = folded.state;
+            for (const [value, rb] of folded.pairs)
+              out.push([value, mergeRestrict(env, queryVars, partB, rb)]);
+            continue;
+          }
+        }
         let interpretedApplication = wApp;
         // PeTTa-style partial application: grounded ops and untyped lowercase user functions applied to
         // fewer arguments than their arity become `(partial fn (args))` closures. Requires at least one
