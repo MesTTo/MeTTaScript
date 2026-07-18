@@ -27,9 +27,9 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @metta-ts/core build
-      - run: pnpm --filter @metta-ts/hyperon build
-      - run: pnpm --filter @metta-ts/grapher build
+      # Build the whole workspace: the docs site bundles @metta-ts/hyperon, which now side-effect imports
+      # @metta-ts/libraries (auto-registered), so a hand-picked subset misses transitive deps. Match CI.
+      - run: pnpm -r build
       - run: pnpm --filter @metta-ts/website docs:build
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
