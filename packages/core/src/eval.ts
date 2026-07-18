@@ -285,6 +285,7 @@ import {
 import {
   functionArity,
   getTypesWithView,
+  isDefinedHead,
   isNormalForm,
   matchType,
   refreshEvaluationEnvironment,
@@ -1867,6 +1868,48 @@ function* tryCollapseRouteG(
 }
 
 // ---------- mettaEval (type-directed metta-call loop) ----------
+
+const exprRuleHeadCache = new WeakMap<object, { len: number; syms: ReadonlySet<string> }>();
+
+function exprRuleHeadSyms(varRules: ReadonlyArray<[Atom, Atom]>): ReadonlySet<string> {
+  const cached = exprRuleHeadCache.get(varRules);
+  if (cached !== undefined && cached.len === varRules.length) return cached.syms;
+  const syms = new Set<string>();
+  for (const [lhs] of varRules)
+    if (lhs.kind === "expr" && lhs.items.length > 0) {
+      const h = lhs.items[0]!;
+      if (h.kind === "expr" && h.items.length > 0) {
+        const hh = h.items[0]!;
+        if (hh.kind === "sym") syms.add(hh.name);
+      }
+    }
+  exprRuleHeadCache.set(varRules, { len: varRules.length, syms });
+  return syms;
+}
+
+function isInertData(env: MinEnv, w: World, t: Atom, exprHeads: ReadonlySet<string>): boolean {
+  switch (t.kind) {
+    case "var":
+    case "gnd":
+      return true;
+    case "sym":
+      return !isDefinedHead(env, w, t.name);
+    case "expr": {
+      const items = t.items;
+      if (items.length === 0) return true;
+      const head = items[0]!;
+      if (head.kind === "sym") {
+        if (isDefinedHead(env, w, head.name)) return false;
+      } else if (head.kind === "expr" && head.items.length > 0) {
+        const exprHead = head.items[0]!;
+        if (exprHead.kind === "sym" && exprHeads.has(exprHead.name)) return false;
+      }
+      for (let i = 0; i < items.length; i++)
+        if (!isInertData(env, w, items[i]!, exprHeads)) return false;
+      return true;
+    }
+  }
+}
 
 const STANDARD_FOLDL_LHS = "(foldl-atom $list $init $a $b $op)";
 const STANDARD_FOLDL_RHS =
@@ -3468,6 +3511,17 @@ function* mettaEvalUncachedG(
       reduced = ruleRes.filter((p) => !isDataFinal(p));
     }
     if (reduced.length === 0) {
+      if (
+        CTOR_SC &&
+        !cooperativeSearch &&
+        w.ground &&
+        env.varRulesVar.length === 0 &&
+        st1.world.selfVarRules.length === 0
+      ) {
+        const exprHeads = exprRuleHeadSyms(env.varRules);
+        if (w.items.every((item) => isInertData(env, st1.world, item, exprHeads)))
+          return [[[w, bnd]], st1];
+      }
       const tupleWork: Item[] = [
         {
           stack: admitAtom(

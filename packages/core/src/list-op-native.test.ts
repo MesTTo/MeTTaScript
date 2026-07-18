@@ -65,6 +65,27 @@ const FOLD_CASES: readonly DiffCase[] = [
   },
 ];
 
+const INERT_CASES: readonly DiffCase[] = [
+  {
+    name: "size-atom over structured inert data",
+    src: `
+      !(size-atom (((Inheritance A B) (stv 0.5 0.9)) ((Inheritance B C) (stv 0.7 0.8)) ((Similarity C D) (stv 0.6 0.6))))
+    `,
+  },
+  {
+    name: "nested inert expression-headed data",
+    src: `
+      !(size-atom (((Sentence (Inheritance A B)) (Truth (stv 1.0 0.9))) ((Sentence (Evaluation P A)) (Truth (stv 0.5 0.7)))))
+    `,
+  },
+  {
+    name: "expression-headed partial application still reduces",
+    src: `
+      !(size-atom (((partial + (1)) 2) ((Inheritance A B) (stv 0.5 0.9))))
+    `,
+  },
+];
+
 const CHILD = String.raw`
   import { expr, variable } from "./packages/core/src/atom";
   import { setOutputSink, setRawSink, stdTable } from "./packages/core/src/builtins";
@@ -142,14 +163,14 @@ const CHILD = String.raw`
   }))));
 `;
 
-function runNative(enabled: boolean, cases: readonly DiffCase[] = FOLD_CASES): unknown {
+function runWithEnv(cases: readonly DiffCase[], env: Record<string, string>): unknown {
   const encodedCases = Buffer.from(JSON.stringify(cases), "utf8").toString("base64");
   const out = execFileSync("pnpm", ["exec", "tsx", "-e", CHILD], {
     cwd: process.cwd(),
     env: {
       ...process.env,
       METTA_NATIVE_DIFF_CASES: encodedCases,
-      METTA_NATIVE_FOLD: enabled ? "1" : "0",
+      ...env,
     },
     encoding: "utf8",
     maxBuffer: 1024 * 1024,
@@ -157,8 +178,22 @@ function runNative(enabled: boolean, cases: readonly DiffCase[] = FOLD_CASES): u
   return JSON.parse(out);
 }
 
+function runNativeFold(enabled: boolean): unknown {
+  return runWithEnv(FOLD_CASES, {
+    METTA_NATIVE_FOLD: enabled ? "1" : "0",
+  });
+}
+
 describe("native foldl-atom", () => {
   it("matches the prelude recursion up to variable renaming", () => {
-    expect(runNative(true)).toEqual(runNative(false));
+    expect(runNativeFold(true)).toEqual(runNativeFold(false));
+  }, 60_000);
+});
+
+describe("inert data tuple short-circuit", () => {
+  it("matches the interpret-tuple fallback up to variable renaming", () => {
+    expect(runWithEnv(INERT_CASES, { METTA_CTOR_SC: "1" })).toEqual(
+      runWithEnv(INERT_CASES, { METTA_CTOR_SC: "0" }),
+    );
   }, 60_000);
 });
