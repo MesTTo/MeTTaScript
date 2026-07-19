@@ -111,4 +111,18 @@ describe("evaluator (smoke)", () => {
 	      !(g a)`;
     expect(first(run(tooFew))).toEqual(["(Error (g a) IncorrectNumberOfArguments)"]);
   });
+
+  it("accepts a call matching any overload of a multiply-typed op", () => {
+    // A multiply-declared op accepts either arity; a count matching a non-last signature must not be flagged
+    // IncorrectNumberOfArguments. This is the mechanism behind the LSP false positive on `@return`'s valid
+    // one-string doc form, which core declares both `(-> String DocReturnInformal)` and `(-> DocType …)`.
+    const decls = `
+	      (: r (-> String Done))
+	      (: r (-> Number Number Done))`;
+    expect(first(run(`${decls}\n!(check-types (r "one"))`))).toEqual(["()"]);
+    expect(first(run(`${decls}\n!(check-types (r 1 2))`))).toEqual(["()"]);
+    expect(first(run(`${decls}\n!(check-types (r))`))).toEqual([
+      "(Error (r) IncorrectNumberOfArguments)",
+    ]);
+  });
 });

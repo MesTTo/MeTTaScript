@@ -1,3 +1,38 @@
+# MeTTa TS 1.3.1
+
+MeTTa TS 1.3.1 fixes the type checker's arity check for overloaded operations. An
+operation declared with several signatures is now accepted whenever a call matches
+any of them, not only the last-declared one.
+
+## Fix
+
+`check-types` reported `IncorrectNumberOfArguments` for a call whose argument count
+did not match an operation's last-declared signature, even when another overload
+accepted it. The documentation operation `@return`, for example, is declared both
+`(-> String DocReturnInformal)` and `(-> DocType DocDescription DocReturn)`, so the
+one-string form `(@return "…")` used throughout the standard library and the `das`
+module was wrongly flagged. The applicability check now consults every declared
+signature and, following Hyperon, accepts the call when any overload matches the
+argument count and its argument types. Genuinely wrong arities still error, and
+singly-typed operations are unchanged. This removes a false-positive warning the
+MeTTa LSP surfaced on valid documentation.
+
+## Verification
+
+- The conformance oracle passes all 23 corpus files, byte-identical to 1.3.0.
+- `pnpm test` passes, with a new regression test for overloaded-operation arity.
+- No performance change: the overload lookup runs only when the primary signature's
+  arity does not match, so the common path is untouched (measured within noise).
+
+## Packages
+
+All public packages use version `1.3.1`:
+
+```bash
+npm install @metta-ts/core@1.3.1
+npm install -g @metta-ts/node@1.3.1
+```
+
 # MeTTa TS 1.3.0
 
 MeTTa TS 1.3.0 moves the standard libraries and the debugger engine out of the

@@ -2190,7 +2190,32 @@ export function checkApplication(
   // precomputed `opSig` it then reuses for partial application, so the signature is looked up once per
   // application.
   if (opSig !== undefined && opSig.length >= 1 && args.length !== opSig.length - 1) {
-    const hasTupleType = (env.types.get(op) ?? []).some((t) => opOf(t) !== "->");
+    const allTypes = env.types.get(op) ?? [];
+    const hasTupleType = allTypes.some((t) => opOf(t) !== "->");
+    // `env.sigs` keeps only the last declaration, but a multiply-typed op has more. `@return`, for example,
+    // is declared both `(-> String DocReturnInformal)` and `(-> DocType DocDescription DocReturn)`, so the
+    // one-string doc form `(@return "…")` is valid even though it does not match the last signature. Hyperon
+    // `check_if_function_type_is_applicable` accepts a call when ANY function type applies, so gather the
+    // overloads that accept this argument count: if one type-checks, the call is applicable.
+    const arityMatches: Atom[][] = [];
+    for (const t of allTypes)
+      if (t.kind === "expr" && opOf(t) === "->" && args.length === t.items.length - 2)
+        arityMatches.push(t.items.slice(1));
+    if (arityMatches.length > 0) {
+      let firstMismatch: [number, Atom, Atom] | undefined;
+      for (const overloadSig of arityMatches) {
+        const overloadMm = typeMismatch(env, w, op, args, overloadSig);
+        if (overloadMm === undefined) return null;
+        firstMismatch ??= overloadMm;
+      }
+      if (hasTupleType || firstMismatch === undefined) return null;
+      const [pos, expected, actual] = firstMismatch;
+      return expr([
+        sym("Error"),
+        expr([sym(op), ...args]),
+        expr([sym("BadArgType"), gint(pos), expected, actual]),
+      ]);
+    }
     // PeTTa-style partial application is allowed for grounded ops. User-declared typed functions keep
     // Hyperon's strict arity errors.
     const underAppliedPartial =

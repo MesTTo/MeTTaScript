@@ -1,6 +1,6 @@
 {
   "name": "@metta-ts/edsl",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "author": "MesTTo",
   "license": "MIT",
   "description": "Ergonomic, typed TypeScript eDSL for MeTTa: term builders, tagged templates, host-interop builders, and auto-grounding of TypeScript values.",
