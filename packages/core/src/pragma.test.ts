@@ -3,11 +3,11 @@
 // SPDX-License-Identifier: MIT
 
 // `pragma!` writes interpreter settings in-language, faithful to Hyperon (stdlib/core.rs): the key must be a
-// symbol, `max-stack-depth` must be an unsigned integer (0 explicitly selects the unbounded policy), and the
-// op returns unit. `max-stack-depth` bounds nested user-equation calls before a branch degrades to a
-// StackOverflow atom. Tail transfers reuse their caller's level. The host can also seed the bound
-// via RunOptions. It is never a hard ceiling: the host's `fuel` argument is the resource ceiling and no
-// pragma can raise it, so an embedded program cannot widen its own limits.
+// symbol, resource bounds must be unsigned integers (0 explicitly selects the unbounded policy), and the op
+// returns unit. `max-stack-depth` bounds nested user-equation calls before a branch degrades to a
+// StackOverflow atom. Tail transfers reuse their caller's level. MeTTaScript's `mettascript-max-steps`
+// extension bounds the global counter delta of each top-level query and degrades broad search to a
+// ResourceLimit atom.
 import { describe, it, expect } from "vitest";
 import { runProgram } from "./runner";
 import { format } from "./parser";

@@ -1,3 +1,45 @@
+# MeTTaScript 2.0.3
+
+Adds an opt-in, deterministic work budget that bounds how much a single query is allowed to compute.
+Nothing changes for existing programs: the budget is off by default, matching Hyperon, so every terminating
+program produces the same output as 2.0.2, validated byte-identical on the conformance oracle and the full
+test suite. Upgrading from 2.0.2 is safe.
+
+## A deterministic work budget
+
+2.0.2 made recursion depth deterministic but noted a remaining gap: a depth bound bounds depth, not total
+work, so a broadly branching search such as the PLN proof search in `plntestdirect` could run a very long
+time. This release adds the tool to bound that, a per-query limit on the number of evaluation steps.
+
+Set it three equivalent ways:
+
+- In a program: `(pragma! mettascript-max-steps 1000000)`
+- As a run option: `maxSteps: 1000000`
+- On the CLI: `--max-steps 1000000`
+
+When a query exceeds the budget, evaluation stops and yields `(Error <call> ResourceLimit)`. The marker is
+an ordinary value: it is catchable with `case`, and it does not abort the whole query, so every result
+produced before the limit is kept. A budget of `0` means unlimited, which is the default.
+
+The cut is a function of the program and the budget alone. It counts logical evaluation steps, the same way
+on the interpreted and compiled paths, so a query is cut at exactly the same point regardless of the host's
+JavaScript stack size or which evaluator runs it. A test pins this: a broad search is cut at an identical
+step count and returns identical output across four V8 stack sizes and both evaluator paths.
+
+## Why the name
+
+The pragma is `mettascript-max-steps`, not `max-steps`, because it is a MeTTaScript extension with no
+Hyperon equivalent. That is deliberately distinct from `(pragma! max-stack-depth N)`, a real Hyperon pragma
+that MeTTaScript implements. Hyperon has no work or step limit of its own, so this budget is ours and named
+as such.
+
+## Off by default
+
+The budget is opt-in. With no budget set, evaluation is unbounded, exactly as before and exactly as Hyperon.
+A step budget is the right tool for bounding a search you know may not terminate, or for making a long
+computation deterministic under a resource cap. It is not imposed on programs that do a lot of legitimate
+work.
+
 # MeTTaScript 2.0.2
 
 A correctness release. Recursion depth is now deterministic: a program's output no longer depends on how

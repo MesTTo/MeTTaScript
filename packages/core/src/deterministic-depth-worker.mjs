@@ -6,8 +6,8 @@ import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { EvaluationDepth } from "./eval-depth.ts";
 import { initSt, mettaEval } from "./eval.ts";
-import { format } from "./parser.ts";
 import { compiledEnvWith, envWith, parseOne } from "./compile-test-utils.ts";
+import { formatWorkerPairs } from "./deterministic-worker-utils.ts";
 
 const input = JSON.parse(readFileSync(0, "utf8"));
 const effectRules = `
@@ -32,14 +32,7 @@ const output = [];
 for (const query of [`(${functor} ${input.start})`, "(match &self (seen $n) $n)"]) {
   const [pairs, next] = mettaEval(env, 10_000_000, state, [], parseOne(query), depth);
   state = next;
-  output.push(
-    pairs.map(([atom, bindings]) => ({
-      atom: format(atom),
-      bindings: bindings.map((binding) =>
-        binding.tag === "val" ? `${binding.x}=${format(binding.a)}` : `${binding.x}=${binding.y}`,
-      ),
-    })),
-  );
+  output.push(formatWorkerPairs(pairs));
 }
 
 process.stdout.write(

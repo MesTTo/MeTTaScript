@@ -11,8 +11,8 @@ import { readImports } from "./file-imports";
 
 export { readImports } from "./file-imports";
 
-/** Run a `.metta` file from disk, resolving `import!` relative to the file's directory. `fuel` is the step
- *  ceiling; `opts` carries interpreter settings such as the initial `maxStackDepth`. */
+/** Run a `.metta` file from disk, resolving `import!` relative to the file's directory. `fuel` is the
+ *  per-path recursion allowance; `opts` carries query settings such as `maxSteps` and `maxStackDepth`. */
 export function runFile(path: string, fuel?: number, opts?: RunOptions): QueryResult[] {
   const src = readFileSync(path, "utf8");
   const fileDir = dirname(resolve(path));

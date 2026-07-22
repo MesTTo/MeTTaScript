@@ -11,7 +11,7 @@
 import { parseArgs } from "node:util";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { format, setOutputSink, setRawSink } from "@mettascript/core";
+import { DEFAULT_FUEL, format, setOutputSink, setRawSink } from "@mettascript/core";
 import { assembleQuery, explainCall } from "@mettascript/debug";
 import { readImports } from "./file-imports";
 import { runSource } from "./source";
@@ -34,7 +34,7 @@ function loadProgram(source: string | undefined, file: string | undefined): Load
 function runQuery(
   loaded: Loaded,
   call: string,
-  fuel: number | undefined,
+  maxSteps: number | undefined,
 ): ReturnType<typeof explainCall> {
   // The point of `why`/`eval` is the trace summary and the result, not the program's own
   // `println!`/`trace!` chatter — discard it so `--llm` JSON and the human summary stay clean.
@@ -42,7 +42,12 @@ function runQuery(
   setRawSink(() => {});
   const program = assembleQuery(loaded.src, call);
   const imports = readImports(program, loaded.baseDir, dirname(loaded.baseDir));
-  return explainCall(runSource, loaded.src, call, { fuel, imports });
+  const fuel = maxSteps !== undefined && maxSteps > DEFAULT_FUEL ? maxSteps : undefined;
+  return explainCall(runSource, loaded.src, call, {
+    fuel,
+    imports,
+    runOptions: maxSteps === undefined ? undefined : { maxSteps },
+  });
 }
 
 function printHuman(obj: Record<string, unknown>): void {
@@ -102,14 +107,14 @@ export function runDebugMain(argv: string[], prog = "metta debug"): void {
     process.stdout.write(`${usage(prog)}\n`);
     return;
   }
-  const fuel = values["max-steps"] !== undefined ? Number(values["max-steps"]) : undefined;
+  const maxSteps = values["max-steps"] !== undefined ? Number(values["max-steps"]) : undefined;
   const loaded = loadProgram(values.source, values.file);
   const llm = values.llm === true;
 
   if (cmd === "why") {
     const call = positionals[1];
     if (call === undefined) throw new Error(`usage: ${prog} why '(<call>)'`);
-    const { result, summary: s } = runQuery(loaded, call, fuel);
+    const { result, summary: s } = runQuery(loaded, call, maxSteps);
     emit(llm, {
       call,
       result,
@@ -123,12 +128,18 @@ export function runDebugMain(argv: string[], prog = "metta debug"): void {
   if (cmd === "eval") {
     const expr = positionals[1];
     if (expr === undefined) throw new Error(`usage: ${prog} eval '(<expr>)'`);
-    emit(llm, { result: runQuery(loaded, expr, fuel).result });
+    emit(llm, { result: runQuery(loaded, expr, maxSteps).result });
     return;
   }
   if (cmd === "run") {
     const imports = readImports(loaded.src, loaded.baseDir, dirname(loaded.baseDir));
-    const results = runSource(loaded.src, fuel, imports).map((g) => g.results.map(format));
+    const fuel = maxSteps !== undefined && maxSteps > DEFAULT_FUEL ? maxSteps : undefined;
+    const results = runSource(
+      loaded.src,
+      fuel,
+      imports,
+      maxSteps === undefined ? undefined : { maxSteps },
+    ).map((g) => g.results.map(format));
     emit(llm, { results });
     return;
   }

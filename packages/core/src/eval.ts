@@ -79,6 +79,7 @@ import {
   EvaluationDepth,
   type EvaluationDepthSpan,
 } from "./eval-depth";
+import { DEFAULT_MAX_STEPS } from "./eval-steps";
 import { canCompactAtom, FlatAtomSpace } from "./flat-atomspace";
 import { instantiate } from "./instantiate";
 import { addVarBinding, matchAtoms, matchAtomsScoped, merge } from "./match";
@@ -1580,8 +1581,13 @@ export interface World {
   removedStaticVarRules: boolean;
   // Language-level user-equation call bound, set in-language by `(pragma! max-stack-depth N)` (Hyperon's
   // pragma). The default is 320; zero explicitly selects the implementation-defined unbounded policy. A
-  // positive bound cuts the branch before entering that level. The host's step budget remains independent.
+  // positive bound cuts the branch before entering that level. The work budget remains independent.
   maxStackDepth: number;
+  // Global inference-work bound for the active top-level query. The counter remains monotone across queries;
+  // `stepStart` records the current query's starting value so the limit applies to its delta without resetting
+  // the fresh-variable namespace.
+  maxSteps: number;
+  stepStart: number;
 }
 export interface St {
   counter: number;
@@ -1607,6 +1613,8 @@ export const initSt = (): St => ({
     removedStaticHeads: new Set(),
     removedStaticVarRules: false,
     maxStackDepth: DEFAULT_MAX_STACK_DEPTH,
+    maxSteps: DEFAULT_MAX_STEPS,
+    stepStart: 0,
   },
 });
 function cloneWorld(w: World): World {
@@ -1623,6 +1631,8 @@ function cloneWorld(w: World): World {
     removedStaticHeads: new Set(w.removedStaticHeads),
     removedStaticVarRules: w.removedStaticVarRules,
     maxStackDepth: w.maxStackDepth,
+    maxSteps: w.maxSteps,
+    stepStart: w.stepStart,
   };
 }
 
@@ -1695,6 +1705,8 @@ function mergeWorlds(base: World, branches: readonly World[]): World {
     removedStaticHeads: staticRemovals.removedStaticHeads,
     removedStaticVarRules: staticRemovals.removedStaticVarRules,
     maxStackDepth: base.maxStackDepth,
+    maxSteps: base.maxSteps,
+    stepStart: base.stepStart,
   };
   indexSelfRules(merged, selfExtra);
   return merged;
@@ -1908,6 +1920,11 @@ function queryOpWithCandidates(
   const out: Item[] = [];
   let counter = st.counter;
   for (const [lhs0, rhs0] of cands) {
+    const current = { counter, world: st.world };
+    if (stepLimitReached(current) && !containsResourceLimit(toEval)) {
+      out.push(finItem(prev, resourceLimitAtom(env, inst(env, b, toEval)), b));
+      return [out, current];
+    }
     // Skip a candidate that cannot possibly match before paying for its scope. The counter is still advanced
     // (one per candidate, as before) so the fresh-variable numbering, including any unbound fresh var that
     // survives into a result, is byte-identical to not skipping.
@@ -2068,19 +2085,62 @@ function exhaustedPair(env: MinEnv, it: Item): [Atom, Bindings] {
     : [makeExpr(env, [sym("Error"), inst(env, it.bnd, f.head.atom), sym("StackOverflow")]), it.bnd];
 }
 
-// A depth-bound cut result: `(Error <atom> StackOverflow)`, what exhaustedPair (and the fuel-exhausted path)
-// emit when a branch hits `max-stack-depth`. It is terminal: re-evaluating it starts a fresh interpreter
-// stack that is cut at depth 1 again under a tight bound, wrapping another `(Error (eval …) StackOverflow)`
-// each time, so the reducer must never feed it back through eval.
-function isStackOverflowAtom(a: Atom): boolean {
+function resourceLimitAtom(env: MinEnv, atom: Atom): Atom {
+  return makeExpr(env, [sym("Error"), atom, sym("ResourceLimit")]);
+}
+
+function isLimitAtom(a: Atom, reason: string): boolean {
   return (
     a.kind === "expr" &&
     a.items.length === 3 &&
     a.items[0]!.kind === "sym" &&
     (a.items[0] as { name: string }).name === "Error" &&
     a.items[2]!.kind === "sym" &&
-    (a.items[2] as { name: string }).name === "StackOverflow"
+    (a.items[2] as { name: string }).name === reason
   );
+}
+
+// A depth-bound cut result: `(Error <atom> StackOverflow)`, what exhaustedPair (and the fuel-exhausted path)
+// emit when a branch hits `max-stack-depth`. It is terminal: re-evaluating it starts a fresh interpreter
+// stack that is cut at depth 1 again under a tight bound, wrapping another `(Error (eval …) StackOverflow)`
+// each time, so the reducer must never feed it back through eval.
+function isStackOverflowAtom(a: Atom): boolean {
+  return isLimitAtom(a, "StackOverflow");
+}
+
+function isResourceLimitAtom(a: Atom): boolean {
+  return isLimitAtom(a, "ResourceLimit");
+}
+
+function isEvaluationLimitAtom(a: Atom): boolean {
+  return isStackOverflowAtom(a) || isResourceLimitAtom(a);
+}
+
+// ResourceLimit is an ordinary MeTTa value. Evaluation that carries the marker may spend the rule steps
+// needed to route it through `case`; once a handler replaces it with another value, the original query
+// budget applies again and no later search alternative can resume.
+function containsResourceLimit(a: Atom): boolean {
+  const pending = [a];
+  while (pending.length > 0) {
+    const next = pending.pop()!;
+    if (isResourceLimitAtom(next)) return true;
+    if (next.kind === "expr") for (const item of next.items) pending.push(item);
+  }
+  return false;
+}
+
+function stepLimitReached(st: St): boolean {
+  const { maxSteps, stepStart } = st.world;
+  return maxSteps > 0 && st.counter - stepStart >= maxSteps;
+}
+
+function counterExceedsStepLimit(st: St, endCounter: number): boolean {
+  const { maxSteps, stepStart } = st.world;
+  return maxSteps > 0 && endCounter - stepStart > maxSteps;
+}
+
+function compiledRunExceedsStepLimit(st: St, result: CompiledRunResult): boolean {
+  return counterExceedsStepLimit(st, result.state?.counter ?? st.counter + result.counterDelta);
 }
 
 // Resolve an atom to its transitive value under `b`, following variable→value chains but stopping at
@@ -2751,7 +2811,7 @@ function* evalGroundedCompiledExprG(
   const args = atom.items.slice(1);
   if (checkApplication(env, st.world, op, args, env.sigs.get(op)) !== null) return undefined;
   const cr = runCompiled(env, op, args, st, COMPILED_IMPURE_OPS, undefined, fuel, depth);
-  if (cr === undefined) return undefined;
+  if (cr === undefined || compiledRunExceedsStepLimit(st, cr)) return undefined;
   const sig = env.sigs.get(op);
   const opReturnsAtom =
     sig !== undefined && sig.length > 0 && atomEq(sig[sig.length - 1]!, sym("Atom"));
@@ -3273,6 +3333,52 @@ function matchConj(
     cur = next;
   }
   return [cur, { counter, world: st.world }];
+}
+
+function matchConjLimited(
+  env: MinEnv,
+  getCandidates: (pInst: Atom) => CandidateSource,
+  patterns: readonly Atom[],
+  st: St,
+  sols: Bindings[],
+): { readonly sols: Bindings[]; readonly endState: St; readonly resourceLimited: boolean } {
+  const limit = st.world.stepStart + st.world.maxSteps;
+  let cur = sols;
+  let counter = st.counter;
+  for (let patternIndex = 0; patternIndex < patterns.length; patternIndex++) {
+    const p = patterns[patternIndex]!;
+    const next: Bindings[] = [];
+    for (const b of cur) {
+      const pInst = inst(env, b, p);
+      const source = getCandidates(pInst);
+      for (const atom of source) {
+        if (counter >= limit)
+          return {
+            sols: patternIndex === patterns.length - 1 ? next : [],
+            endState: { counter, world: st.world },
+            resourceLimited: true,
+          };
+        const atom2 = freshenRule(counter, atom, atom)[0];
+        counter += 1;
+        for (const mb of matchAtoms(pInst, atom2))
+          for (const m of merge(b, mb)) if (!hasLoop(m)) next.push(m);
+      }
+      const padded = counter + candidateCounterPadding(source);
+      if (padded > limit)
+        return {
+          sols: patternIndex === patterns.length - 1 ? next : [],
+          endState: { counter: limit, world: st.world },
+          resourceLimited: true,
+        };
+      counter = padded;
+    }
+    cur = next;
+  }
+  return {
+    sols: cur,
+    endState: { counter, world: st.world },
+    resourceLimited: false,
+  };
 }
 
 // Conjunctive `match` via a worst-case-optimal join. A conjunct whose every candidate match binds all
@@ -3852,7 +3958,7 @@ function* interpretStack1G(
       pendingAsyncOp = "par";
       const results = (yield Promise.all(
         branches.map((br, index) =>
-          mettaEvalAsync(env, fuel, st, it.bnd, br, undefined, branchDepths[index]),
+          mettaEvalAsyncInternal(env, fuel, st, it.bnd, br, undefined, branchDepths[index], false),
         ),
       )) as EvalRes[];
       for (const branchDepth of branchDepths) depth.absorb(branchDepth);
@@ -3879,7 +3985,16 @@ function* interpretStack1G(
           const selected = await Promise.any(
             branches.map(async (br) => {
               const branchDepth = depth.fork();
-              const r = await mettaEvalAsync(env, fuel, st, it.bnd, br, ac.signal, branchDepth);
+              const r = await mettaEvalAsyncInternal(
+                env,
+                fuel,
+                st,
+                it.bnd,
+                br,
+                ac.signal,
+                branchDepth,
+                false,
+              );
               if (r[0].length === 0) throw new Error("empty branch");
               return { result: r, branchDepth };
             }),
@@ -3913,7 +4028,7 @@ function* interpretStack1G(
         return [first.map((a) => finItem(prev, a, it.bnd)), st];
       }
       const namedMatch = tryFastNamedOnceMatch(env, st, it2[1]!, it.bnd);
-      if (namedMatch !== undefined) {
+      if (namedMatch !== undefined && !counterExceedsStepLimit(st, namedMatch.state.counter)) {
         const first =
           namedMatch.value === undefined ? [] : [finItem(prev, namedMatch.value, it.bnd)];
         return [first, namedMatch.state];
@@ -3937,7 +4052,7 @@ function* interpretStack1G(
         env.mutexes.set(name, chained);
         await prior;
         try {
-          return await mettaEvalAsync(env, fuel, st, it.bnd, body, undefined, depth);
+          return await mettaEvalAsyncInternal(env, fuel, st, it.bnd, body, undefined, depth, false);
         } finally {
           release();
           // Drop the entry once this is the tail of the chain, so the map does not grow unbounded.
@@ -4031,19 +4146,21 @@ function* interpretStack1G(
     }
     case "pragma!": {
       // `(pragma! <key> <value>)` writes an interpreter setting (Hyperon's pragma!) and returns unit.
-      // `max-stack-depth` is the one setting that changes interpretation: it must be an unsigned integer
-      // (negative or non-integer -> the same `UnsignedIntegerIsExpected` error Hyperon emits), and 0 means
-      // unlimited. Any other key is accepted and ignored, matching Hyperon storing arbitrary keys. A pragma
-      // only ever tightens the in-language depth bound; it cannot touch the host's step budget.
+      // Resource settings must be unsigned integers; zero selects their unlimited policy. Other keys are
+      // accepted and ignored, matching Hyperon storing arbitrary settings.
       if (it2.length !== 3) break;
       const key = inst(env, it.bnd, it2[1]!);
-      if (key.kind === "sym" && key.name === "max-stack-depth") {
+      if (
+        key.kind === "sym" &&
+        (key.name === "max-stack-depth" || key.name === "mettascript-max-steps")
+      ) {
         const val = inst(env, it.bnd, it2[2]!);
         const n = val.kind === "gnd" && val.value.g === "int" ? val.value.n : undefined;
         if (n === undefined || n < 0 || (typeof n === "number" && !Number.isInteger(n)))
           return [[finItem(prev, errAtom(a, "UnsignedIntegerIsExpected"), it.bnd)], st];
         const w = cloneWorld(st.world);
-        w.maxStackDepth = Number(n);
+        if (key.name === "max-stack-depth") w.maxStackDepth = Number(n);
+        else w.maxSteps = Number(n);
         return [[finItem(prev, emptyExpr, it.bnd)], { counter: st.counter, world: w }];
       }
       return [[finItem(prev, emptyExpr, it.bnd)], st];
@@ -4190,6 +4307,8 @@ function appendSpace(env: MinEnv, w0: World, name: string, atoms: Atom[]): World
       removedStaticHeads: w0.removedStaticHeads,
       removedStaticVarRules: w0.removedStaticVarRules,
       maxStackDepth: w0.maxStackDepth,
+      maxSteps: w0.maxSteps,
+      stepStart: w0.stepStart,
     };
   }
   const spaces = new Map(w0.spaces);
@@ -4308,7 +4427,15 @@ function compiledMatchSolutions(
   const { getCandidates, patterns } = matchSetup(env, st, space, pattern, emptyBindings);
   if (patterns.length !== 1) return undefined;
   const pat = patterns[0]!;
-  const { endState } = matchSingleEndState(env, getCandidates, pat, template, st, emptyBindings);
+  const { endState, resourceLimited } = matchSingleEndState(
+    env,
+    getCandidates,
+    pat,
+    template,
+    st,
+    emptyBindings,
+  );
+  if (resourceLimited) return undefined;
   const pairs: Array<readonly [Atom, Bindings]> = [];
   for (const m of matchSingleSolutions(env, getCandidates, pat, st, emptyBindings))
     pairs.push([inst(env, m, template), m]);
@@ -5117,6 +5244,7 @@ function matchCountTrail(
 interface MatchPlan {
   readonly endState: St;
   readonly valuesAreNormal: boolean;
+  readonly resourceLimited: boolean;
   foldItems(prev: Stack): Iterable<Item>;
   foldValues(): Iterable<Atom>;
 }
@@ -5388,6 +5516,7 @@ function tryRangeScan(
     endCounter =
       st.counter + column.totalCandidates + rangeIfCounter(column, pat.arity, templ.conditions);
   }
+  if (counterExceedsStepLimit(st, endCounter)) return undefined;
   const endState = { counter: endCounter, world: st.world };
   const bindingsFor = (atom: ExprAtom): Bindings =>
     fromRelations(pat.varNames.map((name, index) => makeValRel(name, atom.items[index + 1]!)));
@@ -5397,6 +5526,7 @@ function tryRangeScan(
   return {
     endState,
     valuesAreNormal: true,
+    resourceLimited: false,
     *foldItems(prev: Stack): Iterable<Item> {
       for (const m of solutions())
         yield finItem(prev, markIfNormal(env, inst(env, m, templ.result), true), m);
@@ -5413,13 +5543,17 @@ function* matchSingleSolutions(
   pattern: Atom,
   st: St,
   b0: Bindings,
+  candidateLimit = Number.POSITIVE_INFINITY,
 ): Iterable<Bindings> {
   let counter = st.counter;
+  let consumed = 0;
   const pInst = inst(env, b0, pattern);
   const source = getCandidates(pInst);
   for (const atom of source) {
+    if (consumed >= candidateLimit) break;
     const fresh = freshenRule(counter, atom, atom)[0];
     counter += 1;
+    consumed += 1;
     for (const mb of matchAtoms(pInst, fresh))
       for (const m of merge(b0, mb)) if (!hasLoop(m)) yield m;
   }
@@ -5433,18 +5567,40 @@ function matchSingleEndState(
   template: Atom,
   st: St,
   b0: Bindings,
-): { endState: St; valuesAreNormal: boolean } {
+): {
+  endState: St;
+  valuesAreNormal: boolean;
+  candidateCount: number;
+  resourceLimited: boolean;
+} {
   const pInst = inst(env, b0, pattern);
   let valuesAreNormal =
     isNormalForm(env, st.world, pInst) && isNormalFormAssumingVars(env, st.world, template);
   let counter = st.counter;
+  let candidateCount = 0;
+  let resourceLimited = false;
+  const limit = st.world.maxSteps > 0 ? st.world.stepStart + st.world.maxSteps : undefined;
   const source = getCandidates(pInst);
   for (const atom of source) {
+    if (limit !== undefined && counter >= limit) {
+      resourceLimited = true;
+      break;
+    }
     counter += 1;
+    candidateCount += 1;
     if (valuesAreNormal && !isNormalForm(env, st.world, atom)) valuesAreNormal = false;
   }
-  counter += candidateCounterPadding(source);
-  return { endState: { counter, world: st.world }, valuesAreNormal };
+  const paddedCounter = counter + candidateCounterPadding(source);
+  if (limit !== undefined && paddedCounter > limit) {
+    counter = limit;
+    resourceLimited = true;
+  } else counter = paddedCounter;
+  return {
+    endState: { counter, world: st.world },
+    valuesAreNormal,
+    candidateCount,
+    resourceLimited,
+  };
 }
 
 function matchPlan(
@@ -5463,7 +5619,7 @@ function matchPlan(
     // matched bucket a single time per match instead of once per pass.
     const source = getCandidates(inst(env, b, pat));
     const sharedSource = (): CandidateSource => source;
-    const { endState, valuesAreNormal } = matchSingleEndState(
+    const { endState, valuesAreNormal, candidateCount, resourceLimited } = matchSingleEndState(
       env,
       sharedSource,
       pat,
@@ -5471,10 +5627,12 @@ function matchPlan(
       st,
       b,
     );
-    const solutions = (): Iterable<Bindings> => matchSingleSolutions(env, sharedSource, pat, st, b);
+    const solutions = (): Iterable<Bindings> =>
+      matchSingleSolutions(env, sharedSource, pat, st, b, candidateCount);
     return {
       endState,
       valuesAreNormal,
+      resourceLimited,
       *foldItems(prev: Stack): Iterable<Item> {
         for (const m of solutions())
           yield finItem(prev, markIfNormal(env, inst(env, m, template), valuesAreNormal), m);
@@ -5485,15 +5643,23 @@ function matchPlan(
       },
     };
   }
-  const [sols, endState] =
+  let [sols, endState] =
     patterns.length >= 2
       ? env.useConjNested === true && anchoredAcyclicSourceOrder(env, st.world, patterns, b)
         ? matchConj(env, getCandidates, patterns, st, [b])
         : matchConjJoin(env, getCandidates, patterns, st, b)
       : matchConj(env, getCandidates, patterns, st, [b]);
+  let resourceLimited = counterExceedsStepLimit(st, endState.counter);
+  if (resourceLimited) {
+    const limited = matchConjLimited(env, getCandidates, patterns, st, [b]);
+    sols = limited.sols;
+    endState = limited.endState;
+    resourceLimited = limited.resourceLimited;
+  }
   return {
     endState,
     valuesAreNormal: false,
+    resourceLimited,
     *foldItems(prev: Stack): Iterable<Item> {
       for (const m of sols) if (!hasLoop(m)) yield finItem(prev, inst(env, m, template), m);
     },
@@ -5519,6 +5685,10 @@ function matchOp(
       : matchPlan(env, st, space, pattern, template, b);
   const out: Item[] = [];
   for (const item of plan.foldItems(prev)) out.push(item);
+  if (plan.resourceLimited) {
+    const call = inst(env, b, makeExpr(env, [sym("match"), space, pattern, template]));
+    out.push(finItem(prev, resourceLimitAtom(env, call), b));
+  }
   return [out, plan.endState];
 }
 
@@ -5538,8 +5708,12 @@ function matchItemSource(
       : matchPlan(env, st, space, pattern, template, b);
   return {
     endState: plan.endState,
-    foldItems(): Iterable<Item> {
-      return plan.foldItems(prev);
+    *foldItems(): Iterable<Item> {
+      yield* plan.foldItems(prev);
+      if (plan.resourceLimited) {
+        const call = inst(env, b, makeExpr(env, [sym("match"), space, pattern, template]));
+        yield finItem(prev, resourceLimitAtom(env, call), b);
+      }
     },
   };
 }
@@ -6028,6 +6202,7 @@ function prepareCollapseRoute(
     st.world.selfVarRules.length !== 0
   )
     return undefined;
+  if (counterExceedsStepLimit(st, st.counter + 1)) return undefined;
   if (isDefinedHead(env, st.world, DONE_UNIT.name)) return undefined;
   const op = call.items[0]!.name;
   if (
@@ -6176,7 +6351,7 @@ function* countTailMatchG(
   trampoline: EvalTrampoline | undefined,
 ): Gen<{ count: number; state: St }> {
   const agg = countAggregateEnabled() ? tryCountAggregate(env, st, bnd, match) : undefined;
-  if (agg !== undefined)
+  if (agg !== undefined && !counterExceedsStepLimit(st, st.counter + agg.iterated))
     return {
       count: agg.count,
       state: { counter: st.counter + agg.iterated, world: st.world },
@@ -6193,7 +6368,7 @@ function* countTailMatchG(
         : env.useTrail === true
           ? matchCountTrail(getCandidates, patterns, st, bnd)
           : undefined;
-    if (tc !== undefined)
+    if (tc !== undefined && !counterExceedsStepLimit(st, tc.counter))
       return {
         count: tc.count,
         state: { counter: tc.counter, world: st.world },
@@ -6263,6 +6438,7 @@ function* tryCollapseRouteG(
       for (let i = 0; i < buildCount; i++) {
         const cr = runCompiledEffectCount(env, call.op, call.args, cur, COMPILED_IMPURE_OPS, depth);
         if (cr === undefined) return undefined; // did not compile this run; fall back
+        if (counterExceedsStepLimit(cur, cr.state.counter)) return undefined;
         if (cr.count > 1) return undefined; // multi-branch effects need a tail count at each branch state
         nextBuildCount += cr.count;
         cur = cr.state;
@@ -6283,9 +6459,11 @@ function* tryCollapseRouteG(
     trampoline,
   );
   const tailDelta = tail.state.counter - tailStart;
+  const endCounter = tailStart + tailDelta * buildCount;
+  if (counterExceedsStepLimit(stAfterBuild, endCounter)) return undefined;
   return {
     count: tail.count * buildCount,
-    state: { counter: tailStart + tailDelta * buildCount, world: tail.state.world },
+    state: { counter: endCounter, world: tail.state.world },
   };
 }
 
@@ -6515,6 +6693,7 @@ function streamCaseSource(
   const casePattern = inst(env, bnd, onlyCase.items[0]!);
   const caseTemplate = inst(env, bnd, onlyCase.items[1]!);
   const caseRuleEnd = { counter: st.counter + 1, world: st.world };
+  if (counterExceedsStepLimit(st, caseRuleEnd.counter)) return undefined;
   const plan = matchPlan(
     env,
     caseRuleEnd,
@@ -6523,7 +6702,7 @@ function streamCaseSource(
     matchExpr.items[3]!,
     bnd,
   );
-  if (!plan.valuesAreNormal) return undefined;
+  if (!plan.valuesAreNormal || plan.resourceLimited) return undefined;
   let valueCount = 0;
   const valueIter = plan.foldValues()[Symbol.iterator]();
   for (let next = valueIter.next(); !next.done; next = valueIter.next()) valueCount += 1;
@@ -6532,6 +6711,7 @@ function streamCaseSource(
     counter: plan.endState.counter + 2 * switchCount,
     world: plan.endState.world,
   };
+  if (counterExceedsStepLimit(st, endState.counter)) return undefined;
   const bodyFor = (value: Atom): Atom => {
     for (const mb of matchAtoms(value, casePattern))
       for (const m of merge(bnd, mb)) if (!hasLoop(m)) return inst(env, m, caseTemplate);
@@ -6584,8 +6764,8 @@ function* reduceRulePairsG(
       out.push([wApp, partB]);
     } else if (opReturnsAtom && !isEmbeddedOp(p[0])) {
       out.push([p[0], pb]);
-    } else if (isStackOverflowAtom(p[0])) {
-      // Terminal depth-cut: keep it as the result; re-evaluating it would re-cut and grow.
+    } else if (isEvaluationLimitAtom(p[0])) {
+      // A resource cut is terminal at this reduction level. `case` can still receive and match it.
       out.push([p[0], restrictBnd(env, queryVars, pb)]);
     } else {
       const [more, st4] = yield* mettaEvalG(env, fuel - 1, cur, pb, p[0], depth, trampoline, true);
@@ -6616,7 +6796,7 @@ function* reduceCompiledResultG(
     (allowFinalShortcut && isCompiledFinalResult(env, st.world, atom))
   )
     return [[[atom, bnd]], st];
-  if (isStackOverflowAtom(atom)) return [[[atom, bnd]], st];
+  if (isEvaluationLimitAtom(atom)) return [[[atom, bnd]], st];
   const [pairs, st2] = yield* mettaEvalG(env, fuel - 1, st, bnd, atom, depth, trampoline, true);
   const out: Array<[Atom, Bindings]> = [];
   let cur = st2;
@@ -6826,7 +7006,7 @@ function* mettaEvalBodyG(
       if (
         pendingKeys.length > 0 &&
         env.tableSpace !== undefined &&
-        finalRes.every((p) => p[0].ground && !isStackOverflowAtom(p[0]))
+        finalRes.every((p) => p[0].ground && !isEvaluationLimitAtom(p[0]))
       ) {
         const prod = finalRes.map((p) => p[0]);
         for (const k of pendingKeys) rememberGroundTable(env, k, prod, depth.span(depthSpan));
@@ -6937,7 +7117,7 @@ function* mettaEvalBodyG(
         const match = matchInsideOnce(args[0]!);
         if (match !== undefined) {
           const namedMatch = tryFastNamedOnceMatch(env, lst, match, lbnd);
-          if (namedMatch !== undefined) {
+          if (namedMatch !== undefined && !counterExceedsStepLimit(lst, namedMatch.state.counter)) {
             const items = namedMatch.value === undefined ? [] : [namedMatch.value];
             return flushReturn([[expr([sym(","), ...items]), lbnd]], namedMatch.state);
           }
@@ -6945,12 +7125,12 @@ function* mettaEvalBodyG(
       }
       if (op === "if" && args.length === 3) {
         const added = tryFastNamedAddIfAbsent(env, lst, lw, lbnd);
-        if (added !== undefined)
+        if (added !== undefined && !counterExceedsStepLimit(lst, added.state.counter))
           return flushReturn(added.added ? [[emptyExpr, lbnd]] : [], added.state);
       }
       if (op === "add-unique-or-fail" && args.length === 2) {
         const added = tryFastAddUniqueOrFailCall(env, lst, lw, lbnd);
-        if (added !== undefined)
+        if (added !== undefined && !counterExceedsStepLimit(lst, added.state.counter))
           return flushReturn(added.added ? [[emptyExpr, lbnd]] : [], added.state);
       }
       // Streaming `(length (collapse Z))` / `(size-atom (collapse Z))`: count Z's results with a folding sink
@@ -7124,7 +7304,7 @@ function* mettaEvalBodyG(
             depth,
             trampoline,
           );
-          if (folded !== undefined) {
+          if (folded !== undefined && !counterExceedsStepLimit(cur2, folded.state.counter)) {
             if (env.trace) env.trace({ kind: "grounded", op });
             cur2 = folded.state;
             for (const [value, rb] of folded.pairs)
@@ -7142,7 +7322,7 @@ function* mettaEvalBodyG(
             depth,
             trampoline,
           );
-          if (mapped !== undefined) {
+          if (mapped !== undefined && !counterExceedsStepLimit(cur2, mapped.state.counter)) {
             if (env.trace) env.trace({ kind: "grounded", op });
             cur2 = mapped.state;
             for (const [value, rb] of mapped.pairs)
@@ -7160,7 +7340,7 @@ function* mettaEvalBodyG(
             depth,
             trampoline,
           );
-          if (filtered !== undefined) {
+          if (filtered !== undefined && !counterExceedsStepLimit(cur2, filtered.state.counter)) {
             if (env.trace) env.trace({ kind: "grounded", op });
             cur2 = filtered.state;
             for (const [value, rb] of filtered.pairs)
@@ -7182,7 +7362,7 @@ function* mettaEvalBodyG(
             depth,
             trampoline,
           );
-          if (picked !== undefined) {
+          if (picked !== undefined && !counterExceedsStepLimit(cur2, picked.state.counter)) {
             if (env.trace) env.trace({ kind: "grounded", op });
             cur2 = picked.state;
             for (const [value, rb] of picked.pairs)
@@ -7196,7 +7376,7 @@ function* mettaEvalBodyG(
           !cur2.world.selfRules.has("top-k-by-atom")
         ) {
           const topk = yield* evalTopKByAtomG(env, fuel, cur2, partAtoms, partB, depth, trampoline);
-          if (topk !== undefined) {
+          if (topk !== undefined && !counterExceedsStepLimit(cur2, topk.state.counter)) {
             if (env.trace) env.trace({ kind: "grounded", op });
             cur2 = topk.state;
             for (const [value, rb] of topk.pairs)
@@ -7215,14 +7395,17 @@ function* mettaEvalBodyG(
           }
         }
         const fastTilePuzzle = tryFastTilePuzzleBfsAll(env, cur2, wApp);
-        if (fastTilePuzzle !== undefined) {
+        if (
+          fastTilePuzzle !== undefined &&
+          !counterExceedsStepLimit(cur2, fastTilePuzzle.state.counter)
+        ) {
           cur2 = fastTilePuzzle.state;
           for (const [value, rb] of fastTilePuzzle.results)
             out.push([value, mergeRestrict(env, queryVars, partB, rb)]);
           continue;
         }
         const fastQueue = tryFastQueueCall(env, cur2, wApp);
-        if (fastQueue !== undefined) {
+        if (fastQueue !== undefined && !counterExceedsStepLimit(cur2, fastQueue.state.counter)) {
           cur2 = fastQueue.state;
           for (const [value, rb] of fastQueue.results)
             out.push([value, mergeRestrict(env, queryVars, partB, rb)]);
@@ -7260,7 +7443,7 @@ function* mettaEvalBodyG(
           !staticRulesChangedFor(cur2.world, op) &&
           cur2.world.selfVarRules.length === 0
         ) {
-          const cr = runCompiled(
+          const compiled = runCompiled(
             env,
             op,
             partAtoms,
@@ -7270,6 +7453,15 @@ function* mettaEvalBodyG(
             fuel,
             depth,
           );
+          // A compiled run reports the same logical counter advance as the interpreter. If the atomic
+          // compiled attempt would cross the remaining query budget, discard its persistent result and
+          // replay this call through the interpreted candidate loop, which cuts at the exact candidate.
+          // Compiled effects return a new World rather than mutating the input state, so the replay does
+          // not duplicate them.
+          const cr =
+            compiled !== undefined && !compiledRunExceedsStepLimit(cur2, compiled)
+              ? compiled
+              : undefined;
           if (cr !== undefined) {
             const singleTailResult =
               partials.length === 1 &&
@@ -7288,7 +7480,7 @@ function* mettaEvalBodyG(
                 nextAtom.items.length > 0 &&
                 nextAtom.items[0]!.kind === "sym" &&
                 nextAtom.ground &&
-                !isStackOverflowAtom(nextAtom) &&
+                !isEvaluationLimitAtom(nextAtom) &&
                 !(opReturnsAtom && !isEmbeddedOp(nextAtom)) &&
                 !atomEq(nextAtom, wApp)
               ) {
@@ -7472,7 +7664,7 @@ function* mettaEvalBodyG(
             env.tableSpace!.observeActiveDepth(active, depth.span(depthSpan));
             if (!active.cyclic) {
               for (const p of firstPass) out.push(p);
-              if (!firstCanonical.some(isStackOverflowAtom))
+              if (!firstCanonical.some(isEvaluationLimitAtom))
                 rememberModedTable(
                   env,
                   modedKey!,
@@ -7503,7 +7695,7 @@ function* mettaEvalBodyG(
               if (active.overBudget) {
                 out.push([makeExpr(env, [sym("Error"), wApp, sym("TableResourceLimit")]), partB]);
               } else if (out.length === before) {
-                if (!active.results.some(isStackOverflowAtom))
+                if (!active.results.some(isEvaluationLimitAtom))
                   rememberModedTable(
                     env,
                     modedKey!,
@@ -7545,10 +7737,9 @@ function* mettaEvalBodyG(
             // normal form, so flushReturn caches it (and every key above it) once the chain terminates.
             if (partials.length === 1 && queryVars.length === 0 && pairs.length === 1) {
               const p = pairs[0]!;
-              // A StackOverflow cut is terminal, never a tail-call continuation. Re-feeding it into the
-              // trampoline re-cuts at depth 1 and grows an (Error (eval …) StackOverflow) each iteration,
-              // looping forever (the trampoline does not decrement fuel).
-              if (isStackOverflowAtom(p[0]))
+              // A resource cut is terminal, never a tail-call continuation. Re-feeding it into the
+              // trampoline would repeatedly cut without consuming fuel.
+              if (isEvaluationLimitAtom(p[0]))
                 return flushReturn([[p[0], restrictBnd(env, queryVars, p[1])]], cur2);
               const isData = atomEq(p[0], notReducibleA) || atomEq(p[0], wApp);
               if (!isData && !(opReturnsAtom && !isEmbeddedOp(p[0])) && opOf(p[0]) !== undefined) {
@@ -7584,7 +7775,7 @@ function* mettaEvalBodyG(
             for (const r of producedPairs) out.push(r);
             if (eligible) {
               const produced = producedPairs.map((p) => p[0]);
-              if (key !== undefined && produced.every((a) => a.ground && !isStackOverflowAtom(a)))
+              if (key !== undefined && produced.every((a) => a.ground && !isEvaluationLimitAtom(a)))
                 rememberGroundTable(env, key, produced, depth.span(depthSpan));
             }
           }
@@ -7824,14 +8015,14 @@ function stackOverflowResult(
   return [[[makeExpr(env, [sym("Error"), inst(env, bnd, a), sym("StackOverflow")]), bnd]], st];
 }
 
-function restrictPublicStackOverflowBindings(
+function restrictPublicLimitBindings(
   env: MinEnv,
   query: Atom,
   result: [Array<[Atom, Bindings]>, St],
 ): [Array<[Atom, Bindings]>, St] {
   const vars = atomVars(query);
   const pairs = result[0].map((pair): [Atom, Bindings] =>
-    isStackOverflowAtom(pair[0]) ? [pair[0], restrictBnd(env, vars, pair[1])] : pair,
+    isEvaluationLimitAtom(pair[0]) ? [pair[0], restrictBnd(env, vars, pair[1])] : pair,
   );
   return [pairs, result[1]];
 }
@@ -7897,6 +8088,7 @@ function tryDirectTopMatch(
   const plan =
     tryRangeScan(env, st, space, w.items[2]!, w.items[3]!, bnd) ??
     matchPlan(env, st, space, w.items[2]!, w.items[3]!, bnd);
+  if (plan.resourceLimited) return undefined;
   // Only fully-normal values make the general path's per-result reduce probe a pure zero-counter
   // short-circuit (the plan's own evaluated-mark guarantees the ground ones hit it).
   if (!plan.valuesAreNormal) return undefined;
@@ -7922,11 +8114,12 @@ function mettaEval(
   a: Atom,
   depth: EvaluationDepth = new EvaluationDepth(),
 ): [Array<[Atom, Bindings]>, St] {
+  st.world.stepStart = st.counter;
   ensureCompiled(env, a);
   try {
     const direct = tryDirectTopMatch(env, fuel, st, bnd, a);
     if (direct !== undefined) return direct;
-    return restrictPublicStackOverflowBindings(
+    return restrictPublicLimitBindings(
       env,
       a,
       runGenSync(mettaEvalG(env, fuel, st, bnd, a, depth, undefined)),
@@ -7939,6 +8132,29 @@ function mettaEval(
 
 /** Async type-directed evaluation: awaits async grounded operations (`env.agt`). An optional `signal`
  *  makes it cancellable (used by `race` to stop losing branches). */
+function mettaEvalAsyncInternal(
+  env: MinEnv,
+  fuel: number,
+  st: St,
+  bnd: Bindings,
+  a: Atom,
+  signal?: AbortSignal,
+  depth: EvaluationDepth = new EvaluationDepth(),
+  beginQuery = true,
+): Promise<[Array<[Atom, Bindings]>, St]> {
+  if (beginQuery) st.world.stepStart = st.counter;
+  ensureCompiled(env, a);
+  const direct = tryDirectTopMatch(env, fuel, st, bnd, a);
+  if (direct !== undefined) return Promise.resolve(direct);
+  return runGenAsync(mettaEvalG(env, fuel, st, bnd, a, depth, undefined), signal)
+    .then((result) => restrictPublicLimitBindings(env, a, result))
+    .catch((e: unknown) => {
+      if (isNativeStackOverflow(e)) return stackOverflowResult(env, st, bnd, a);
+      throw e;
+    });
+}
+
+/** Async type-directed evaluation: awaits async grounded operations (`env.agt`). */
 export function mettaEvalAsync(
   env: MinEnv,
   fuel: number,
@@ -7948,15 +8164,7 @@ export function mettaEvalAsync(
   signal?: AbortSignal,
   depth: EvaluationDepth = new EvaluationDepth(),
 ): Promise<[Array<[Atom, Bindings]>, St]> {
-  ensureCompiled(env, a);
-  const direct = tryDirectTopMatch(env, fuel, st, bnd, a);
-  if (direct !== undefined) return Promise.resolve(direct);
-  return runGenAsync(mettaEvalG(env, fuel, st, bnd, a, depth, undefined), signal)
-    .then((result) => restrictPublicStackOverflowBindings(env, a, result))
-    .catch((e: unknown) => {
-      if (isNativeStackOverflow(e)) return stackOverflowResult(env, st, bnd, a);
-      throw e;
-    });
+  return mettaEvalAsyncInternal(env, fuel, st, bnd, a, signal, depth);
 }
 
 /** Evaluate `atom` (i.e. interpret `(eval atom)`) under `env`, returning the result atoms. */

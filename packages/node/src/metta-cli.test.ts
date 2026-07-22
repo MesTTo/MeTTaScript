@@ -38,6 +38,16 @@ describe("unified metta CLI", () => {
     expect(run(METTA, ["run", file])).toBe(run(METTA_TS, [file]));
   });
 
+  it("--max-steps sets the per-query inference budget", () => {
+    const file = mettaFixture(
+      "metta-work-budget-",
+      `(= (choose) first)\n(= (choose) second)\n!(choose)\n`,
+    );
+    expect(run(METTA, ["run", "--max-steps=1", file])).toContain(
+      "[first, (Error (choose) ResourceLimit)]",
+    );
+  });
+
   it("check passes a clean program and fails an arity error", () => {
     expect(status(METTA, ["check", mettaFixture("metta-ok-", "!(car-atom (a b))\n")])).toBe(0);
     expect(status(METTA, ["check", mettaFixture("metta-bad-", "!(car-atom 1 2)\n")])).toBe(1);

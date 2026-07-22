@@ -197,8 +197,11 @@ export interface RunOptions {
   };
   // Initial language-level user-equation call bound. The runtime default is 320. Zero explicitly selects
   // the implementation-defined unbounded policy. A program can replace it in-language with
-  // `(pragma! max-stack-depth N)`. The `fuel` argument remains the independent step ceiling.
+  // `(pragma! max-stack-depth N)`. The `fuel` argument remains the independent per-path recursion bound.
   readonly maxStackDepth?: number;
+  // Initial global inference-work bound for each top-level query. The runtime default is zero, which selects
+  // an unlimited budget. A program can replace it with `(pragma! mettascript-max-steps N)`.
+  readonly maxSteps?: number;
   // Optional observer/state for the language-level call lineage. Reusing one instance across a program
   // records the maximum attempted depth over every query without changing evaluation results.
   readonly evaluationDepth?: EvaluationDepth;
@@ -266,6 +269,7 @@ function evalSequentialInternal(
   const out: QueryResult[] = [];
   let st: St = initSt();
   if (opts.maxStackDepth !== undefined) st.world.maxStackDepth = opts.maxStackDepth;
+  if (opts.maxSteps !== undefined) st.world.maxSteps = opts.maxSteps;
   const env = buildDefaultEnv(imports, opts.tabling ?? DEFAULT_TABLING, opts);
   wireParallelEvaluation(env, atoms, opts);
   for (const { atom, bang } of atoms) {
@@ -338,6 +342,7 @@ export async function runProgramAsync(
   const out: QueryResult[] = [];
   let st: St = initSt();
   if (opts.maxStackDepth !== undefined) st.world.maxStackDepth = opts.maxStackDepth;
+  if (opts.maxSteps !== undefined) st.world.maxSteps = opts.maxSteps;
   for (const { atom, bang } of parsed) {
     if (!bang) {
       addAtomToEnv(env, atom);

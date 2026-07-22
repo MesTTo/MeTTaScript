@@ -367,7 +367,7 @@ export const STDLIB_SRC = `
   (@doc random-float (@desc "Returns a random float in the half-open interval from the lower bound to the upper bound") (@params ((@param "Lower bound") (@param "Upper bound"))) (@return "Random float"))
   (@doc random-int (@desc "Returns a random integer in the half-open interval from the lower bound to the upper bound") (@params ((@param "Lower bound") (@param "Upper bound"))) (@return "Random integer"))
   (@doc nop (@desc "Outputs the unit atom") (@params ()) (@return "Unit atom"))
-  (@doc pragma! (@desc "Changes the value of a global key, such as type-check, interpreter, or max-stack-depth") (@params ((@param "Key name") (@param "New value"))) (@return "Unit atom"))
+  (@doc pragma! (@desc "Changes the value of a global key, such as type-check, interpreter, max-stack-depth, or mettascript-max-steps") (@params ((@param "Key name") (@param "New value"))) (@return "Unit atom"))
   (@doc bind! (@desc "Registers a token replaced by an atom during parsing of the rest of the program") (@params ((@param "Token name") (@param "Atom associated with the token after reduction"))) (@return "Unit atom"))
   (@doc sort-strings (@desc "Sorts an expression of strings in alphabetical order") (@params ((@param "List of strings"))) (@return "Sorted list of strings"))
   (@doc first-from-pair (@desc "Returns the first atom of a pair") (@params ((@param "Pair"))) (@return "First atom of the pair"))

@@ -1,6 +1,6 @@
 {
   "name": "@mettascript/grapher",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "author": "MesTTo",
   "license": "MIT",
   "description": "MeTTa visual editor and reduction renderer for browser and Node.js, with node-graph and nested-block views.",

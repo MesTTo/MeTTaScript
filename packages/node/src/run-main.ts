@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import {
   atomEq,
+  DEFAULT_FUEL,
   emptyExpr,
   format,
   isErrorAtom,
@@ -224,8 +225,9 @@ async function runInteropToBuffer(
  *  `prog` names the invoking command for the usage line. Owns the process lifecycle: it may `process.exit`
  *  on a usage error, a `--check` result, or the larger-stack reexec. */
 export async function runCliMain(argv: string[], prog = "metta run"): Promise<void> {
-  // CLI resource limits: `--max-steps` is the step ceiling, and `--max-stack-depth` seeds the interpreter
-  // stack-depth bound a program can further tighten with `pragma!`.
+  // CLI resource limits: `--max-steps` seeds the global inference budget and still raises the legacy
+  // per-path fuel allowance when it exceeds that allowance's default. `--max-stack-depth` seeds the
+  // language call-depth bound.
   const { positionals, values } = parseArgs({
     args: argv,
     allowPositionals: true,
@@ -263,7 +265,8 @@ export async function runCliMain(argv: string[], prog = "metta run"): Promise<vo
     }
     process.exit(exitCode);
   }
-  const fuel = values["max-steps"] !== undefined ? Number(values["max-steps"]) : undefined;
+  const maxSteps = values["max-steps"] !== undefined ? Number(values["max-steps"]) : undefined;
+  const fuel = maxSteps !== undefined && maxSteps > DEFAULT_FUEL ? maxSteps : undefined;
   const maxStackDepth =
     values["max-stack-depth"] !== undefined ? Number(values["max-stack-depth"]) : undefined;
   const hashCons =
@@ -275,8 +278,9 @@ export async function runCliMain(argv: string[], prog = "metta run"): Promise<vo
     process.env.METTA_TS_FLAT_ATOMSPACE === "1" ||
     process.env.METTA_TS_FLAT_ATOMSPACE === "true";
   const opts: RunOptions | undefined =
-    maxStackDepth !== undefined || hashCons || flatAtomspace
+    maxSteps !== undefined || maxStackDepth !== undefined || hashCons || flatAtomspace
       ? {
+          ...(maxSteps !== undefined ? { maxSteps } : {}),
           ...(maxStackDepth !== undefined ? { maxStackDepth } : {}),
           ...(hashCons || flatAtomspace
             ? {
