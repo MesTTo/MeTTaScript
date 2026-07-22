@@ -3,9 +3,9 @@
 // SPDX-License-Identifier: MIT
 
 // `pragma!` writes interpreter settings in-language, faithful to Hyperon (stdlib/core.rs): the key must be a
-// symbol, `max-stack-depth` must be an unsigned integer (0 = unlimited, the default), and the op returns
-// unit. `max-stack-depth` bounds how deep the explicit minimal-MeTTa interpreter stack may grow before a
-// branch degrades to a StackOverflow atom — a memory bound, not a step bound, and one the host can also seed
+// symbol, `max-stack-depth` must be an unsigned integer (0 explicitly selects the unbounded policy), and the
+// op returns unit. `max-stack-depth` bounds nested user-equation calls before a branch degrades to a
+// StackOverflow atom. Tail transfers reuse their caller's level. The host can also seed the bound
 // via RunOptions. It is never a hard ceiling: the host's `fuel` argument is the resource ceiling and no
 // pragma can raise it, so an embedded program cannot widen its own limits.
 import { describe, it, expect } from "vitest";
@@ -37,12 +37,11 @@ describe("pragma! max-stack-depth", () => {
     expect(results("!(pragma! interpreter bare-minimal)")).toEqual(["()"]);
   });
 
-  it("a positive bound cuts the interpreter stack; the default (0) leaves it unbounded", () => {
-    // `(+ 1 (* 2 3))` nests one eval inside another, so its interpreter stack reaches depth 2. A bound of 1
-    // cuts it to a StackOverflow atom; with no bound (or a generous one) it evaluates to 7.
-    expect(hasOverflow(results("!(pragma! max-stack-depth 1)\n!(+ 1 (* 2 3))"))).toBe(true);
-    expect(results("!(+ 1 (* 2 3))")).toEqual(["7"]);
-    expect(results("!(pragma! max-stack-depth 1000)\n!(+ 1 (* 2 3))")).toEqual(["7"]);
+  it("a positive bound cuts nested user calls; an explicit zero leaves them unbounded", () => {
+    const down = `(= (down $n) (if (== $n 0) 0 (+ 1 (down (- $n 1)))))`;
+    expect(hasOverflow(results(`${down}\n!(pragma! max-stack-depth 3)\n!(down 10)`))).toBe(true);
+    expect(results(`${down}\n!(pragma! max-stack-depth 0)\n!(down 10)`)).toEqual(["10"]);
+    expect(results(`${down}\n!(pragma! max-stack-depth 1000)\n!(down 10)`)).toEqual(["10"]);
   });
 
   it("does not disturb a shallow tail-recursion (chain depth stays ~2)", () => {
@@ -56,7 +55,12 @@ describe("pragma! max-stack-depth", () => {
   });
 
   it("the embedder can seed the starting bound via RunOptions.maxStackDepth", () => {
-    const r = runProgram("!(+ 1 (* 2 3))", 2_000_000, new Map(), { maxStackDepth: 1 });
+    const r = runProgram(
+      `(= (down $n) (if (== $n 0) 0 (+ 1 (down (- $n 1)))))\n!(down 10)`,
+      2_000_000,
+      new Map(),
+      { maxStackDepth: 3 },
+    );
     expect(r[r.length - 1]!.results.some((a) => format(a).includes("StackOverflow"))).toBe(true);
   });
 });

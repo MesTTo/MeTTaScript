@@ -73,6 +73,12 @@ import {
 import { runChoicePlan, runDistinctChoicePlan, runDistinctChoicePlanBound } from "./choice-plan";
 import { runDistinctIntRelation } from "./distinct-int";
 import { readEnv } from "./env";
+import {
+  DEFAULT_MAX_STACK_DEPTH,
+  EVALUATION_TRAMPOLINE_DEPTH,
+  EvaluationDepth,
+  type EvaluationDepthSpan,
+} from "./eval-depth";
 import { canCompactAtom, FlatAtomSpace } from "./flat-atomspace";
 import { instantiate } from "./instantiate";
 import { addVarBinding, matchAtoms, matchAtomsScoped, merge } from "./match";
@@ -120,11 +126,29 @@ const GROUNDED_COMPILED = readEnv("METTA_GROUNDED_COMPILED") !== "0";
 /** A grounded operation that runs asynchronously, for the async runner. */
 export type AsyncGroundFn = (args: readonly Atom[]) => Promise<ReduceResult>;
 export type HostImportFn = (space: Atom, file: Atom) => ReduceResult | Promise<ReduceResult>;
-// A suspension is any Promise the async driver awaits; each yield site knows its resolved type. The
-// grounded boundary yields a Promise<ReduceResult>; the concurrency primitives yield Promise<[pairs,St]>.
-type Susp = Promise<unknown>;
+const EVAL_REQUEST = Symbol("eval-request");
+interface EvalTrampoline {
+  readonly active: true;
+}
+interface EvalRequest {
+  readonly kind: typeof EVAL_REQUEST;
+  readonly env: MinEnv;
+  readonly fuel: number;
+  readonly state: St;
+  readonly bindings: Bindings;
+  readonly atom: Atom;
+  readonly depth: EvaluationDepth;
+  readonly reuseDepthLevel: boolean;
+}
+// A suspension is either a Promise the async driver awaits or a deep evaluator request consumed by the
+// heap-continuation driver. A request must never escape that driver to a public sync or async runner.
+type Susp = Promise<unknown> | EvalRequest;
 type Gen<R> = Generator<Susp, R, unknown>;
 type EvalRes = [Array<[Atom, Bindings]>, St];
+
+function isEvalRequest(value: Susp): value is EvalRequest {
+  return !isPromiseLike(value) && value.kind === EVAL_REQUEST;
+}
 interface CandidateSource extends Iterable<Atom> {
   readonly counterPadding?: number;
   readonly synthetic?: true;
@@ -163,7 +187,10 @@ export class AsyncInSyncError extends Error {
 let pendingAsyncOp = "?";
 function runGenSync<R>(gen: Gen<R>): R {
   const r = gen.next();
-  if (!r.done) throw new AsyncInSyncError(pendingAsyncOp);
+  if (!r.done) {
+    if (isEvalRequest(r.value)) throw new Error("unhandled deep evaluator request");
+    throw new AsyncInSyncError(pendingAsyncOp);
+  }
   return r.value;
 }
 /** Drive a generator asynchronously, awaiting each yielded Promise. An optional `signal` makes the
@@ -172,6 +199,7 @@ function runGenSync<R>(gen: Gen<R>): R {
 async function runGenAsync<R>(gen: Gen<R>, signal?: AbortSignal): Promise<R> {
   let r = gen.next();
   while (!r.done) {
+    if (isEvalRequest(r.value)) throw new Error("unhandled deep evaluator request");
     signal?.throwIfAborted();
     const v = await r.value;
     signal?.throwIfAborted();
@@ -1550,11 +1578,9 @@ export interface World {
   removedStatic: AtomLog;
   removedStaticHeads: ReadonlySet<string>;
   removedStaticVarRules: boolean;
-  // Interpreter stack-depth bound, set in-language by `(pragma! max-stack-depth N)` (Hyperon's pragma).
-  // 0 means unlimited (the Hyperon default). When positive, a branch whose stack reaches this depth
-  // degrades to a StackOverflow error atom instead of recursing further. The pragma is a depth bound only; the
-  // host's step budget (the `fuel` argument) is the resource ceiling and is never changed by a pragma, so a
-  // program cannot raise its own limits past what the embedder allows.
+  // Language-level user-equation call bound, set in-language by `(pragma! max-stack-depth N)` (Hyperon's
+  // pragma). The default is 320; zero explicitly selects the implementation-defined unbounded policy. A
+  // positive bound cuts the branch before entering that level. The host's step budget remains independent.
   maxStackDepth: number;
 }
 export interface St {
@@ -1580,7 +1606,7 @@ export const initSt = (): St => ({
     removedStatic: emptyLog,
     removedStaticHeads: new Set(),
     removedStaticVarRules: false,
-    maxStackDepth: 0,
+    maxStackDepth: DEFAULT_MAX_STACK_DEPTH,
   },
 });
 function cloneWorld(w: World): World {
@@ -2567,6 +2593,8 @@ function* evalFoldlAtomCallG(
   st: St,
   args: readonly Atom[],
   bnd: Bindings,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
 ): Gen<{ readonly pairs: Array<[Atom, Bindings]>; readonly state: St } | undefined> {
   if (args.length !== 5) return undefined;
   const [list, init, aVar, bVar, op] = args;
@@ -2587,7 +2615,15 @@ function* evalFoldlAtomCallG(
       // holder drops the branch to Empty. case/if and a user function with a let body route correctly, so
       // only the bare binding heads are excluded.
       if (op2Head !== "let" && op2Head !== "let*")
-        compiled = yield* evalGroundedCompiledExprG(env, fuel, cur, branch.bnd, op2);
+        compiled = yield* evalGroundedCompiledExprG(
+          env,
+          fuel,
+          cur,
+          branch.bnd,
+          op2,
+          depth,
+          trampoline,
+        );
       let accPairs: Array<[Atom, Bindings]>;
       if (compiled !== undefined) {
         accPairs = compiled.pairs;
@@ -2599,6 +2635,8 @@ function* evalFoldlAtomCallG(
           cur,
           branch.bnd,
           makeExpr(env, [sym("metta"), op2, UNDEF, sym("&self")]),
+          depth,
+          trampoline,
         );
         accPairs = fallbackPairs;
         cur = st2;
@@ -2696,6 +2734,8 @@ function* evalGroundedCompiledExprG(
   st: St,
   bnd: Bindings,
   atom: Atom,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
 ): Gen<{ readonly pairs: Array<[Atom, Bindings]>; readonly state: St } | undefined> {
   if (!GROUNDED_COMPILED || atom.kind !== "expr" || atom.items.length === 0) return undefined;
   const head = atom.items[0]!;
@@ -2710,7 +2750,7 @@ function* evalGroundedCompiledExprG(
     return undefined;
   const args = atom.items.slice(1);
   if (checkApplication(env, st.world, op, args, env.sigs.get(op)) !== null) return undefined;
-  const cr = runCompiled(env, op, args, st, COMPILED_IMPURE_OPS, undefined, fuel);
+  const cr = runCompiled(env, op, args, st, COMPILED_IMPURE_OPS, undefined, fuel, depth);
   if (cr === undefined) return undefined;
   const sig = env.sigs.get(op);
   const opReturnsAtom =
@@ -2724,6 +2764,8 @@ function* evalGroundedCompiledExprG(
     atom,
     cr,
     opReturnsAtom,
+    depth,
+    trampoline,
   );
   return { pairs, state };
 }
@@ -2764,6 +2806,8 @@ function* evalMapAtomCallG(
   st: St,
   args: readonly Atom[],
   bnd: Bindings,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
 ): Gen<{ readonly pairs: Array<[Atom, Bindings]>; readonly state: St } | undefined> {
   if (args.length !== 3) return undefined;
   const [list, v, tmpl] = args;
@@ -2782,7 +2826,15 @@ function* evalMapAtomCallG(
     const next: MapFilterBranch[] = [];
     for (const branch of branches) {
       const mapExpr = applySubst([[v.name, item]], sealed);
-      const compiled = yield* evalGroundedCompiledExprG(env, fuel, cur, branch.bnd, mapExpr);
+      const compiled = yield* evalGroundedCompiledExprG(
+        env,
+        fuel,
+        cur,
+        branch.bnd,
+        mapExpr,
+        depth,
+        trampoline,
+      );
       let mappedPairs: Array<[Atom, Bindings]>;
       if (compiled !== undefined) {
         mappedPairs = compiled.pairs;
@@ -2794,6 +2846,8 @@ function* evalMapAtomCallG(
           cur,
           branch.bnd,
           makeExpr(env, [sym("metta"), mapExpr, UNDEF, sym("&self")]),
+          depth,
+          trampoline,
         );
         mappedPairs = fallbackPairs;
         cur = st2;
@@ -2830,6 +2884,8 @@ function* evalFilterAtomCallG(
   st: St,
   args: readonly Atom[],
   bnd: Bindings,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
 ): Gen<{ readonly pairs: Array<[Atom, Bindings]>; readonly state: St } | undefined> {
   if (args.length !== 3) return undefined;
   const [list, v, tmpl] = args;
@@ -2850,7 +2906,15 @@ function* evalFilterAtomCallG(
     const next: FilterBranch[] = [];
     for (const branch of branches) {
       const filterExpr = applySubst([[v.name, item]], sealed);
-      const compiled = yield* evalGroundedCompiledExprG(env, fuel, cur, branch.bnd, filterExpr);
+      const compiled = yield* evalGroundedCompiledExprG(
+        env,
+        fuel,
+        cur,
+        branch.bnd,
+        filterExpr,
+        depth,
+        trampoline,
+      );
       let filteredPairs: Array<[Atom, Bindings]>;
       if (compiled !== undefined) {
         filteredPairs = compiled.pairs;
@@ -2862,6 +2926,8 @@ function* evalFilterAtomCallG(
           cur,
           branch.bnd,
           makeExpr(env, [sym("metta"), filterExpr, UNDEF, sym("&self")]),
+          depth,
+          trampoline,
         );
         filteredPairs = fallbackPairs;
         cur = st2;
@@ -2929,11 +2995,21 @@ function* evalNumericKeysG(
   keyFn: Atom,
   items: readonly Atom[],
   bnd: Bindings,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
 ): Gen<{ readonly keys: number[]; readonly state: St } | undefined> {
   let cur = st;
   const keys: number[] = [];
   for (const item of items) {
-    const [pairs, st2] = yield* mettaEvalG(env, fuel - 1, cur, bnd, makeExpr(env, [keyFn, item]));
+    const [pairs, st2] = yield* mettaEvalG(
+      env,
+      fuel - 1,
+      cur,
+      bnd,
+      makeExpr(env, [keyFn, item]),
+      depth,
+      trampoline,
+    );
     cur = st2;
     if (pairs.length !== 1) return undefined;
     const k = atomNumber(inst(env, pairs[0]![1], pairs[0]![0]));
@@ -2953,12 +3029,14 @@ function* evalMaxByAtomG(
   st: St,
   args: readonly Atom[],
   bnd: Bindings,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
 ): Gen<{ readonly pairs: Array<[Atom, Bindings]>; readonly state: St } | undefined> {
   if (args.length !== 3) return undefined;
   const [keyFn, init, list] = args;
   if (keyFn === undefined || init === undefined || list?.kind !== "expr") return undefined;
   const candidates = [init, ...list.items];
-  const scored = yield* evalNumericKeysG(env, fuel, st, keyFn, candidates, bnd);
+  const scored = yield* evalNumericKeysG(env, fuel, st, keyFn, candidates, bnd, depth, trampoline);
   if (scored === undefined) return undefined;
   let bestIdx = 0;
   for (let i = 1; i < scored.keys.length; i++)
@@ -2979,6 +3057,8 @@ function* evalTopKByAtomG(
   st: St,
   args: readonly Atom[],
   bnd: Bindings,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
 ): Gen<{ readonly pairs: Array<[Atom, Bindings]>; readonly state: St } | undefined> {
   if (args.length !== 3) return undefined;
   const [keyFn, sizeAtom, list] = args;
@@ -2986,7 +3066,7 @@ function* evalTopKByAtomG(
   const size = atomNumber(sizeAtom);
   if (size === undefined) return undefined;
   const items = list.items.slice();
-  const scored = yield* evalNumericKeysG(env, fuel, st, keyFn, items, bnd);
+  const scored = yield* evalNumericKeysG(env, fuel, st, keyFn, items, bnd, depth, trampoline);
   if (scored === undefined) return undefined;
   const keys = scored.keys;
   while (items.length >= size && items.length > 0) {
@@ -3560,7 +3640,14 @@ function getDocOf(env: MinEnv, w: World, atom: Atom): Atom {
 }
 
 // ---------- the step function ----------
-function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[ItemBatch, St]> {
+function* interpretStack1G(
+  env: MinEnv,
+  fuel: number,
+  st: St,
+  it: Item,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
+): Gen<[ItemBatch, St]> {
   if (it.stack === null) return [[], st];
   const top = it.stack.head;
   const prev = it.stack.tail;
@@ -3569,6 +3656,7 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
     const pf = prev.head;
     const pprev = prev.tail;
     const res = inst(env, it.bnd, top.atom);
+    if (isStackOverflowAtom(res)) return [[finItem(null, res, it.bnd)], st];
     if (pf.ret === "chain") {
       if (opOf(pf.atom) === "chain" && pf.atom.kind === "expr" && pf.atom.items.length === 4) {
         const v = pf.atom.items[2]!;
@@ -3658,7 +3746,7 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
     case "capture":
     case "metta-thread": {
       const atom = it2[1]!;
-      const [pairs, st2] = yield* mettaEvalG(env, fuel, st, it.bnd, atom);
+      const [pairs, st2] = yield* mettaEvalG(env, fuel, st, it.bnd, atom, depth, trampoline);
       if (op === "metta-thread") {
         const out: Item[] = [];
         const scoped = scopeVars(env, it.bnd, prev);
@@ -3680,7 +3768,16 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
         }
       }
       const x = op === "get-type-space" ? it2[2]! : it2[1]!;
-      return yield* getTypeOpG(typeEnv, fuel, st, prev, inst(typeEnv, it.bnd, x), it.bnd);
+      return yield* getTypeOpG(
+        typeEnv,
+        fuel,
+        st,
+        prev,
+        inst(typeEnv, it.bnd, x),
+        it.bnd,
+        depth,
+        trampoline,
+      );
     }
     case "check-types":
       if (it2.length === 2) {
@@ -3710,9 +3807,14 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
       break;
     case "collapse-bind": {
       if (it2.length !== 2) break;
-      const [atoms, st2] = yield* interpretLoopG(env, fuel, st, [
-        { stack: atomToStack(it2[1]!, null), bnd: it.bnd },
-      ]);
+      const [atoms, st2] = yield* interpretLoopG(
+        env,
+        fuel,
+        st,
+        [{ stack: atomToStack(it2[1]!, null), bnd: it.bnd }],
+        depth,
+        trampoline,
+      );
       return [
         [
           finItem(
@@ -3736,7 +3838,7 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
     case "transaction": {
       if (it2.length !== 2) break;
       const snapshotWorld = st.world;
-      const [pairs, st2] = yield* mettaEvalG(env, fuel, st, it.bnd, it2[1]!);
+      const [pairs, st2] = yield* mettaEvalG(env, fuel, st, it.bnd, it2[1]!, depth, trampoline);
       const committed = pairs.length > 0 && pairs.some((p) => !isErrorAtom(p[0]));
       const world = committed ? st2.world : snapshotWorld;
       return [pairs.map((p) => finItem(prev, p[0], it.bnd)), { counter: st2.counter, world }];
@@ -3746,10 +3848,14 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
       // Evaluate every branch concurrently on the same immutable starting world, union their results,
       // and merge their effects as multiset deltas (add-only effects commute; conflicts -> with-mutex).
       const branches = it2.slice(1);
+      const branchDepths = branches.map(() => depth.fork());
       pendingAsyncOp = "par";
       const results = (yield Promise.all(
-        branches.map((br) => mettaEvalAsync(env, fuel, st, it.bnd, br)),
+        branches.map((br, index) =>
+          mettaEvalAsync(env, fuel, st, it.bnd, br, undefined, branchDepths[index]),
+        ),
       )) as EvalRes[];
+      for (const branchDepth of branchDepths) depth.absorb(branchDepth);
       const out: Item[] = [];
       let counter = st.counter;
       const worlds: World[] = [];
@@ -3770,13 +3876,16 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
       const winner = (yield (async (): Promise<EvalRes> => {
         const ac = new AbortController();
         try {
-          return await Promise.any(
+          const selected = await Promise.any(
             branches.map(async (br) => {
-              const r = await mettaEvalAsync(env, fuel, st, it.bnd, br, ac.signal);
+              const branchDepth = depth.fork();
+              const r = await mettaEvalAsync(env, fuel, st, it.bnd, br, ac.signal, branchDepth);
               if (r[0].length === 0) throw new Error("empty branch");
-              return r;
+              return { result: r, branchDepth };
             }),
           );
+          depth.absorb(selected.branchDepth);
+          return selected.result;
         } catch {
           return [[], st];
         } finally {
@@ -3809,7 +3918,7 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
           namedMatch.value === undefined ? [] : [finItem(prev, namedMatch.value, it.bnd)];
         return [first, namedMatch.state];
       }
-      const [pairs, st2] = yield* mettaEvalG(env, fuel, st, it.bnd, it2[1]!);
+      const [pairs, st2] = yield* mettaEvalG(env, fuel, st, it.bnd, it2[1]!, depth, trampoline);
       const first = pairs.length > 0 ? [pairs[0]!] : [];
       return [first.map((p) => finItem(prev, p[0], p[1])), st2];
     }
@@ -3828,7 +3937,7 @@ function* interpretStack1G(env: MinEnv, fuel: number, st: St, it: Item): Gen<[It
         env.mutexes.set(name, chained);
         await prior;
         try {
-          return await mettaEvalAsync(env, fuel, st, it.bnd, body);
+          return await mettaEvalAsync(env, fuel, st, it.bnd, body, undefined, depth);
         } finally {
           release();
           // Drop the entry once this is the tail of the chain, so the map does not grow unbounded.
@@ -4272,12 +4381,14 @@ function* getTypeOpG(
   prev: Stack,
   xi: Atom,
   b: Bindings,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
 ): Gen<[Item[], St]> {
   const emit = function* (st0: St): Gen<[Item[], St]> {
     let acc: Item[] = [];
     let cur = st0;
     for (const t of getTypesForQuery(env, st.world, typePrep(env, st.world, xi))) {
-      const [rs, st2] = yield* mettaEvalG(env, fuel, cur, b, t);
+      const [rs, st2] = yield* mettaEvalG(env, fuel, cur, b, t, depth, trampoline);
       acc = [...acc, ...rs.map((p) => finItem(prev, p[0], b))];
       cur = st2;
     }
@@ -5439,6 +5550,8 @@ function* interpretLoopG(
   fuel: number,
   st: St,
   work: Item[] | ItemSource,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
   // Optional streaming consumer: when given, every finished branch is handed to `sink` instead of being
   // collected into the returned array (which stays empty). An aggregate like `(length (collapse X))` uses
   // this to count results without ever materialising them. The array, the collapsed tuple, and the length
@@ -5501,19 +5614,7 @@ function* interpretLoopG(
       return [done, cur];
     }
     const it = stack.pop()!;
-    // `(pragma! max-stack-depth N)` bounds how deep the interpreter stack may grow before a branch is cut
-    // back to a StackOverflow atom (Hyperon's pragma; bounds memory, not steps). 0 (the default) disables
-    // the check, so this costs nothing unless a program opts in. A finished branch is already a result, so
-    // it is returned as-is rather than turned into an error.
-    if (cur.world.maxStackDepth > 0) {
-      let depth = 0;
-      for (let p = it.stack; p !== null; p = p.tail) depth++;
-      if (depth >= cur.world.maxStackDepth) {
-        emit(isFinal(it) ? finalPair(env, it) : exhaustedPair(env, it));
-        continue;
-      }
-    }
-    const [results, st2] = yield* interpretStack1G(env, f - 1, cur, it);
+    const [results, st2] = yield* interpretStack1G(env, f - 1, cur, it, depth, trampoline);
     cur = st2;
     f -= 1;
     if (isItemSource(results)) {
@@ -5553,6 +5654,8 @@ function* reduceChildrenG(
   st: St,
   pairs: Array<[Atom, Bindings]>,
   onTerminal: (p: [Atom, Bindings]) => Array<[Atom, Bindings]> | undefined,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
 ): Gen<[Array<[Atom, Bindings]>, St]> {
   const out: Array<[Atom, Bindings]> = [];
   let cur = st;
@@ -5561,7 +5664,7 @@ function* reduceChildrenG(
     if (term !== undefined) {
       out.push(...term);
     } else {
-      const [more, st3] = yield* mettaEvalG(env, fuel - 1, cur, p[1], p[0]);
+      const [more, st3] = yield* mettaEvalG(env, fuel - 1, cur, p[1], p[0], depth, trampoline);
       cur = st3;
       out.push(...more);
     }
@@ -5700,8 +5803,13 @@ function dedupGroundPairs(pairs: readonly [Atom, Bindings][]): Array<[Atom, Bind
   return out;
 }
 
-function rememberGroundTable(env: MinEnv, key: CompletedTableKey, results: readonly Atom[]): void {
-  env.tableSpace?.rememberCompleted(key, 0, results);
+function rememberGroundTable(
+  env: MinEnv,
+  key: CompletedTableKey,
+  results: readonly Atom[],
+  depthSpan: number,
+): void {
+  env.tableSpace?.rememberCompleted(key, 0, results, depthSpan);
 }
 
 function rememberModedTable(
@@ -5709,8 +5817,9 @@ function rememberModedTable(
   key: CompletedTableKey,
   numCallVars: number,
   results: readonly Atom[],
+  depthSpan: number,
 ): void {
-  env.tableSpace?.rememberCompleted(key, numCallVars, results);
+  env.tableSpace?.rememberCompleted(key, numCallVars, results, depthSpan);
 }
 
 /** Freshen one cached moded-tabling answer for this call instance: substitute the
@@ -6063,6 +6172,8 @@ function* countTailMatchG(
   st: St,
   bnd: Bindings,
   match: ExprAtom,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
 ): Gen<{ count: number; state: St }> {
   const agg = countAggregateEnabled() ? tryCountAggregate(env, st, bnd, match) : undefined;
   if (agg !== undefined)
@@ -6099,6 +6210,8 @@ function* countTailMatchG(
         bnd,
       },
     ],
+    depth,
+    trampoline,
     () => {
       count++;
     },
@@ -6112,6 +6225,8 @@ function* tryCollapseRouteG(
   st: St,
   bnd: Bindings,
   call: Atom,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
 ): Gen<{ count: number; state: St } | undefined> {
   const route = prepareCollapseRoute(env, st, bnd, call);
   if (route === undefined) return undefined;
@@ -6132,6 +6247,8 @@ function* tryCollapseRouteG(
         bnd: route.bnd,
       },
     ],
+    depth,
+    trampoline,
     (item) => {
       if (!atomEq(item[0], DONE_UNIT)) throw new Error("collapse route build yielded non-unit");
       buildCount += 1;
@@ -6144,7 +6261,7 @@ function* tryCollapseRouteG(
       let nextBuildCount = 0;
       let cur = stAfterBuild;
       for (let i = 0; i < buildCount; i++) {
-        const cr = runCompiledEffectCount(env, call.op, call.args, cur, COMPILED_IMPURE_OPS);
+        const cr = runCompiledEffectCount(env, call.op, call.args, cur, COMPILED_IMPURE_OPS, depth);
         if (cr === undefined) return undefined; // did not compile this run; fall back
         if (cr.count > 1) return undefined; // multi-branch effects need a tail count at each branch state
         nextBuildCount += cr.count;
@@ -6156,7 +6273,15 @@ function* tryCollapseRouteG(
     }
   }
   const tailStart = stAfterBuild.counter;
-  const tail = yield* countTailMatchG(env, fuel, stAfterBuild, route.bnd, route.tailMatch);
+  const tail = yield* countTailMatchG(
+    env,
+    fuel,
+    stAfterBuild,
+    route.bnd,
+    route.tailMatch,
+    depth,
+    trampoline,
+  );
   const tailDelta = tail.state.counter - tailStart;
   return {
     count: tail.count * buildCount,
@@ -6445,6 +6570,8 @@ function* reduceRulePairsG(
   wApp: Atom,
   pairs: readonly [Atom, Bindings][],
   opReturnsAtom: boolean,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
 ): Gen<[Array<[Atom, Bindings]>, St]> {
   const out: Array<[Atom, Bindings]> = [];
   let cur = st;
@@ -6459,9 +6586,9 @@ function* reduceRulePairsG(
       out.push([p[0], pb]);
     } else if (isStackOverflowAtom(p[0])) {
       // Terminal depth-cut: keep it as the result; re-evaluating it would re-cut and grow.
-      out.push([p[0], pb]);
+      out.push([p[0], restrictBnd(env, queryVars, pb)]);
     } else {
-      const [more, st4] = yield* mettaEvalG(env, fuel - 1, cur, pb, p[0]);
+      const [more, st4] = yield* mettaEvalG(env, fuel - 1, cur, pb, p[0], depth, trampoline, true);
       cur = st4;
       for (const m of more) {
         out.push([m[0], mergeRestrict(env, queryVars, pb, m[1])]);
@@ -6481,6 +6608,8 @@ function* reduceCompiledResultG(
   atom: Atom,
   opReturnsAtom: boolean,
   allowFinalShortcut: boolean,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
 ): Gen<[Array<[Atom, Bindings]>, St]> {
   if (
     (opReturnsAtom && !isEmbeddedOp(atom)) ||
@@ -6488,7 +6617,7 @@ function* reduceCompiledResultG(
   )
     return [[[atom, bnd]], st];
   if (isStackOverflowAtom(atom)) return [[[atom, bnd]], st];
-  const [pairs, st2] = yield* mettaEvalG(env, fuel - 1, st, bnd, atom);
+  const [pairs, st2] = yield* mettaEvalG(env, fuel - 1, st, bnd, atom, depth, trampoline, true);
   const out: Array<[Atom, Bindings]> = [];
   let cur = st2;
   for (const p of pairs) {
@@ -6506,6 +6635,8 @@ function* reduceCompiledResultG(
       p[0],
       opReturnsAtom,
       true,
+      depth,
+      trampoline,
     );
     cur = st3;
     out.push(...more);
@@ -6522,6 +6653,9 @@ function* reduceCompiledResultsG(
   wApp: Atom,
   cr: CompiledRunResult,
   opReturnsAtom: boolean,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
+  reuseResultDepthLevel = false,
 ): Gen<[Array<[Atom, Bindings]>, St]> {
   const out: Array<[Atom, Bindings]> = [];
   let cur = st;
@@ -6562,11 +6696,22 @@ function* reduceCompiledResultsG(
         r.atom,
         opReturnsAtom,
         false,
+        depth,
+        trampoline,
       );
       cur = st4;
       for (const m of more) out.push(m);
     } else {
-      const [more, st4] = yield* mettaEvalG(env, fuel - 1, cur, pb, r.atom);
+      const [more, st4] = yield* mettaEvalG(
+        env,
+        fuel - 1,
+        cur,
+        pb,
+        r.atom,
+        depth,
+        trampoline,
+        reuseResultDepthLevel,
+      );
       cur = st4;
       for (const m of more) out.push([m[0], mergeRestrict(env, queryVars, pb, m[1])]);
     }
@@ -6574,16 +6719,66 @@ function* reduceCompiledResultsG(
   return [out, cur];
 }
 
-function* mettaEvalG(
+const DEPTH_NEUTRAL_RULE_OPS = new Set(["if", "let", "let*", "case", "empty"]);
+
+function isDepthTrackedCall(env: MinEnv, world: World, atom: Atom): boolean {
+  if (atom.kind !== "expr" || atom.items.length === 0) return false;
+  const head = atom.items[0]!;
+  if (head.kind !== "sym") return false;
+  const op = head.name;
+  if (DEPTH_NEUTRAL_RULE_OPS.has(op) || isEmbeddedOp(atom) || env.gt.has(op) || env.agt.has(op))
+    return false;
+  return (
+    hasVisibleStaticRuleHead(env, world, op) ||
+    world.selfRules.has(op) ||
+    env.varRulesVar.length > 0 ||
+    world.selfVarRules.length > 0
+  );
+}
+
+interface EvaluationDepthLease {
+  entered: boolean;
+  ownsLevel: boolean;
+  reuseLevel: boolean;
+}
+
+function depthOverflowAtom(env: MinEnv, atom: Atom): Atom {
+  return makeExpr(env, [sym("Error"), atom, sym("StackOverflow")]);
+}
+
+function tryEnterDepthCall(
+  env: MinEnv,
+  state: St,
+  atom: Atom,
+  depth: EvaluationDepth,
+  lease: EvaluationDepthLease,
+  span: EvaluationDepthSpan,
+): boolean {
+  if (lease.entered || !isDepthTrackedCall(env, state.world, atom)) return true;
+  if (lease.reuseLevel && depth.current > 0) {
+    lease.entered = true;
+    depth.rebase(span);
+    return true;
+  }
+  if (!depth.tryEnter(state.world.maxStackDepth)) return false;
+  lease.entered = true;
+  lease.ownsLevel = true;
+  depth.rebase(span);
+  return true;
+}
+
+function* mettaEvalBodyG(
   env: MinEnv,
   fuel: number,
   st: St,
   bnd: Bindings,
   a: Atom,
+  w: Atom,
+  depth: EvaluationDepth,
+  depthLease: EvaluationDepthLease,
+  depthSpan: EvaluationDepthSpan,
+  trampoline: EvalTrampoline | undefined,
 ): Gen<[Array<[Atom, Bindings]>, St]> {
-  if (fuel <= 0)
-    return [[[makeExpr(env, [sym("Error"), inst(env, bnd, a), sym("StackOverflow")]), bnd]], st];
-  const w = inst(env, bnd, a);
   if (env.trace && w.kind === "expr" && w.items.length > 0)
     env.trace({ kind: "reduce", atom: format(w) });
   if (w.kind === "expr" && w.ground && env.evaluatedAtoms.has(w)) return [[[w, bnd]], st];
@@ -6631,16 +6826,23 @@ function* mettaEvalG(
       if (
         pendingKeys.length > 0 &&
         env.tableSpace !== undefined &&
-        finalRes.every((p) => p[0].ground)
+        finalRes.every((p) => p[0].ground && !isStackOverflowAtom(p[0]))
       ) {
         const prod = finalRes.map((p) => p[0]);
-        for (const k of pendingKeys) rememberGroundTable(env, k, prod);
+        for (const k of pendingKeys) rememberGroundTable(env, k, prod, depth.span(depthSpan));
       }
       return [finalRes, stR];
     };
     reduceTrampoline: for (;;) {
       const op = (lw.items[0] as { name: string }).name;
       const args = lw.items.slice(1);
+      if (
+        args.every((arg) => isNormalForm(env, lst.world, arg)) &&
+        !tryEnterDepthCall(env, lst, lw, depth, depthLease, depthSpan)
+      ) {
+        if (env.trace) env.trace({ kind: "overflow", atom: format(lw) });
+        return [[[depthOverflowAtom(env, lw), restrictBnd(env, queryVarsOf(args), lbnd)]], lst];
+      }
       if (isDiscardedFiniteMatch(env, lst.world, lw)) return flushReturn([], lst);
       const directUniqueChoice = tryFastUniqueChoiceFunction(env, lst.world, op, args);
       if (directUniqueChoice !== undefined)
@@ -6704,6 +6906,8 @@ function* mettaEvalG(
               lst,
               lbnd,
               collapsedCall,
+              depth,
+              trampoline,
             );
             enforceDistinctLimit(env, answers.length);
             const unique = dedupAlphaStable([sym(","), ...answers.map((answer) => answer[0])]);
@@ -6772,10 +6976,10 @@ function* mettaEvalG(
         // bare `match` (e.g. peano's `(demo-peano ...)`).
         const z = args[0]!.items[1]!;
         if (z.kind === "expr" && opOf(z) === "match" && z.items.length === 4) {
-          const counted = yield* countTailMatchG(env, fuel, lst, lbnd, z);
+          const counted = yield* countTailMatchG(env, fuel, lst, lbnd, z, depth, trampoline);
           return flushReturn([[gint(BigInt(counted.count)), lbnd]], counted.state);
         }
-        const routed = yield* tryCollapseRouteG(env, fuel, lst, lbnd, z);
+        const routed = yield* tryCollapseRouteG(env, fuel, lst, lbnd, z, depth, trampoline);
         if (routed !== undefined)
           return flushReturn([[gint(BigInt(routed.count)), lbnd]], routed.state);
         let count = 0;
@@ -6792,6 +6996,8 @@ function* mettaEvalG(
               bnd: lbnd,
             },
           ],
+          depth,
+          trampoline,
           () => {
             count++;
           },
@@ -6812,13 +7018,22 @@ function* mettaEvalG(
       ) {
         const source = streamCaseSource(env, lst, lbnd, args[0]! as ExprAtom, args[1]!);
         if (source !== undefined) {
-          const [selected, stCase] = yield* interpretLoopG(env, fuel, lst, source);
+          const [selected, stCase] = yield* interpretLoopG(
+            env,
+            fuel,
+            lst,
+            source,
+            depth,
+            trampoline,
+          );
           const [pairs, stReduced] = yield* reduceChildrenG(
             env,
             fuel,
             stCase,
             selected,
             () => undefined,
+            depth,
+            trampoline,
           );
           return flushReturn(pairs, stReduced);
         }
@@ -6845,7 +7060,18 @@ function* mettaEvalG(
         const nextParts: Array<[Atom[], Bindings]> = [];
         for (const [accAtoms, accB] of partials) {
           if (evalThis) {
-            const [ps, st2] = yield* mettaEvalG(env, fuel - 1, cur, accB, ae);
+            const tailArgument =
+              depthLease.reuseLevel && ((op === "let" && i === 2) || (op === "let*" && i === 1));
+            const [ps, st2] = yield* mettaEvalG(
+              env,
+              fuel - 1,
+              cur,
+              accB,
+              ae,
+              depth,
+              trampoline,
+              tailArgument,
+            );
             cur = st2;
             for (const p of ps) {
               nextParts.push([[...accAtoms, p[0]], mergeRestrict(env, queryVars, accB, p[1])]);
@@ -6883,8 +7109,21 @@ function* mettaEvalG(
         const wApp = partAtoms.every((p, i) => p === args[i])
           ? lw
           : makeExpr(env, [sym(op), ...partAtoms]);
+        if (!tryEnterDepthCall(env, cur2, wApp, depth, depthLease, depthSpan)) {
+          if (env.trace) env.trace({ kind: "overflow", atom: format(wApp) });
+          out.push([depthOverflowAtom(env, wApp), restrictBnd(env, queryVars, partB)]);
+          continue;
+        }
         if (op === "foldl-atom" && canUseNativeFoldlAtom(env, cur2.world)) {
-          const folded = yield* evalFoldlAtomCallG(env, fuel, cur2, partAtoms, partB);
+          const folded = yield* evalFoldlAtomCallG(
+            env,
+            fuel,
+            cur2,
+            partAtoms,
+            partB,
+            depth,
+            trampoline,
+          );
           if (folded !== undefined) {
             if (env.trace) env.trace({ kind: "grounded", op });
             cur2 = folded.state;
@@ -6894,7 +7133,15 @@ function* mettaEvalG(
           }
         }
         if (op === "map-atom" && canUseNativeMapAtom(env, cur2.world)) {
-          const mapped = yield* evalMapAtomCallG(env, fuel, cur2, partAtoms, partB);
+          const mapped = yield* evalMapAtomCallG(
+            env,
+            fuel,
+            cur2,
+            partAtoms,
+            partB,
+            depth,
+            trampoline,
+          );
           if (mapped !== undefined) {
             if (env.trace) env.trace({ kind: "grounded", op });
             cur2 = mapped.state;
@@ -6904,7 +7151,15 @@ function* mettaEvalG(
           }
         }
         if (op === "filter-atom" && canUseNativeFilterAtom(env, cur2.world)) {
-          const filtered = yield* evalFilterAtomCallG(env, fuel, cur2, partAtoms, partB);
+          const filtered = yield* evalFilterAtomCallG(
+            env,
+            fuel,
+            cur2,
+            partAtoms,
+            partB,
+            depth,
+            trampoline,
+          );
           if (filtered !== undefined) {
             if (env.trace) env.trace({ kind: "grounded", op });
             cur2 = filtered.state;
@@ -6918,7 +7173,15 @@ function* mettaEvalG(
           !env.ruleIndex.has("max-by-atom") &&
           !cur2.world.selfRules.has("max-by-atom")
         ) {
-          const picked = yield* evalMaxByAtomG(env, fuel, cur2, partAtoms, partB);
+          const picked = yield* evalMaxByAtomG(
+            env,
+            fuel,
+            cur2,
+            partAtoms,
+            partB,
+            depth,
+            trampoline,
+          );
           if (picked !== undefined) {
             if (env.trace) env.trace({ kind: "grounded", op });
             cur2 = picked.state;
@@ -6932,7 +7195,7 @@ function* mettaEvalG(
           !env.ruleIndex.has("top-k-by-atom") &&
           !cur2.world.selfRules.has("top-k-by-atom")
         ) {
-          const topk = yield* evalTopKByAtomG(env, fuel, cur2, partAtoms, partB);
+          const topk = yield* evalTopKByAtomG(env, fuel, cur2, partAtoms, partB, depth, trampoline);
           if (topk !== undefined) {
             if (env.trace) env.trace({ kind: "grounded", op });
             cur2 = topk.state;
@@ -6997,10 +7260,18 @@ function* mettaEvalG(
           !staticRulesChangedFor(cur2.world, op) &&
           cur2.world.selfVarRules.length === 0
         ) {
-          const cr = runCompiled(env, op, partAtoms, cur2, COMPILED_IMPURE_OPS, undefined, fuel);
+          const cr = runCompiled(
+            env,
+            op,
+            partAtoms,
+            cur2,
+            COMPILED_IMPURE_OPS,
+            undefined,
+            fuel,
+            depth,
+          );
           if (cr !== undefined) {
-            const tailResult =
-              env.useCompiledTailContinuation !== false &&
+            const singleTailResult =
               partials.length === 1 &&
               queryVars.length === 0 &&
               wApp.ground &&
@@ -7008,6 +7279,8 @@ function* mettaEvalG(
               cr.results.length === 1
                 ? cr.results[0]!
                 : undefined;
+            const tailResult =
+              env.useCompiledTailContinuation !== false ? singleTailResult : undefined;
             if (tailResult !== undefined) {
               const nextAtom = tailResult.atom;
               if (
@@ -7051,6 +7324,9 @@ function* mettaEvalG(
               wApp,
               cr,
               opReturnsAtom,
+              depth,
+              trampoline,
+              singleTailResult !== undefined,
             );
             cur2 = st4;
             for (const h of handled) out.push(h);
@@ -7072,7 +7348,12 @@ function* mettaEvalG(
             );
           }
           if (eligible) {
-            const hit = key === undefined ? undefined : env.tableSpace!.getCompleted(key)?.results;
+            const completed = key === undefined ? undefined : env.tableSpace!.getCompleted(key);
+            const hit =
+              completed !== undefined &&
+              depth.canReplay(completed.depthSpan, cur2.world.maxStackDepth)
+                ? (depth.replay(completed.depthSpan), completed.results)
+                : undefined;
             if (hit !== undefined) {
               for (const r of hit) out.push([r, partB]);
               continue;
@@ -7098,7 +7379,11 @@ function* mettaEvalG(
           const tableSpace = env.tableSpace!;
           const encoded = tableSpace.key("moded", wApp, modedRuntimeVersion);
           const modedHit = tableSpace.getCompleted(encoded);
-          if (modedHit !== undefined) {
+          if (
+            modedHit !== undefined &&
+            depth.canReplay(modedHit.depthSpan, cur2.world.maxStackDepth)
+          ) {
+            depth.replay(modedHit.depthSpan);
             for (const cachedResult of modedHit.results) {
               const [freshened, stF] = freshenModedResult(
                 cur2,
@@ -7114,6 +7399,11 @@ function* mettaEvalG(
           const active = tableSpace.getActive(encoded);
           if (active !== undefined && tableSpace.isTopActive(active)) {
             tableSpace.markCyclic(active);
+            if (!depth.canReplay(active.depthSpan, cur2.world.maxStackDepth)) {
+              out.push([depthOverflowAtom(env, wApp), partB]);
+              continue;
+            }
+            depth.replay(active.depthSpan);
             for (const cachedResult of active.results) {
               const [freshened, stF] = freshenModedResult(
                 cur2,
@@ -7146,12 +7436,19 @@ function* mettaEvalG(
         const before = out.length;
         try {
           const runProducerPass = function* (start: St): Gen<[Array<[Atom, Bindings]>, St]> {
-            const [pairs, st3] = yield* interpretLoopG(env, fuel, start, [
-              {
-                stack: atomToStack(makeExpr(env, [sym("eval"), wApp]), null),
-                bnd: lbnd,
-              },
-            ]);
+            const [pairs, st3] = yield* interpretLoopG(
+              env,
+              fuel,
+              start,
+              [
+                {
+                  stack: atomToStack(makeExpr(env, [sym("eval"), wApp]), null),
+                  bnd: lbnd,
+                },
+              ],
+              depth,
+              trampoline,
+            );
             return yield* reduceRulePairsG(
               env,
               fuel,
@@ -7161,6 +7458,8 @@ function* mettaEvalG(
               wApp,
               pairs,
               opReturnsAtom,
+              depth,
+              trampoline,
             );
           };
           if (modedEligible) {
@@ -7170,9 +7469,17 @@ function* mettaEvalG(
             const [firstPass, firstState] = yield* runProducerPass(start);
             cur2 = firstState;
             const firstCanonical = firstPass.map((p) => canonicalize(p[0], map));
+            env.tableSpace!.observeActiveDepth(active, depth.span(depthSpan));
             if (!active.cyclic) {
               for (const p of firstPass) out.push(p);
-              rememberModedTable(env, modedKey!, modedNumCallVars, firstCanonical);
+              if (!firstCanonical.some(isStackOverflowAtom))
+                rememberModedTable(
+                  env,
+                  modedKey!,
+                  modedNumCallVars,
+                  firstCanonical,
+                  depth.span(depthSpan),
+                );
             } else {
               let added = env.tableSpace!.addActiveAnswers(active, firstCanonical);
               let maxCounter = Math.max(start.counter, firstState.counter);
@@ -7185,6 +7492,7 @@ function* mettaEvalG(
                 }
                 const [pass, passState] = yield* runProducerPass(start);
                 maxCounter = Math.max(maxCounter, passState.counter);
+                env.tableSpace!.observeActiveDepth(active, depth.span(depthSpan));
                 added = env.tableSpace!.addActiveAnswers(
                   active,
                   pass.map((p) => canonicalize(p[0], map)),
@@ -7195,7 +7503,14 @@ function* mettaEvalG(
               if (active.overBudget) {
                 out.push([makeExpr(env, [sym("Error"), wApp, sym("TableResourceLimit")]), partB]);
               } else if (out.length === before) {
-                rememberModedTable(env, modedKey!, modedNumCallVars, active.results);
+                if (!active.results.some(isStackOverflowAtom))
+                  rememberModedTable(
+                    env,
+                    modedKey!,
+                    modedNumCallVars,
+                    active.results,
+                    depth.span(depthSpan),
+                  );
                 for (const cachedResult of active.results) {
                   const [freshened, stF] = freshenModedResult(
                     cur2,
@@ -7209,12 +7524,19 @@ function* mettaEvalG(
               }
             }
           } else {
-            const [pairs, st3] = yield* interpretLoopG(env, fuel, cur2, [
-              {
-                stack: atomToStack(makeExpr(env, [sym("eval"), wApp]), null),
-                bnd: lbnd,
-              },
-            ]);
+            const [pairs, st3] = yield* interpretLoopG(
+              env,
+              fuel,
+              cur2,
+              [
+                {
+                  stack: atomToStack(makeExpr(env, [sym("eval"), wApp]), null),
+                  bnd: lbnd,
+                },
+              ],
+              depth,
+              trampoline,
+            );
             cur2 = st3;
             // Tail call: one ground call reducing to a single operator-headed continuation, with no branching
             // (one partial, one pair) and no bindings to thread (queryVars empty). Loop on the continuation
@@ -7227,7 +7549,7 @@ function* mettaEvalG(
               // trampoline re-cuts at depth 1 and grows an (Error (eval …) StackOverflow) each iteration,
               // looping forever (the trampoline does not decrement fuel).
               if (isStackOverflowAtom(p[0]))
-                return flushReturn([[p[0], mergeRestrict(env, queryVars, partB, p[1])]], cur2);
+                return flushReturn([[p[0], restrictBnd(env, queryVars, p[1])]], cur2);
               const isData = atomEq(p[0], notReducibleA) || atomEq(p[0], wApp);
               if (!isData && !(opReturnsAtom && !isEmbeddedOp(p[0])) && opOf(p[0]) !== undefined) {
                 const pb = mergeRestrict(env, queryVars, partB, p[1]);
@@ -7250,6 +7572,8 @@ function* mettaEvalG(
               wApp,
               pairs,
               opReturnsAtom,
+              depth,
+              trampoline,
             );
             cur2 = st4;
             const producedPairs =
@@ -7260,8 +7584,8 @@ function* mettaEvalG(
             for (const r of producedPairs) out.push(r);
             if (eligible) {
               const produced = producedPairs.map((p) => p[0]);
-              if (key !== undefined && produced.every((a) => a.ground))
-                rememberGroundTable(env, key, produced);
+              if (key !== undefined && produced.every((a) => a.ground && !isStackOverflowAtom(a)))
+                rememberGroundTable(env, key, produced, depth.span(depthSpan));
             }
           }
         } finally {
@@ -7277,9 +7601,14 @@ function* mettaEvalG(
 
   if (w.kind === "expr" && w.items.length > 0) {
     // expression-headed application
-    const [ruleRes, st1] = yield* interpretLoopG(env, fuel, st, [
-      { stack: atomToStack(makeExpr(env, [sym("eval"), w]), null), bnd },
-    ]);
+    const [ruleRes, st1] = yield* interpretLoopG(
+      env,
+      fuel,
+      st,
+      [{ stack: atomToStack(makeExpr(env, [sym("eval"), w]), null), bnd }],
+      depth,
+      trampoline,
+    );
     const reduced = ruleRes.filter((p) => !atomEq(p[0], w) && !atomEq(p[0], notReducibleA));
     if (reduced.length === 0) {
       // No rule fired above and every element is already inert data, so the tuple is its own value. Skip
@@ -7295,36 +7624,181 @@ function* mettaEvalG(
         if (w.items.every((it) => isInertData(env, st1.world, it, exprHeads)))
           return [[[w, bnd]], st1];
       }
-      const [tupleRes, st2] = yield* interpretLoopG(env, fuel, st1, [
-        {
-          stack: atomToStack(
-            makeExpr(env, [sym("eval"), makeExpr(env, [sym("interpret-tuple"), w, sym("&self")])]),
-            null,
-          ),
-          bnd,
-        },
-      ]);
+      const [tupleRes, st2] = yield* interpretLoopG(
+        env,
+        fuel,
+        st1,
+        [
+          {
+            stack: atomToStack(
+              makeExpr(env, [
+                sym("eval"),
+                makeExpr(env, [sym("interpret-tuple"), w, sym("&self")]),
+              ]),
+              null,
+            ),
+            bnd,
+          },
+        ],
+        depth,
+        trampoline,
+      );
       // the interpret-tuple fallback: a tuple element equal to the whole term is already final.
-      return yield* reduceChildrenG(env, fuel, st2, tupleRes, (p) =>
-        atomEq(p[0], w) ? [p] : undefined,
+      return yield* reduceChildrenG(
+        env,
+        fuel,
+        st2,
+        tupleRes,
+        (p) => (atomEq(p[0], w) ? [p] : undefined),
+        depth,
+        trampoline,
       );
     }
     // a rule fired: every reduced result still needs evaluating to normal form.
-    return yield* reduceChildrenG(env, fuel, st1, reduced, () => undefined);
+    return yield* reduceChildrenG(env, fuel, st1, reduced, () => undefined, depth, trampoline);
   }
 
   // bare symbol / variable / grounded
-  const [pairs, st1] = yield* interpretLoopG(env, fuel, st, [
-    { stack: atomToStack(makeExpr(env, [sym("eval"), w]), null), bnd },
-  ]);
-  // an irreducible symbol stays itself; an Atom-typed result is inert; anything else evaluates on.
-  return yield* reduceChildrenG(env, fuel, st1, pairs, (p) =>
-    atomEq(p[0], notReducibleA) || atomEq(p[0], w)
-      ? [[w, bnd]]
-      : returnsAtom(env, w) && !isEmbeddedOp(p[0])
-        ? [p]
-        : undefined,
+  const [pairs, st1] = yield* interpretLoopG(
+    env,
+    fuel,
+    st,
+    [{ stack: atomToStack(makeExpr(env, [sym("eval"), w]), null), bnd }],
+    depth,
+    trampoline,
   );
+  // an irreducible symbol stays itself; an Atom-typed result is inert; anything else evaluates on.
+  return yield* reduceChildrenG(
+    env,
+    fuel,
+    st1,
+    pairs,
+    (p) =>
+      atomEq(p[0], notReducibleA) || atomEq(p[0], w)
+        ? [[w, bnd]]
+        : returnsAtom(env, w) && !isEmbeddedOp(p[0])
+          ? [p]
+          : undefined,
+    depth,
+    trampoline,
+  );
+}
+
+function* mettaEvalFrameG(
+  env: MinEnv,
+  fuel: number,
+  st: St,
+  bnd: Bindings,
+  a: Atom,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
+  reuseDepthLevel = false,
+): Gen<[Array<[Atom, Bindings]>, St]> {
+  if (fuel <= 0)
+    return [[[makeExpr(env, [sym("Error"), inst(env, bnd, a), sym("StackOverflow")]), bnd]], st];
+  const w = inst(env, bnd, a);
+  const lease: EvaluationDepthLease = {
+    entered: false,
+    ownsLevel: false,
+    reuseLevel: reuseDepthLevel,
+  };
+  const depthSpan = depth.beginSpan();
+  try {
+    return yield* mettaEvalBodyG(env, fuel, st, bnd, a, w, depth, lease, depthSpan, trampoline);
+  } finally {
+    depth.endSpan(depthSpan);
+    if (lease.ownsLevel) depth.leave();
+  }
+}
+
+function* driveMettaEvalG(request: EvalRequest): Gen<EvalRes> {
+  const trampoline: EvalTrampoline = { active: true };
+  const frames: Array<Gen<EvalRes>> = [
+    mettaEvalFrameG(
+      request.env,
+      request.fuel,
+      request.state,
+      request.bindings,
+      request.atom,
+      request.depth,
+      trampoline,
+      request.reuseDepthLevel,
+    ),
+  ];
+  let resume:
+    | { readonly kind: "next"; readonly value: unknown }
+    | { readonly kind: "throw"; readonly error: unknown } = { kind: "next", value: undefined };
+  for (;;) {
+    const current = frames[frames.length - 1]!;
+    let step: IteratorResult<Susp, EvalRes>;
+    try {
+      step = resume.kind === "next" ? current.next(resume.value) : current.throw(resume.error);
+    } catch (error) {
+      frames.pop();
+      if (frames.length === 0) throw error;
+      resume = { kind: "throw", error };
+      continue;
+    }
+    if (step.done) {
+      frames.pop();
+      if (frames.length === 0) return step.value;
+      resume = { kind: "next", value: step.value };
+      continue;
+    }
+    if (isEvalRequest(step.value)) {
+      const child = step.value;
+      frames.push(
+        mettaEvalFrameG(
+          child.env,
+          child.fuel,
+          child.state,
+          child.bindings,
+          child.atom,
+          child.depth,
+          trampoline,
+          child.reuseDepthLevel,
+        ),
+      );
+      resume = { kind: "next", value: undefined };
+      continue;
+    }
+    resume = { kind: "next", value: yield step.value };
+  }
+}
+
+function* mettaEvalG(
+  env: MinEnv,
+  fuel: number,
+  st: St,
+  bnd: Bindings,
+  a: Atom,
+  depth: EvaluationDepth,
+  trampoline: EvalTrampoline | undefined,
+  reuseDepthLevel = false,
+): Gen<EvalRes> {
+  if (trampoline !== undefined)
+    return (yield {
+      kind: EVAL_REQUEST,
+      env,
+      fuel,
+      state: st,
+      bindings: bnd,
+      atom: a,
+      depth,
+      reuseDepthLevel,
+    }) as EvalRes;
+  if (depth.current >= EVALUATION_TRAMPOLINE_DEPTH - 1)
+    return yield* driveMettaEvalG({
+      kind: EVAL_REQUEST,
+      env,
+      fuel,
+      state: st,
+      bindings: bnd,
+      atom: a,
+      depth,
+      reuseDepthLevel,
+    });
+  return yield* mettaEvalFrameG(env, fuel, st, bnd, a, depth, undefined, reuseDepthLevel);
 }
 
 // ---------- public API ----------
@@ -7348,6 +7822,18 @@ function stackOverflowResult(
 ): [Array<[Atom, Bindings]>, St] {
   if (env.trace) env.trace({ kind: "overflow", atom: format(inst(env, bnd, a)) });
   return [[[makeExpr(env, [sym("Error"), inst(env, bnd, a), sym("StackOverflow")]), bnd]], st];
+}
+
+function restrictPublicStackOverflowBindings(
+  env: MinEnv,
+  query: Atom,
+  result: [Array<[Atom, Bindings]>, St],
+): [Array<[Atom, Bindings]>, St] {
+  const vars = atomVars(query);
+  const pairs = result[0].map((pair): [Atom, Bindings] =>
+    isStackOverflowAtom(pair[0]) ? [pair[0], restrictBnd(env, vars, pair[1])] : pair,
+  );
+  return [pairs, result[1]];
 }
 
 // Direct top-level match (`experimental.directMatch`, on by default). A public-entry query that IS a
@@ -7434,12 +7920,17 @@ function mettaEval(
   st: St,
   bnd: Bindings,
   a: Atom,
+  depth: EvaluationDepth = new EvaluationDepth(),
 ): [Array<[Atom, Bindings]>, St] {
   ensureCompiled(env, a);
   try {
     const direct = tryDirectTopMatch(env, fuel, st, bnd, a);
     if (direct !== undefined) return direct;
-    return runGenSync(mettaEvalG(env, fuel, st, bnd, a));
+    return restrictPublicStackOverflowBindings(
+      env,
+      a,
+      runGenSync(mettaEvalG(env, fuel, st, bnd, a, depth, undefined)),
+    );
   } catch (e) {
     if (isNativeStackOverflow(e)) return stackOverflowResult(env, st, bnd, a);
     throw e;
@@ -7455,14 +7946,17 @@ export function mettaEvalAsync(
   bnd: Bindings,
   a: Atom,
   signal?: AbortSignal,
+  depth: EvaluationDepth = new EvaluationDepth(),
 ): Promise<[Array<[Atom, Bindings]>, St]> {
   ensureCompiled(env, a);
   const direct = tryDirectTopMatch(env, fuel, st, bnd, a);
   if (direct !== undefined) return Promise.resolve(direct);
-  return runGenAsync(mettaEvalG(env, fuel, st, bnd, a), signal).catch((e: unknown) => {
-    if (isNativeStackOverflow(e)) return stackOverflowResult(env, st, bnd, a);
-    throw e;
-  });
+  return runGenAsync(mettaEvalG(env, fuel, st, bnd, a, depth, undefined), signal)
+    .then((result) => restrictPublicStackOverflowBindings(env, a, result))
+    .catch((e: unknown) => {
+      if (isNativeStackOverflow(e)) return stackOverflowResult(env, st, bnd, a);
+      throw e;
+    });
 }
 
 /** Evaluate `atom` (i.e. interpret `(eval atom)`) under `env`, returning the result atoms. */

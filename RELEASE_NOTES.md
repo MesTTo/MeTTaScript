@@ -1,3 +1,53 @@
+# MeTTaScript 2.0.2
+
+A correctness release. Recursion depth is now deterministic: a program's output no longer depends on how
+much native JavaScript stack the host gave the evaluation. Semantics are otherwise unchanged from 2.0.1,
+and every terminating program produces the same output, validated byte-identical on the conformance
+oracle, the full test suite, and all 103 terminating corpus programs. Upgrading from 2.0.1 is safe.
+
+## Deterministic recursion depth
+
+Before this release, a program whose control flow depends on recursion depth could observe different
+output depending on how deep the evaluation ran before the native stack overflowed. A compiled fragment
+uses fewer native frames per step than the interpreter, so the two paths could reach different depths and
+emit different results for the same program. One corpus program, `greedy_chess`, showed it directly: the
+compiled path emitted thousands more lines than the interpreted path purely because it overflowed later.
+
+Two changes remove the host stack from the picture. Recursion is counted as a logical depth of
+user-equation calls, the same way on the interpreted and compiled paths, so both reach the same bound.
+And once recursion passes a fixed native-frame threshold it is handed to a heap-driven trampoline that
+carries the rest of the evaluation without growing the native stack, so the logical bound is actually
+reachable no matter how much stack the host has. Output is now a function of the program and the bound,
+not of the environment.
+
+The default bound is 320 user-equation calls. This replaces the previous default, where recursion ran
+until the native stack overflowed at a host-dependent depth, with a deterministic limit that sits above
+the deepest terminating corpus program. A program that needs to recurse deeper can raise it with
+`(pragma! max-stack-depth N)` or the `maxStackDepth` option.
+
+`greedy_chess` now produces identical output through both engines, the result is independent of the V8
+stack size across every size tested, and the full terminating corpus stays byte-identical.
+
+## Performance
+
+Determinism was the goal, not speed. On the workloads measured the change is within control noise. A
+clean-machine confirmation across the corpus is still pending.
+
+## Known limitation: a work budget for broad search (being fixed)
+
+A depth bound bounds depth, not total work. A program that branches broadly, such as the PLN direct proof
+search in `plntestdirect`, can now run all the way to the depth bound and take a long time, where before
+it failed fast by overflowing the native stack early. Its output is no longer host-dependent, but it is
+not yet bounded by a deterministic amount of work. A step budget that cuts broad search at an
+environment-independent point is in progress for a follow-up release.
+
+## Notes
+
+The guarantee covers recursion depth. The depth of a single deeply nested expression still follows the
+host stack, since evaluating nested arguments consumes native frames without adding logical depth.
+`(pragma! max-stack-depth N)` now counts user-equation calls, which is tail-transparent and differs from
+Hyperon's raw frame count.
+
 # MeTTaScript 2.0.1
 
 A performance, robustness, and conformance patch. Semantics are unchanged from 2.0.0: every

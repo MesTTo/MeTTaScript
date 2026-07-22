@@ -62,6 +62,8 @@ export interface JitSearchState {
   frontier?: JitFrontier | undefined;
   readonly hardCap?: number;
   readonly limit?: unknown;
+  readonly enterDepth?: (fn: number, args: readonly Slim[]) => boolean;
+  readonly leaveDepth?: () => void;
 }
 
 const mkc = (): Slim => ({
@@ -1842,9 +1844,14 @@ function emitFn(
       })
     : directRefs;
   const lines: string[] = [];
+  const depthArgs = inputLayout.shapes.map((shape) => emitPackedResult(ctx, shape, directRefs));
   lines.push(
     `function ${directName}(${directRefs.join(", ")}${directRefs.length > 0 ? ", " : ""}k) {`,
   );
+  lines.push(
+    `const depthEntered = ST.enterDepth === undefined ? false : ST.enterDepth(${fnId}, [${depthArgs.join(", ")}]);`,
+  );
+  lines.push(`try {`);
   lines.push(`const dispatch = ++ST.d;`);
   lines.push(`if (ST.hardCap !== undefined && dispatch > ST.hardCap) throw ST.limit;`);
   lines.push(`const guarded = dispatch > ST.cap;`);
@@ -1902,6 +1909,7 @@ function emitFn(
     lines.push(`}`);
   }
   lines.push(`if (guarded) ST.active.pop();`);
+  lines.push(`} finally { if (depthEntered) ST.leaveDepth(); }`);
   lines.push(`}`);
   if (frontier) {
     const fullArgs = inputLayout.shapes.map((shape) => emitPackedResult(ctx, shape, directRefs));

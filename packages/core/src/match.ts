@@ -105,7 +105,7 @@ type ReconcileSeen = Map<Atom, Set<Atom>>;
  *  `($d, (g $e 1)) → ((g $b 1), (g $e 1)) → ($d, $e) → ((g $b 1), $e) → ((g $a 1), (g $b 1)) →
  *  ((g $e 1), $b)` and back, while the per-variable occurs check stays false at every individual step (the
  *  `a = b, b ← $d` aliasing routes each query around the cycle). The interpreter's
- *  `(pragma! max-stack-depth N)` bounds interpreter frames only, so this machinery must be total on its own.
+ *  `(pragma! max-stack-depth N)` bounds user-equation calls only, so this machinery must be total on its own.
  *  Termination: every reconciled pair is drawn, by object identity, from the finite subterm universe of the
  *  cascade's values, and each recursive entry grey-marks a fresh pair. Behaviour is unchanged on every input
  *  that terminates today: `reconcile` is a pure function of its arguments, so an in-stack revisit of the same

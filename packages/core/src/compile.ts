@@ -44,11 +44,32 @@ import { IMPURE_OPS } from "./tabling";
 import { type IntVal, addInt, subInt, mulInt, intDiv, intMod, isZero, cmpIntVal } from "./number";
 import { callGrounded } from "./builtins";
 import { type MinEnv, type St } from "./eval";
+import {
+  DEFAULT_MAX_STACK_DEPTH,
+  EVALUATION_TRAMPOLINE_DEPTH,
+  type EvaluationDepthBoundary,
+  EvaluationDepth,
+  EvaluationDepthHandoff,
+  EvaluationDepthOverflow,
+} from "./eval-depth";
 
 /** Thrown by a compiled node when it meets a case it cannot handle faithfully (division by zero);
  *  the caller catches it (along with a native stack `RangeError`) and re-runs the call in the
  *  interpreter, which is sound because the compiled subset is side-effect-free. */
 export const BAIL = Symbol("bail");
+// Generated nondeterministic JIT frames are substantially smaller than evaluator or imperative frames.
+// The constrained-stack witness reaches the default language bound in compiled code, so that bound cuts
+// first. A larger or explicitly unlimited bound hands the next call to the heap evaluator.
+const NONDET_JIT_TRAMPOLINE_DEPTH = DEFAULT_MAX_STACK_DEPTH;
+
+function throwEvaluationDepthBoundary(
+  boundary: EvaluationDepthBoundary,
+  atom: Atom,
+  state?: unknown,
+): never {
+  if (boundary === "overflow") throw new EvaluationDepthOverflow(atom, state);
+  throw new EvaluationDepthHandoff(atom, state);
+}
 
 // A fixed-arity tuple of ints, the one non-scalar value the compiled core handles (PeTTa's iterate/
 // quad-step thread a `($t $i $sum)` state tuple). Wrapped in a class so it is distinct from the plain
@@ -58,7 +79,7 @@ class Tup {
 }
 type FrameVal = IntVal | Tup;
 type Ty = "int" | "bool" | "sym" | `tuple${number}` | `symtuple${number}`;
-type Node = (frame: FrameVal[]) => FrameVal | boolean;
+type Node = (frame: FrameVal[], runtime: FunctionalRuntime) => FrameVal | boolean;
 interface Compiled {
   readonly node: Node;
   readonly type: Ty;
@@ -68,10 +89,16 @@ interface Compiled {
  *  recursion resolves through the holder object. */
 interface FunctionalHolder {
   kind: "functional";
+  name: string;
   arity: number;
   retType: Ty;
   paramTypes: Ty[];
-  run: (vals: FrameVal[]) => FrameVal | boolean;
+  run: (vals: FrameVal[], runtime?: FunctionalRuntime, entered?: boolean) => FrameVal | boolean;
+}
+interface FunctionalRuntime {
+  readonly depth: EvaluationDepth;
+  readonly limit: number;
+  counterDelta: number;
 }
 interface CompiledAtomResult {
   readonly atom: Atom;
@@ -104,6 +131,10 @@ interface SymbolicHolder {
   run: (partAtoms: readonly Atom[], counter: number) => CompiledRunResult | undefined;
 }
 export interface CompiledImpureOps {
+  /** Per-evaluation logical call lineage. The evaluator supplies it at the compiled boundary; recursive
+   *  holders enter it before invoking another user equation. */
+  readonly evaluationDepth?: EvaluationDepth;
+  readonly maxStackDepth?: number;
   readonly addAtom: (env: MinEnv, st: St, space: Atom, atom: Atom) => St | undefined;
   /** Solutions of a `(match space pattern template)` under the current world: the instantiated
    *  template plus that solution's bindings, in the interpreter's own candidate order, and the
@@ -202,9 +233,9 @@ const KNOWN_OPS = new Set([
   "let",
 ]);
 
-const asIntNode = (c: Compiled): ((f: FrameVal[]) => IntVal) => c.node as (f: FrameVal[]) => IntVal;
+const asIntNode = (c: Compiled): IntNode => c.node as IntNode;
 
-type IntNode = (f: FrameVal[]) => IntVal;
+type IntNode = (f: FrameVal[], runtime: FunctionalRuntime) => IntVal;
 
 /** Compile the two operands of a binary integer operation to int-valued frame nodes, or `undefined` if
  *  either operand is not a compilable int (so the caller bails the whole function to the interpreter). */
@@ -235,10 +266,17 @@ function compileIf(
   const t = branch(then_);
   const e = branch(els);
   if (!c || !t || !e || c.type !== "bool" || t.type !== e.type) return undefined;
-  const cn = c.node as (f: FrameVal[]) => boolean;
+  const cn = c.node as (f: FrameVal[], runtime: FunctionalRuntime) => boolean;
   const tn = t.node;
   const en = e.node;
-  return { node: (f) => (cn(f) ? tn(f) : en(f)), type: t.type };
+  return {
+    node: (f, runtime) => {
+      const condition = cn(f, runtime);
+      runtime.counterDelta += 2;
+      return condition ? tn(f, runtime) : en(f, runtime);
+    },
+    type: t.type,
+  };
 }
 
 /** Compile a body atom to a typed node, or `undefined` if it falls outside the supported subset. */
@@ -270,7 +308,10 @@ function compileBody(a: Atom, scope: Scope, holders: FunctionalFns): Compiled | 
     const elems = a.items.map((e) => compileBody(e, scope, holders));
     if (elems.some((c) => !c || c.type !== "int")) return undefined;
     const ns = elems.map((c) => asIntNode(c!));
-    return { node: (f) => new Tup(ns.map((n) => n(f))), type: `tuple${a.items.length}` };
+    return {
+      node: (f, runtime) => new Tup(ns.map((n) => n(f, runtime))),
+      type: `tuple${a.items.length}`,
+    };
   }
   const op = (head as { name: string }).name;
   const args = a.items.slice(1);
@@ -280,7 +321,7 @@ function compileBody(a: Atom, scope: Scope, holders: FunctionalFns): Compiled | 
     if (!xy) return undefined;
     const [xn, yn] = xy;
     const f = ARITH[op]!;
-    return { node: (fr) => f(xn(fr), yn(fr)), type: "int" };
+    return { node: (fr, runtime) => f(xn(fr, runtime), yn(fr, runtime)), type: "int" };
   }
   if (op === "/" || op === "%") {
     const xy = binIntArgs(args, scope, holders);
@@ -288,10 +329,10 @@ function compileBody(a: Atom, scope: Scope, holders: FunctionalFns): Compiled | 
     const [xn, yn] = xy;
     const div = op === "/" ? intDiv : intMod;
     return {
-      node: (fr) => {
-        const d = yn(fr);
+      node: (fr, runtime) => {
+        const d = yn(fr, runtime);
         if (isZero(d)) throw BAIL; // interpreter builds the exact DivisionByZero error
-        return div(xn(fr), d);
+        return div(xn(fr, runtime), d);
       },
       type: "int",
     };
@@ -312,7 +353,10 @@ function compileBody(a: Atom, scope: Scope, holders: FunctionalFns): Compiled | 
               : op === "=="
                 ? (c: number) => c === 0
                 : (c: number) => c !== 0;
-    return { node: (fr) => test(cmpIntVal(xn(fr), yn(fr))), type: "bool" };
+    return {
+      node: (fr, runtime) => test(cmpIntVal(xn(fr, runtime), yn(fr, runtime))),
+      type: "bool",
+    };
   }
   if (op === "if") {
     if (args.length !== 3) return undefined;
@@ -333,7 +377,11 @@ function compileBody(a: Atom, scope: Scope, holders: FunctionalFns): Compiled | 
     const xn = asIntNode(x);
     const tn = t.node;
     const en = e.node;
-    return { node: (fr) => (cmpIntVal(xn(fr), patVal) === 0 ? tn(fr) : en(fr)), type: t.type };
+    return {
+      node: (fr, runtime) =>
+        cmpIntVal(xn(fr, runtime), patVal) === 0 ? tn(fr, runtime) : en(fr, runtime),
+      type: t.type,
+    };
   }
   if (op === "let") {
     // (let <var> <int-value> <body>) binds the variable to the value, then evaluates the body.
@@ -354,7 +402,14 @@ function compileBody(a: Atom, scope: Scope, holders: FunctionalFns): Compiled | 
     if (!body) return undefined;
     const vn = asIntNode(val);
     const bn = body.node;
-    return { node: (fr) => bn([...fr, vn(fr)]), type: body.type };
+    return {
+      node: (fr, runtime) => {
+        const next = [...fr, vn(fr, runtime)];
+        runtime.counterDelta += 1;
+        return bn(next, runtime);
+      },
+      type: body.type,
+    };
   }
   // a call to another compiled function (self or mutual): each argument must match the callee's declared
   // parameter type (int or tuple), so a tuple flows through a call faithfully.
@@ -365,7 +420,10 @@ function compileBody(a: Atom, scope: Scope, holders: FunctionalFns): Compiled | 
     if (cs.some((c, i) => !c || c.type !== h.paramTypes[i])) return undefined;
     const ns = cs.map((c) => c!.node);
     // args are int/tuple (paramTypes never bool), so the mapped values are FrameVal.
-    return { node: (fr) => h.run(ns.map((n) => n(fr)) as FrameVal[]), type: h.retType };
+    return {
+      node: (fr, runtime) => h.run(ns.map((n) => n(fr, runtime)) as FrameVal[], runtime),
+      type: h.retType,
+    };
   }
   return undefined;
 }
@@ -390,13 +448,39 @@ function compileTail(
         compileTail(x, scope, holders, self),
       );
     }
+    if (op === "let" && a.items.length === 4 && a.items[1]!.kind === "var") {
+      const value = compileBody(a.items[2]!, scope, holders);
+      if (value === undefined || value.type !== "int") return undefined;
+      const idx = scope.len;
+      const nextScope: Scope = {
+        vars: new Map(scope.vars).set(a.items[1]!.name, {
+          acc: (frame) => frame[idx]!,
+          type: "int",
+        }),
+        len: idx + 1,
+      };
+      const body = compileTail(a.items[3]!, nextScope, holders, self);
+      if (body === undefined) return undefined;
+      const valueNode = asIntNode(value);
+      return {
+        node: (frame, runtime) => {
+          const next = [...frame, valueNode(frame, runtime)];
+          runtime.counterDelta += 1;
+          return body.node(next, runtime);
+        },
+        type: body.type,
+      };
+    }
     if (op === self) {
       const h = holders.get(self);
       if (h !== undefined && a.items.length - 1 === h.arity) {
         const cs = a.items.slice(1).map((x) => compileBody(x, scope, holders));
         if (!cs.some((c, i) => !c || c.type !== h.paramTypes[i])) {
           const ns = cs.map((c) => c!.node);
-          return { node: (f) => ns.map((n) => n(f)) as unknown as FrameVal, type: h.retType };
+          return {
+            node: (f, runtime) => ns.map((n) => n(f, runtime)) as unknown as FrameVal,
+            type: h.retType,
+          };
         }
       }
     }
@@ -424,17 +508,21 @@ function selfCallCount(a: Atom, functor: string): number {
  *  nothing from the cache and pays the key-building and Map cost on every call, so it runs bare. Single-int
  *  -arg functions key directly; others by a string of args. */
 function makeRun(
+  name: string,
   arity: number,
   node: Node,
   memoize: boolean,
-): (vals: FrameVal[]) => FrameVal | boolean {
+): FunctionalHolder["run"] {
   // A tail-recursive body (compiled by compileTail) returns the next argument frame as an array; loop on it
   // instead of recursing. A non-tail-recursive body never returns an array, so the loop runs exactly once.
   // (A tuple result is a `Tup`, not an array, so it is never mistaken for a tail-call frame.)
-  const loop = (vals: FrameVal[]): FrameVal | boolean => {
+  const loop = (vals: FrameVal[], runtime: FunctionalRuntime): FrameVal | boolean => {
     let frame = vals;
+    let first = true;
     for (;;) {
-      const r: unknown = node(frame);
+      if (first) first = false;
+      else runtime.counterDelta += 1;
+      const r: unknown = node(frame, runtime);
       if (Array.isArray(r)) {
         frame = r as FrameVal[];
         continue;
@@ -442,20 +530,50 @@ function makeRun(
       return r as FrameVal | boolean;
     }
   };
-  if (!memoize) return loop;
-  const memo = new Map<unknown, FrameVal | boolean>();
+  const memo = memoize
+    ? new Map<
+        unknown,
+        { readonly value: FrameVal | boolean; readonly span: number; readonly counterSpan: number }
+      >()
+    : undefined;
   // A tuple argument must be keyed by its contents, not `String(tup)` (which is "[object Object]" for every
   // tuple and so collapses distinct tuples in the same position to one (a stale memo hit). Numbers key as
   // themselves; an int and a bigint of equal value share a key, which is a correct hit (same value).
   const keyOf = (v: FrameVal): string =>
     v instanceof Tup ? "(" + v.v.map(keyOf).join(" ") + ")" : String(v);
-  return (vals) => {
-    const key = arity === 1 ? keyOf(vals[0]!) : vals.map(keyOf).join(",");
-    const hit = memo.get(key);
-    if (hit !== undefined) return hit;
-    const v = loop(vals);
-    memo.set(key, v);
-    return v;
+  const atomOf = (value: FrameVal): Atom =>
+    value instanceof Tup ? expr(value.v.map((n) => gint(n))) : gint(value);
+  return (vals, inherited, entered = false) => {
+    const runtime = inherited ?? { depth: new EvaluationDepth(), limit: 0, counterDelta: 0 };
+    if (!entered) {
+      const boundary = runtime.depth.enterBoundary(runtime.limit, EVALUATION_TRAMPOLINE_DEPTH);
+      if (boundary !== undefined)
+        throwEvaluationDepthBoundary(boundary, expr([sym(name), ...vals.map(atomOf)]));
+    }
+    try {
+      runtime.counterDelta += 1;
+      if (memo === undefined) return loop(vals, runtime);
+      const key = arity === 1 ? keyOf(vals[0]!) : vals.map(keyOf).join(",");
+      const hit = memo.get(key);
+      if (hit !== undefined && runtime.depth.canReplay(hit.span, runtime.limit)) {
+        runtime.depth.replay(hit.span);
+        runtime.counterDelta += hit.counterSpan;
+        return hit.value;
+      }
+      const marker = runtime.depth.beginSpan();
+      const counterStart = runtime.counterDelta;
+      try {
+        const value = loop(vals, runtime);
+        const span = runtime.depth.endSpan(marker);
+        memo.set(key, { value, span, counterSpan: runtime.counterDelta - counterStart });
+        return value;
+      } catch (error) {
+        runtime.depth.endSpan(marker);
+        throw error;
+      }
+    } finally {
+      if (!entered) runtime.depth.leave();
+    }
   };
 }
 
@@ -1514,8 +1632,11 @@ function compileNondetGroup(
       if (matchSolutions === undefined) return undefined;
       const ctr = { c: st.counter };
       let dispatches = 0;
+      let rootDispatch = true;
       const active: AtomRecurrenceFrame[] = [];
       const world = st.world;
+      const evaluationDepth = ops.evaluationDepth;
+      const depthLimit = ops.maxStackDepth ?? 0;
 
       // Deep resolution through the accumulated bindings (miniKanren's walk*): a goal can bind a
       // variable that an earlier goal already stored INSIDE a bound value, so a shallow instantiate
@@ -1660,21 +1781,35 @@ function compileNondetGroup(
       };
 
       function runCall(fn: string, args: readonly Atom[]): Array<readonly [Atom, Bindings]> {
+        const isRoot = rootDispatch;
+        rootDispatch = false;
+        if (!isRoot && evaluationDepth !== undefined) {
+          const boundary = evaluationDepth.enterBoundary(depthLimit, EVALUATION_TRAMPOLINE_DEPTH);
+          if (boundary !== undefined)
+            throwEvaluationDepthBoundary(boundary, expr([sym(fn), ...args]), {
+              counter: ctr.c,
+              world,
+            });
+        }
         const guarded = ++dispatches > cap;
         const guardFrame = guarded ? enterAtomNaturalRecurrence(active, fn, args) : undefined;
-        if (guarded && guardFrame === undefined) throw BAIL;
-        const cls = clausesByFn.get(fn);
-        if (cls === undefined) throw BAIL;
-        const app = expr([sym(fn), ...args]);
-        const out: Array<readonly [Atom, Bindings]> = [];
-        for (const clause of cls) {
-          const suffix = "#" + ctr.c;
-          ctr.c += 1;
-          for (const b0 of matchAtomsScoped(clause.lhs, app, suffix))
-            if (!hasLoop(b0)) execBody(clause.body, b0, suffix, out);
+        try {
+          if (guarded && guardFrame === undefined) throw BAIL;
+          const cls = clausesByFn.get(fn);
+          if (cls === undefined) throw BAIL;
+          const app = expr([sym(fn), ...args]);
+          const out: Array<readonly [Atom, Bindings]> = [];
+          for (const clause of cls) {
+            const suffix = "#" + ctr.c;
+            ctr.c += 1;
+            for (const b0 of matchAtomsScoped(clause.lhs, app, suffix))
+              if (!hasLoop(b0)) execBody(clause.body, b0, suffix, out);
+          }
+          return out;
+        } finally {
+          if (guarded && guardFrame !== undefined) active.pop();
+          if (!isRoot) evaluationDepth?.leave();
         }
-        if (guarded) active.pop();
-        return out;
       }
 
       try {
@@ -1715,9 +1850,12 @@ function compileNondetGroup(
       // lockstep depends on, per-dispatch only) is untouched by how many answer variables get named.
       let cellNameC = 0;
       let dispatches = 0;
+      let rootDispatch = true;
       const active: AtomRecurrenceFrame[] = [];
       const results: CompiledAtomResult[] = [];
       const queryVars = atomVars(expr(partAtoms as Atom[]));
+      const evaluationDepth = ops?.evaluationDepth;
+      const depthLimit = ops?.maxStackDepth ?? 0;
 
       // Inline integer +/-/* (dispatching through `callGrounded` per node is the search's dominant cost —
       // obc folds several sizes per mp step). Byte-identical: `callGrounded` routes +/-/* to these same
@@ -2001,35 +2139,55 @@ function compileNondetGroup(
       };
 
       function runCall(fn: string, args: readonly Atom[], k: (r: Atom) => void): void {
+        const isRoot = rootDispatch;
+        rootDispatch = false;
+        if (!isRoot && evaluationDepth !== undefined) {
+          const boundary = evaluationDepth.enterBoundary(depthLimit, EVALUATION_TRAMPOLINE_DEPTH);
+          if (boundary !== undefined)
+            throwEvaluationDepthBoundary(boundary, expr([sym(fn), ...args]), {
+              counter: ctr.c,
+              world,
+            });
+        }
         const guarded = ++dispatches > cap;
         const guardFrame = guarded ? enterAtomNaturalRecurrence(active, fn, args) : undefined;
-        if (guarded && guardFrame === undefined) throw BAIL;
+        let guardActive = guardFrame !== undefined;
         const emit =
           guardFrame === undefined
             ? k
             : (result: Atom) => {
                 active.pop();
-                k(result);
-                active.push(guardFrame);
+                guardActive = false;
+                try {
+                  k(result);
+                } finally {
+                  active.push(guardFrame);
+                  guardActive = true;
+                }
               };
-        const cls = skelsByFn.get(fn);
-        if (cls === undefined) throw BAIL;
-        for (const clause of cls) {
-          ctr.c += 1; // per-dispatch advance, exactly as the copying run did: counterDelta unchanged
-          const la = clause.lhsArgs;
-          if (la.length !== args.length) continue;
-          const frame: (CellVar | undefined)[] = new Array(clause.n).fill(undefined);
-          const m = cellTrail.length;
-          let ok = true;
-          for (let i = 0; i < la.length; i++)
-            if (!unifySkel(la[i]!, frame, args[i]!)) {
-              ok = false;
-              break;
-            }
-          if (ok) execBody(clause.body, frame, emit);
-          while (cellTrail.length > m) cellTrail.pop()!.b = undefined;
+        try {
+          if (guarded && guardFrame === undefined) throw BAIL;
+          const cls = skelsByFn.get(fn);
+          if (cls === undefined) throw BAIL;
+          for (const clause of cls) {
+            ctr.c += 1; // per-dispatch advance, exactly as the copying run did: counterDelta unchanged
+            const la = clause.lhsArgs;
+            if (la.length !== args.length) continue;
+            const frame: (CellVar | undefined)[] = new Array(clause.n).fill(undefined);
+            const m = cellTrail.length;
+            let ok = true;
+            for (let i = 0; i < la.length; i++)
+              if (!unifySkel(la[i]!, frame, args[i]!)) {
+                ok = false;
+                break;
+              }
+            if (ok) execBody(clause.body, frame, emit);
+            while (cellTrail.length > m) cellTrail.pop()!.b = undefined;
+          }
+        } finally {
+          if (guardActive) active.pop();
+          if (!isRoot) evaluationDepth?.leave();
         }
-        if (guarded) active.pop();
       }
 
       try {
@@ -2092,15 +2250,52 @@ function compileNondetGroup(
       _envR: MinEnv,
       partAtoms: readonly Atom[],
       st: St,
-      _ops?: CompiledImpureOps,
+      ops?: CompiledImpureOps,
       fuel?: number,
     ): CompiledRunResult | undefined => {
       const cap = fuel === undefined || fuel < NONDET_CALL_CAP ? NONDET_CALL_CAP : fuel;
       const queryVars = atomVars(expr(partAtoms as Atom[]));
+      const fnNames = [...clausesByFn.keys()];
       const attempt = (
         strategy: "deferred" | "direct" | "frontier",
       ): CompiledRunResult | undefined => {
-        const stBox: JitSearchState = { c: st.counter, d: 0, cap, active: [] };
+        const evaluationDepth = ops?.evaluationDepth;
+        if (evaluationDepth !== undefined && strategy !== "direct") return undefined;
+        let rootDispatch = true;
+        const depthHooks =
+          evaluationDepth === undefined
+            ? {}
+            : {
+                enterDepth: (fn: number, args: readonly Slim[]): boolean => {
+                  if (rootDispatch) {
+                    rootDispatch = false;
+                    return false;
+                  }
+                  const name = fnNames[fn];
+                  if (name === undefined) throw BAIL;
+                  const boundary = evaluationDepth.enterBoundary(
+                    ops?.maxStackDepth ?? 0,
+                    preferDirectForModed
+                      ? NONDET_JIT_TRAMPOLINE_DEPTH
+                      : EVALUATION_TRAMPOLINE_DEPTH,
+                  );
+                  if (boundary !== undefined)
+                    throwEvaluationDepthBoundary(
+                      boundary,
+                      expr([sym(name), ...args.map((arg) => jitRuntime.atomOfSlim(arg, { c: 0 }))]),
+                      { counter: stBox.c, world: st.world },
+                    );
+                  return true;
+                },
+                leaveDepth: (): void => evaluationDepth.leave(),
+              };
+        const stBox: JitSearchState = {
+          c: st.counter,
+          d: 0,
+          cap,
+          active: [],
+          ...depthHooks,
+        };
         const results: CompiledAtomResult[] = [];
         const entryCells = new Map<string, Slim>();
         const args = partAtoms.map((a) => jitRuntime.slimOfAtom(a, entryCells));
@@ -2423,13 +2618,14 @@ function compileImpIf(
   args: readonly Atom[],
   scope: ImpScope,
   holders: ImperativeFns,
+  tail: boolean,
 ): ImpCompiled | undefined {
   if (args.length !== 3 || (env.ruleIndex.get("if")?.length ?? 0) !== 2) return undefined;
   const addIfAbsent = compileImpAddIfAbsent(env, args, scope);
   if (addIfAbsent !== undefined) return addIfAbsent;
   const cond = compileImpAtom(env, args[0]!, scope, holders);
-  const then_ = compileImpAtom(env, args[1]!, scope, holders);
-  const els = compileImpAtom(env, args[2]!, scope, holders);
+  const then_ = compileImpAtom(env, args[1]!, scope, holders, tail);
+  const els = compileImpAtom(env, args[2]!, scope, holders, tail);
   if (cond === undefined || then_ === undefined || els === undefined) return undefined;
   return {
     node: (slots, st, ops, discard) => {
@@ -2457,6 +2653,7 @@ function compileImpLet(
   args: readonly Atom[],
   scope: ImpScope,
   holders: ImperativeFns,
+  tail: boolean,
 ): ImpCompiled | undefined {
   if (args.length !== 3 || args[0]!.kind !== "var" || (env.ruleIndex.get("let")?.length ?? 0) !== 1)
     return undefined;
@@ -2467,7 +2664,7 @@ function compileImpLet(
     vars: new Map(scope.vars).set(args[0]!.name, slot),
     len: slot + 1,
   };
-  const body = compileImpAtom(env, args[2]!, nextScope, holders);
+  const body = compileImpAtom(env, args[2]!, nextScope, holders, tail);
   if (body === undefined) return undefined;
   return {
     node: (slots, st, ops, discard) => {
@@ -2494,6 +2691,7 @@ function compileImpLetStar(
   args: readonly Atom[],
   scope: ImpScope,
   holders: ImperativeFns,
+  tail: boolean,
 ): ImpCompiled | undefined {
   if (
     args.length !== 2 ||
@@ -2516,7 +2714,7 @@ function compileImpLetStar(
       len: slot + 1,
     };
   }
-  const body = compileImpAtom(env, args[1]!, curScope, holders);
+  const body = compileImpAtom(env, args[1]!, curScope, holders, tail);
   if (body === undefined) return undefined;
   const parts = [...bindings.map((b) => b.value), body];
   return {
@@ -2655,6 +2853,7 @@ function compileImpCaseMatch(
   args: readonly Atom[],
   scope: ImpScope,
   holders: ImperativeFns,
+  tail: boolean,
 ): ImpCompiled | undefined {
   if (args.length !== 2 || (env.ruleIndex.get("case")?.length ?? 0) !== 1) return undefined;
   const scrut = impCaseMatchScrutinee(args[0]!);
@@ -2674,7 +2873,7 @@ function compileImpCaseMatch(
     vars: new Map(scope.vars).set(branch.items[0]!.name, slot),
     len: slot + 1,
   };
-  const body = compileImpAtom(env, branch.items[1]!, branchScope, holders);
+  const body = compileImpAtom(env, branch.items[1]!, branchScope, holders, tail);
   if (body === undefined) return undefined;
   return {
     node: (slots, st, ops, discard) => {
@@ -2737,6 +2936,7 @@ function compileImpCall(
   args: readonly Atom[],
   scope: ImpScope,
   holders: ImperativeFns,
+  tail: boolean,
 ): ImpCompiled | undefined {
   const h = holders.get(op);
   if (h === undefined || args.length !== h.arity) return undefined;
@@ -2744,20 +2944,41 @@ function compileImpCall(
   if (compiledArgs.some((arg) => arg === undefined)) return undefined;
   const parts = compiledArgs as ImpCompiled[];
   const meta = impMeta(parts);
+  const runNested = <T>(
+    runtimeOps: CompiledImpureOps,
+    callArgs: readonly Atom[],
+    callState: St,
+    run: () => T,
+  ): T => {
+    const evaluationDepth = runtimeOps.evaluationDepth;
+    if (evaluationDepth === undefined || tail) return run();
+    const boundary = evaluationDepth.enterBoundary(
+      runtimeOps.maxStackDepth ?? 0,
+      EVALUATION_TRAMPOLINE_DEPTH,
+    );
+    if (boundary !== undefined)
+      throwEvaluationDepthBoundary(boundary, expr([sym(op), ...callArgs]), callState);
+    try {
+      return run();
+    } finally {
+      evaluationDepth.leave();
+    }
+  };
   return {
     node: (slots, st, ops, discard) => {
       const r = impEvalArgs(parts, slots, st, ops); // call args are needed, never discarded
       if (r === BAIL) return BAIL;
       // An Empty argument makes the call empty without invoking it (args already ran for effects).
       if (r.empty) return { value: EMPTY_VALUE, st: r.st };
-      return h.run(r.vals, r.st, ops, discard);
+      return runNested(ops, r.vals, r.st, () => h.run(r.vals, r.st, ops, discard));
     },
     forEach: (slots, st, ops, discard, emit) => {
       const r = impEvalArgs(parts, slots, st, ops); // call args are needed, never discarded
       if (r === BAIL) return BAIL;
       if (r.empty) return r.st;
-      if (h.runForEach !== undefined) return h.runForEach(r.vals, r.st, ops, discard, emit);
-      const v = h.run(r.vals, r.st, ops, discard);
+      if (h.runForEach !== undefined)
+        return runNested(ops, r.vals, r.st, () => h.runForEach!(r.vals, r.st, ops, discard, emit));
+      const v = runNested(ops, r.vals, r.st, () => h.run(r.vals, r.st, ops, discard));
       if (v === BAIL) return BAIL;
       return v.value === EMPTY_VALUE ? v.st : emit(v.value, v.st);
     },
@@ -2822,6 +3043,7 @@ function compileImpAtom(
   a: Atom,
   scope: ImpScope,
   holders: ImperativeFns,
+  tail = false,
 ): ImpCompiled | undefined {
   if (a.kind !== "expr" || a.items.length === 0) return compileImpStaticAtom(env, a, scope);
   const head = a.items[0]!;
@@ -2838,13 +3060,13 @@ function compileImpAtom(
   }
   const op = head.name;
   const args = a.items.slice(1);
-  if (op === "if") return compileImpIf(env, args, scope, holders);
-  if (op === "let") return compileImpLet(env, args, scope, holders);
-  if (op === "let*") return compileImpLetStar(env, args, scope, holders);
+  if (op === "if") return compileImpIf(env, args, scope, holders, tail);
+  if (op === "let") return compileImpLet(env, args, scope, holders, tail);
+  if (op === "let*") return compileImpLetStar(env, args, scope, holders, tail);
   if (op === "add-atom") return compileImpAddAtom(env, args, scope);
-  if (op === "case") return compileImpCaseMatch(env, args, scope, holders);
+  if (op === "case") return compileImpCaseMatch(env, args, scope, holders, tail);
   if (IMP_GROUNDED.has(op)) return compileImpGrounded(env, op, args, scope, holders);
-  const call = compileImpCall(env, op, args, scope, holders);
+  const call = compileImpCall(env, op, args, scope, holders, tail);
   if (call !== undefined) return call;
   return compileImpStaticAtom(env, a, scope);
 }
@@ -2877,7 +3099,8 @@ function compileImperative(env: MinEnv, compiled: CompiledFns): void {
     for (const [f, h] of [...holders]) {
       const cd = cand.get(f)!;
       const scope = buildImpScope(cd.params);
-      const body = scope === undefined ? undefined : compileImpAtom(env, cd.body, scope, holders);
+      const body =
+        scope === undefined ? undefined : compileImpAtom(env, cd.body, scope, holders, true);
       if (body === undefined) {
         holders.delete(f);
         removed = true;
@@ -2960,6 +3183,7 @@ export function compileEnv(env: MinEnv): CompiledFns {
   for (const [f, { params }] of cand)
     holders.set(f, {
       kind: "functional",
+      name: f,
       arity: params.length,
       retType: undefined as unknown as Ty,
       paramTypes: paramTypesOf(params),
@@ -3005,7 +3229,7 @@ export function compileEnv(env: MinEnv): CompiledFns {
     }
     if (!removed) {
       for (const [f, { node, arity }] of result)
-        holders.get(f)!.run = makeRun(arity, node, selfCallCount(cand.get(f)!.body, f) >= 2);
+        holders.get(f)!.run = makeRun(f, arity, node, selfCallCount(cand.get(f)!.body, f) >= 2);
       const compiled: CompiledFns = new Map(holders);
       for (const f of pure) {
         if (compiled.has(f)) continue;
@@ -3041,18 +3265,57 @@ export function runCompiled(
   ops?: CompiledImpureOps,
   discard?: boolean,
   fuel?: number,
+  depth?: EvaluationDepth,
 ): CompiledRunResult | undefined {
   const h = env.compiled?.get(op);
   if (h === undefined || partAtoms.length !== h.arity) return undefined;
+  if (
+    depth !== undefined &&
+    depth.current >= EVALUATION_TRAMPOLINE_DEPTH &&
+    (h.kind === "functional" ||
+      h.kind === "imperative" ||
+      (h.kind === "nondet" && !h.preferDirectForModed))
+  )
+    return undefined;
+  const runtimeOps =
+    ops === undefined || depth === undefined
+      ? ops
+      : { ...ops, evaluationDepth: depth, maxStackDepth: st.world.maxStackDepth };
+  const overflowResult = (error: EvaluationDepthOverflow, counterDelta = 0): CompiledRunResult => {
+    const overflowState = error.state as St | undefined;
+    return {
+      results: [
+        {
+          atom: expr([sym("Error"), error.atom, sym("StackOverflow")]),
+          bnd: emptyBindings,
+        },
+      ],
+      counterDelta,
+      ...(overflowState === undefined ? {} : { state: overflowState }),
+    };
+  };
   if (h.kind === "rewrite") return h.run(partAtoms);
   if (h.kind === "symbolic") return h.run(partAtoms, st.counter);
   if (h.kind === "nondet") {
-    if (ops === undefined) return undefined;
-    return h.run(env, partAtoms, st, ops, fuel);
+    if (runtimeOps === undefined) return undefined;
+    try {
+      return h.run(env, partAtoms, st, runtimeOps, fuel);
+    } catch (error) {
+      if (error instanceof EvaluationDepthHandoff) return undefined;
+      if (error instanceof EvaluationDepthOverflow) return overflowResult(error);
+      throw error;
+    }
   }
   if (h.kind === "imperative") {
-    if (ops === undefined) return undefined;
-    const r = h.run(partAtoms, st, ops, discard);
+    if (runtimeOps === undefined) return undefined;
+    let r: ImpEval;
+    try {
+      r = h.run(partAtoms, st, runtimeOps, discard);
+    } catch (error) {
+      if (error instanceof EvaluationDepthHandoff) return undefined;
+      if (error instanceof EvaluationDepthOverflow) return overflowResult(error);
+      throw error;
+    }
     if (r === BAIL) return undefined;
     // An Empty value is a pruned computation: the call vanishes (zero results), effects kept.
     if (r.value === EMPTY_VALUE) return { results: [], counterDelta: 0, state: r.st };
@@ -3070,8 +3333,10 @@ export function runCompiled(
       vals.push(new Tup(a.items.map((x) => (x as { value: { n: IntVal } }).value.n)));
     else return undefined;
   }
+  const functionalRuntimeState =
+    depth === undefined ? undefined : { depth, limit: st.world.maxStackDepth, counterDelta: 0 };
   try {
-    const r = h.run(vals);
+    const r = h.run(vals, functionalRuntimeState, true);
     const atom =
       typeof r === "boolean"
         ? gbool(r)
@@ -3080,6 +3345,9 @@ export function runCompiled(
           : gint(r);
     return { results: [{ atom, bnd: emptyBindings }], counterDelta: 0 };
   } catch (e) {
+    if (e instanceof EvaluationDepthHandoff) return undefined;
+    if (e instanceof EvaluationDepthOverflow)
+      return overflowResult(e, functionalRuntimeState?.counterDelta ?? 0);
     if (e === BAIL || e instanceof RangeError) return undefined;
     throw e;
   }
@@ -3091,20 +3359,31 @@ export function runCompiledEffectCount(
   partAtoms: readonly Atom[],
   st: St,
   ops: CompiledImpureOps,
+  depth?: EvaluationDepth,
 ): { readonly count: number; readonly state: St } | undefined {
   const h = env.compiled?.get(op);
   if (h === undefined || h.kind !== "imperative" || partAtoms.length !== h.arity) return undefined;
   const runForEach = h.runForEach;
   if (runForEach === undefined) return undefined;
+  const runtimeOps =
+    depth === undefined
+      ? ops
+      : { ...ops, evaluationDepth: depth, maxStackDepth: st.world.maxStackDepth };
   let count = 0;
   let state: St | typeof BAIL;
   try {
-    state = runForEach(partAtoms, st, ops, true, (_value, stValue) => {
+    state = runForEach(partAtoms, st, runtimeOps, true, (_value, stValue) => {
       count += 1;
       return stValue;
     });
   } catch (e) {
-    if (e === BAIL || e instanceof RangeError) return undefined;
+    if (
+      e === BAIL ||
+      e instanceof RangeError ||
+      e instanceof EvaluationDepthHandoff ||
+      e instanceof EvaluationDepthOverflow
+    )
+      return undefined;
     throw e;
   }
   return state === BAIL ? undefined : { count, state };

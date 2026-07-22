@@ -121,6 +121,7 @@ export class TokenTrie<V> {
 export interface CompletedTableEntry {
   readonly numCallVars: number;
   readonly results: readonly Atom[];
+  readonly depthSpan: number;
   readonly answerCount: number;
   readonly approxCells: number;
 }
@@ -131,6 +132,7 @@ export interface ActiveTableEntry {
   readonly results: readonly Atom[];
   readonly answerCount: number;
   readonly approxCells: number;
+  depthSpan: number;
   cyclic: boolean;
   overBudget: boolean;
 }
@@ -220,7 +222,12 @@ export class TableSpace {
     return entry;
   }
 
-  rememberCompleted(key: TableKey, numCallVars: number, results: readonly Atom[]): void {
+  rememberCompleted(
+    key: TableKey,
+    numCallVars: number,
+    results: readonly Atom[],
+    depthSpan = 0,
+  ): void {
     if (!this.isCurrentKey(key)) return;
     const approxCells = this.entryCost(numCallVars, results);
     if (approxCells > this.budget.maxEntryCells) {
@@ -233,6 +240,7 @@ export class TableSpace {
       tokens: [...key.tokens],
       numCallVars,
       results: [...results],
+      depthSpan,
       answerCount: results.length,
       approxCells,
       prev: undefined,
@@ -262,6 +270,7 @@ export class TableSpace {
       results: [],
       answerCount: 0,
       approxCells,
+      depthSpan: 0,
       answerKeys: new TokenTrie(),
       cyclic: false,
       overBudget: false,
@@ -285,6 +294,10 @@ export class TableSpace {
   markCyclic(entry: ActiveTableEntry): void {
     const active = entry as MutableActiveTableEntry;
     active.cyclic = true;
+  }
+
+  observeActiveDepth(entry: ActiveTableEntry, depthSpan: number): void {
+    if (depthSpan > entry.depthSpan) entry.depthSpan = depthSpan;
   }
 
   addActiveAnswers(entry: ActiveTableEntry, results: readonly Atom[]): number {

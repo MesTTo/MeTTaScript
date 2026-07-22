@@ -20,6 +20,9 @@ import { importsForBaseDir } from "./oracle-corpus";
 
 const CORPUS_DIR = resolve(process.cwd(), "packages/node/bench/corpus-mettats");
 const DIFF_FUEL = 100_000;
+// The differential tests compare engine variants, not resource-policy defaults. A fixed language bound
+// keeps recursive search cases deterministic and prevents the host stack from becoming an implicit cutoff.
+const DIFF_MAX_STACK_DEPTH = 16;
 const WORKER_CAP = 1 << 20;
 const requireForTest = createRequire(import.meta.url);
 // These corpus programs are already tracked as non-terminating or Stage 4 symbolic-search outliers in
@@ -44,6 +47,7 @@ const view = new Int32Array(workerData.sab);
       workerData.fuel,
       new Map(),
       {
+        maxStackDepth: workerData.maxStackDepth,
         experimental: {
           hashCons: workerData.hashCons,
           flatAtomspace: workerData.flatAtomspace,
@@ -145,6 +149,7 @@ function evalBranches(
           base: 1 + i * region,
           cap: WORKER_CAP,
           fuel: DIFF_FUEL,
+          maxStackDepth: DIFF_MAX_STACK_DEPTH,
           hashCons,
           flatAtomspace,
         },
@@ -190,6 +195,7 @@ function runExperimental(
   const flatAtomspace = experimental.flatAtomspace === true;
   const opts: RunOptions = {
     experimental,
+    maxStackDepth: DIFF_MAX_STACK_DEPTH,
     parEvalImpl: (rulesSrc, branchSrcs, firstOnly) =>
       evalBranches(rulesSrc, branchSrcs, firstOnly, hashCons, flatAtomspace),
   };

@@ -19,6 +19,7 @@ export * from "./parser";
 export * from "./space";
 export * from "./builtins";
 export * from "./eval";
+export * from "./eval-depth";
 export * from "./runner";
 export type { TraceEvent, TraceSink } from "./trace";
 export * from "./host";

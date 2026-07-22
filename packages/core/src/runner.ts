@@ -28,6 +28,7 @@ import { stdlibAtoms } from "./stdlib";
 import { pettaStdlibAtoms } from "./petta-stdlib";
 import { TableSpace } from "./table-space";
 import type { TraceSink } from "./trace";
+import type { EvaluationDepth } from "./eval-depth";
 
 /** The standard tokenizer: integer/float literals and the `True`/`False` grounded booleans. */
 export function standardTokenizer(): Tokenizer {
@@ -194,11 +195,13 @@ export interface RunOptions {
     // its guards; on by default, set false to keep the plain object environment.
     readonly staticCompact?: boolean;
   };
-  // Initial interpreter stack-depth bound; 0 (the default) means unlimited, matching Hyperon. A program can
-  // tighten it in-language with `(pragma! max-stack-depth N)`. This is the embedder's knob: it sets the
-  // starting bound but is not a hard ceiling; the `fuel` argument is the resource ceiling. Left to the
-  // developer rather than hardcoded so a host embedding untrusted programs can pick its own policy.
+  // Initial language-level user-equation call bound. The runtime default is 320. Zero explicitly selects
+  // the implementation-defined unbounded policy. A program can replace it in-language with
+  // `(pragma! max-stack-depth N)`. The `fuel` argument remains the independent step ceiling.
   readonly maxStackDepth?: number;
+  // Optional observer/state for the language-level call lineage. Reusing one instance across a program
+  // records the maximum attempted depth over every query without changing evaluation results.
+  readonly evaluationDepth?: EvaluationDepth;
   // Optional opt-in execution trace sink. When set, the interpreter emits a `TraceEvent` per internal
   // decision (grounded dispatch, higher-order specialization, reduction step, stack-overflow cut). Off by
   // default at zero cost; used by the `metta-debug` CLI to explain evaluation.
@@ -271,7 +274,7 @@ function evalSequentialInternal(
       if (includeNonBang) out.push({ query: atom, results: [] });
       continue;
     }
-    const [pairs, st2] = mettaEval(env, fuel, st, [], atom);
+    const [pairs, st2] = mettaEval(env, fuel, st, [], atom, opts.evaluationDepth);
     st = st2;
     out.push({ query: atom, results: resultsForQuery(pairs) });
   }
@@ -340,7 +343,15 @@ export async function runProgramAsync(
       addAtomToEnv(env, atom);
       continue;
     }
-    const [pairs, st2] = await mettaEvalAsync(env, fuel, st, [], atom);
+    const [pairs, st2] = await mettaEvalAsync(
+      env,
+      fuel,
+      st,
+      [],
+      atom,
+      undefined,
+      opts.evaluationDepth,
+    );
     st = st2;
     out.push({ query: atom, results: resultsForQuery(pairs) });
   }
