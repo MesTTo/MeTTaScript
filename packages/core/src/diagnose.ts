@@ -81,7 +81,7 @@ function checkUnknownHead(
 }
 
 /** The parameter counts of every arrow type declared for `name`. The stdlib declares some ops more than
- *  once — `@doc`, `@param`, and `@return` each have an informal and a formal form — and Hyperon
+ *  once. `@doc`, `@param`, and `@return` each have an informal and a formal form, and Hyperon
  *  `check_if_function_type_is_applicable` accepts a call when ANY function type applies, so the well-formed
  *  argument counts are the union over every overload, not just `env.sigs`'s single kept signature. */
 function declaredArities(env: MinEnv, name: string): Set<number> {
@@ -107,7 +107,7 @@ function checkArity(src: string, node: SpannedNode, env: MinEnv, out: Diagnostic
   const name = headName(node);
   if (name === undefined) return;
   // An op that also carries a non-arrow (tuple/atom) type can legitimately appear as data, so an arity check
-  // against its arrow signature is unsafe — matches eval's `has_tuple_type` fallback.
+  // against its arrow signature is unsafe. This matches eval's `has_tuple_type` fallback.
   if (hasTupleType(env, name)) return;
   const arities = declaredArities(env, name);
   if (arities.size === 0) return; // no declared function type: an unknown head is legal data, not an error
@@ -123,7 +123,7 @@ function checkArity(src: string, node: SpannedNode, env: MinEnv, out: Diagnostic
 
 /** Parameter types the interpreter passes UNEVALUATED: `Atom` (spec `metta`: `$type == Atom` returns the
  *  argument as-is) and the `Variable`/`Expression` meta-types a form binds or matches. A call sitting at
- *  such a position — a case/if/let branch, a match/unify pattern, a quoted term — is data the interpreter
+ *  such a position, a case/if/let branch, a match/unify pattern, or a quoted term, is data the interpreter
  *  never applies, so it is never arity- or undefined-checked. Read straight from the ops' own signatures. */
 const UNEVALUATED_PARAM_TYPES = new Set(["Atom", "Variable", "Expression"]);
 
@@ -156,7 +156,7 @@ function walk(
 ): void {
   if (node.children === undefined) return;
   // A node in an unevaluated (data) position is never applied by the interpreter, so it carries no arity or
-  // undefined-head error — the head is a pattern, constructor, or quoted symbol, not a function call.
+  // undefined-head error. Its head is a pattern, constructor, or quoted symbol, not a function call.
   if (!inData) {
     checkArity(src, node, env, out);
     if (config.undefinedSymbols && matcher !== undefined) {
@@ -200,7 +200,7 @@ export function analyze(
 
 /** Every declaration reachable through a resolved import graph, de-duplicated by module identity (the map
  *  keys each module by both its import name and its canonical id). Feeding these to the analyzer's env lets
- *  a call to a cross-file-typed op — whose `(: ...)` lives in an imported module — be checked against the
+ *  a call to a cross-file-typed op, whose `(: ...)` lives in an imported module, be checked against the
  *  same signature the runtime sees, instead of reading as an untyped head whose arguments all evaluate.
  *  Mirrors the runtime's `import!` def extraction (eval `appendImportedModule`). */
 export function importedDefinitions(imports: ImportMap): Atom[] {

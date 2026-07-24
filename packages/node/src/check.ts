@@ -5,7 +5,12 @@
 // plus an exit code. No process IO here, so it is unit-testable; cli.ts does the reading and exiting.
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { analyzeSource, importedDefinitions, renderAll, DiagnosticSeverity } from "@mettascript/core";
+import {
+  analyzeSource,
+  importedDefinitions,
+  renderAll,
+  DiagnosticSeverity,
+} from "@mettascript/core";
 import { readImports } from "./file-imports";
 
 export interface CheckOptions {

@@ -85,7 +85,7 @@ describe("analyzeSource — undefined head (gated)", () => {
 describe("analyzeSource — overloaded arity", () => {
   // The stdlib declares @param and @return twice: a one-string informal form and a longer formal form.
   // check_if_function_type_is_applicable accepts a call when ANY declared function type applies, so the
-  // informal one-argument doc atoms — used everywhere, including the stdlib itself — are well-formed.
+  // informal one-argument doc atoms, used everywhere, including the stdlib itself, are well-formed.
   it("accepts the one-argument @return doc form", () => {
     expect(analyzeSource('(@return "a result")', cfg)).toEqual([]);
   });
@@ -122,7 +122,7 @@ describe("analyzeSource — unevaluated (data) positions", () => {
   });
 
   it("does not flag a wrong-arity term inside an if branch (an Atom-typed, unevaluated slot)", () => {
-    // if : (-> Bool Atom Atom $t) — the branches are Atom-typed, so the interpreter never pre-evaluates them.
+    // if : (-> Bool Atom Atom $t). Its branches are Atom-typed, so the interpreter never pre-evaluates them.
     const src = "(= (pick $c) (if $c (forall True) (forall False)))";
     expect(analyzeSource(src, cfg).filter((d) => d.code === "arity-mismatch")).toEqual([]);
   });
@@ -138,13 +138,15 @@ describe("analyzeSource — unevaluated (data) positions", () => {
 describe("analyzeSource — imported declarations", () => {
   it("treats an imported op's Atom-typed parameter as a data position", () => {
     // `store`'s formal type (declared in an imported module) has an Atom-typed second parameter, so its
-    // argument is passed unevaluated — a wrong-arity term carried there is data, as the interpreter treats it.
+    // argument is passed unevaluated. A wrong-arity term carried there is data, as the interpreter treats it.
     const call = "!(store &s (Wrap (forall)))";
     // Without the import, `store` is an untyped head: its args evaluate, so the nested (forall) is checked.
     expect(analyzeSource(call, cfg).filter((d) => d.code === "arity-mismatch")).toHaveLength(1);
-    // With the imported signature in scope, the Atom-typed slot makes the argument data — no arity error.
+    // With the imported signature in scope, the Atom-typed slot makes the argument data, so no arity error.
     const imported = atomsOf("(: store (-> SpaceType Atom %Undefined%))");
-    expect(analyzeSource(call, cfg, imported).filter((d) => d.code === "arity-mismatch")).toEqual([]);
+    expect(analyzeSource(call, cfg, imported).filter((d) => d.code === "arity-mismatch")).toEqual(
+      [],
+    );
   });
 });
 
