@@ -5,7 +5,7 @@
 // diagnostic in one pass. It never evaluates. Checks read the interpreter's own signature map, so a
 // call the interpreter would reject for arity is flagged here, before running.
 import { type Atom } from "./atom";
-import { type MinEnv, buildEnv } from "./eval";
+import { type MinEnv, type ImportMap, type ImportEntry, buildEnv } from "./eval";
 import { type SpannedNode, parseAllSpanned } from "./cst";
 import { standardTokenizer, preludeAtoms } from "./runner";
 import { stdlibAtoms } from "./stdlib";
@@ -80,20 +80,67 @@ function checkUnknownHead(
   });
 }
 
+/** The parameter counts of every arrow type declared for `name`. The stdlib declares some ops more than
+ *  once — `@doc`, `@param`, and `@return` each have an informal and a formal form — and Hyperon
+ *  `check_if_function_type_is_applicable` accepts a call when ANY function type applies, so the well-formed
+ *  argument counts are the union over every overload, not just `env.sigs`'s single kept signature. */
+function declaredArities(env: MinEnv, name: string): Set<number> {
+  const arities = new Set<number>();
+  for (const t of env.types.get(name) ?? [])
+    if (t.kind === "expr" && typeHead(t) === "->" && t.items.length >= 2)
+      arities.add(t.items.length - 2);
+  return arities;
+}
+
+/** "1 argument", "2 arguments", or "1 or 2 arguments" for an op with overloaded arities. */
+function describeArities(arities: ReadonlySet<number>): string {
+  const sorted = [...arities].sort((a, b) => a - b);
+  const counts =
+    sorted.length === 1
+      ? `${sorted[0]}`
+      : `${sorted.slice(0, -1).join(", ")} or ${sorted[sorted.length - 1]}`;
+  const noun = sorted.length === 1 && sorted[0] === 1 ? "argument" : "arguments";
+  return `${counts} ${noun}`;
+}
+
 function checkArity(src: string, node: SpannedNode, env: MinEnv, out: Diagnostic[]): void {
   const name = headName(node);
   if (name === undefined) return;
-  const sig = env.sigs.get(name);
-  if (sig === undefined || sig.length < 1 || hasTupleType(env, name)) return;
-  const paramCount = sig.length - 1;
+  // An op that also carries a non-arrow (tuple/atom) type can legitimately appear as data, so an arity check
+  // against its arrow signature is unsafe — matches eval's `has_tuple_type` fallback.
+  if (hasTupleType(env, name)) return;
+  const arities = declaredArities(env, name);
+  if (arities.size === 0) return; // no declared function type: an unknown head is legal data, not an error
   const argCount = (node.children?.length ?? 1) - 1;
-  if (argCount === paramCount) return;
+  if (arities.has(argCount)) return; // the call matches one of the op's declared overloads
   out.push({
     range: spanToRange(src, node.span.start, node.span.end),
     severity: DiagnosticSeverity.Error,
     code: "arity-mismatch",
-    message: `${name} expects ${paramCount} argument${paramCount === 1 ? "" : "s"}, got ${argCount}`,
+    message: `${name} expects ${describeArities(arities)}, got ${argCount}`,
   });
+}
+
+/** Parameter types the interpreter passes UNEVALUATED: `Atom` (spec `metta`: `$type == Atom` returns the
+ *  argument as-is) and the `Variable`/`Expression` meta-types a form binds or matches. A call sitting at
+ *  such a position — a case/if/let branch, a match/unify pattern, a quoted term — is data the interpreter
+ *  never applies, so it is never arity- or undefined-checked. Read straight from the ops' own signatures. */
+const UNEVALUATED_PARAM_TYPES = new Set(["Atom", "Variable", "Expression"]);
+
+/** For each op, the argument positions its signature leaves unevaluated. `case : (-> Atom Expression
+ *  %Undefined%)` marks its scrutinee and clause list; `if : (-> Bool Atom Atom $t)` marks its two branches;
+ *  `let`, `match`, `unify`, and `quote` mark their pattern slots. Overloads are unioned. */
+function unevaluatedArgPositions(env: MinEnv): Map<string, Set<number>> {
+  const positions = new Map<string, Set<number>>();
+  for (const [name, types] of env.types) {
+    const data = new Set<number>();
+    for (const t of types)
+      if (t.kind === "expr" && typeHead(t) === "->")
+        for (const [index, param] of t.items.slice(1, -1).entries())
+          if (param.kind === "sym" && UNEVALUATED_PARAM_TYPES.has(param.name)) data.add(index);
+    if (data.size > 0) positions.set(name, data);
+  }
+  return positions;
 }
 
 function walk(
@@ -103,15 +150,26 @@ function walk(
   config: DiagnoseConfig,
   known: Set<string>,
   matcher: FuzzyMatcher | undefined,
+  dataPositions: ReadonlyMap<string, ReadonlySet<number>>,
+  inData: boolean,
   out: Diagnostic[],
 ): void {
-  if (node.children !== undefined) {
+  if (node.children === undefined) return;
+  // A node in an unevaluated (data) position is never applied by the interpreter, so it carries no arity or
+  // undefined-head error — the head is a pattern, constructor, or quoted symbol, not a function call.
+  if (!inData) {
     checkArity(src, node, env, out);
     if (config.undefinedSymbols && matcher !== undefined) {
       checkUnknownHead(src, node, known, matcher, out);
     }
-    for (const child of node.children) walk(src, child, env, config, known, matcher, out);
   }
+  const head = headName(node);
+  const dataSet = head === undefined ? undefined : dataPositions.get(head);
+  node.children.forEach((child, index) => {
+    // index 0 is the head; the argument at child index `index` is 0-based parameter position `index - 1`.
+    const childInData = inData || (index >= 1 && dataSet?.has(index - 1) === true);
+    walk(src, child, env, config, known, matcher, dataPositions, childInData, out);
+  });
 }
 
 /** Analyze a parsed program. Returns diagnostics deduplicated by (position, code) and sorted by position. */
@@ -124,7 +182,8 @@ export function analyze(
   const out: Diagnostic[] = [];
   const known = config.undefinedSymbols ? knownNames(env) : new Set<string>();
   const matcher = config.undefinedSymbols ? new FuzzyMatcher(known) : undefined;
-  for (const node of cst) walk(src, node, env, config, known, matcher, out);
+  const dataPositions = unevaluatedArgPositions(env);
+  for (const node of cst) walk(src, node, env, config, known, matcher, dataPositions, false, out);
   const seen = new Set<string>();
   const deduped = out.filter((d) => {
     const k = `${d.range.start.line}:${d.range.start.character}:${d.code}`;
@@ -139,13 +198,36 @@ export function analyze(
   return deduped;
 }
 
-/** Parse `src`, build the standard env (prelude + stdlib + petta + the program's own atoms), and analyze. */
-export function analyzeSource(src: string, config: DiagnoseConfig): Diagnostic[] {
+/** Every declaration reachable through a resolved import graph, de-duplicated by module identity (the map
+ *  keys each module by both its import name and its canonical id). Feeding these to the analyzer's env lets
+ *  a call to a cross-file-typed op — whose `(: ...)` lives in an imported module — be checked against the
+ *  same signature the runtime sees, instead of reading as an untyped head whose arguments all evaluate.
+ *  Mirrors the runtime's `import!` def extraction (eval `appendImportedModule`). */
+export function importedDefinitions(imports: ImportMap): Atom[] {
+  const seen = new Set<ImportEntry>();
+  const defs: Atom[] = [];
+  for (const entry of imports.values()) {
+    if (seen.has(entry)) continue;
+    seen.add(entry);
+    defs.push(...(Array.isArray(entry) ? entry : entry.defs));
+  }
+  return defs;
+}
+
+/** Parse `src`, build the standard env (prelude + stdlib + petta + imported declarations + the program's own
+ *  atoms), and analyze. `importedAtoms` are the declarations from resolved `import!` targets; without them a
+ *  cross-file-typed op reads as untyped, so pass them (see `importedDefinitions`) to analyze a multi-file
+ *  program the way the runtime runs it. */
+export function analyzeSource(
+  src: string,
+  config: DiagnoseConfig,
+  importedAtoms: readonly Atom[] = [],
+): Diagnostic[] {
   const tk = standardTokenizer();
   const cst = parseAllSpanned(src, tk);
   const programAtoms = cst.map((n) => n.atom);
   const env = buildEnv(
-    [...preludeAtoms(), ...stdlibAtoms(), ...pettaStdlibAtoms(), ...programAtoms],
+    [...preludeAtoms(), ...stdlibAtoms(), ...pettaStdlibAtoms(), ...importedAtoms, ...programAtoms],
     stdTable(),
   );
   return analyze(src, cst, env, config);

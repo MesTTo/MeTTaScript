@@ -1,3 +1,36 @@
+# MeTTaScript 2.5.1
+
+A `metta check` accuracy fix. The static analyzer stopped reporting false arity errors on overloaded doc
+atoms and on operators used as data, and it now resolves `import!` targets the way `run` does, so a clean
+multi-file program checks clean. The engine is unchanged: no program's evaluation or output differs, only
+the diagnostics `metta check` reports.
+
+## Overloaded doc atoms check clean
+
+The standard library declares `@param` and `@return` twice, an informal one-argument form and a formal
+two-argument form, and `@doc` with both a short and a long arity. The checker compared each call against a
+single kept signature, so the one-argument `(@param "...")` and `(@return "...")` the stdlib itself uses
+everywhere were flagged as arity errors. A call is now well-formed when its argument count matches any
+declared overload, the same rule `check_if_function_type_is_applicable` follows when it tries every
+function type of an operator.
+
+## Operators carried as data are not checked as calls
+
+An argument a form leaves unevaluated is data, not a call: a `case` clause pattern, an `if` branch, a
+`let` binding pattern, a `match` or `unify` pattern, a quoted term. The interpreter never applies it, so
+its head is never arity-checked, even when that head is a stdlib operator reused as an object-language
+symbol such as `(forall)`, `(and ...)`, or `(* ...)`. The checker now reads each operator's own signature
+to find these positions, the `Atom`, `Variable`, and `Expression` parameter slots the spec's `metta`
+returns as-is, and skips them, so it flags exactly what the interpreter would evaluate.
+
+## Cross-file signatures are resolved
+
+`metta check` now resolves a file's `import!` targets and analyzes it against the imported declarations,
+the same import graph `run` builds. A call to an operator whose type lives in another module is checked
+against that real signature instead of reading as an untyped head whose arguments all evaluate, so a
+formula carried in an imported operator's `Atom`-typed parameter is correctly treated as data. An
+unreadable import contributes nothing, and the check degrades to the single-file result.
+
 # MeTTaScript 2.5.0
 
 Four engine changes: repeated queries over a knowledge base that has not changed now reuse their
