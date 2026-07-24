@@ -92,6 +92,14 @@ export const STDLIB_SRC = `
   ; atom as written; to repr a reduced form, evaluate it first (e.g. bind it with let).
   (: repr (-> Atom String))
 
+  ; stringToChars splits a String into an Expression of single-character symbols; charsToString is the
+  ; inverse. The character list is ordinary data that car-atom/decons-atom walk, which is what lets a
+  ; legacy typed symbol name be taken apart into a base and a sort at run time. charsToString takes its
+  ; list unevaluated, like car-atom: the characters of "+ab" are (+ a b), which evaluating would run as an
+  ; addition. Bind a computed list with let, e.g. (let $cs (stringToChars $s) (charsToString $cs)).
+  (: stringToChars (-> String Expression))
+  (: charsToString (-> Expression String))
+
   ; trace! prints its first argument and returns the (evaluated) second.
   (: trace! (-> %Undefined% Atom %Undefined%))
   (= (trace! $msg $ret) (let $unit (println! $msg) $ret))

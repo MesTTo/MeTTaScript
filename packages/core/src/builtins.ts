@@ -1532,6 +1532,31 @@ const pettaEntries: Array<[string, GroundFn]> = [
     "atom_concat",
     (a) => ok(sym(a.map((x) => (x.kind === "sym" ? x.name : (asStr(x) ?? format(x)))).join(""))),
   ],
+  // stringToChars/charsToString are the inverse pair atom_concat lacks: split a String into an Expression
+  // of single-character symbols and join it back. Chars are single-character symbols, matching
+  // hyperon-experimental and mettalog (SWI `string_chars`). Iterating with the spread keeps astral code
+  // points (surrogate pairs) intact.
+  [
+    "stringToChars",
+    (a) => {
+      const s = asStr(a[0]!);
+      if (a.length !== 1 || s === undefined) return ierr("stringToChars expects a String");
+      return ok(expr([...s].map((ch) => sym(ch))));
+    },
+  ],
+  [
+    "charsToString",
+    (a) => {
+      const chars = a[0]!;
+      if (a.length !== 1 || chars.kind !== "expr")
+        return ierr("charsToString expects an Expression of characters");
+      return ok(
+        gstr(
+          chars.items.map((x) => (x.kind === "sym" ? x.name : (asStr(x) ?? format(x)))).join(""),
+        ),
+      );
+    },
+  ],
   // parse a string of MeTTa source into its (first) atom; sread is PeTTa's alias.
   [
     "parse",

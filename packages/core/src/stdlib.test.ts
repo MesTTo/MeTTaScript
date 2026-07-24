@@ -104,3 +104,42 @@ describe("spaces: get-atoms follows LeaTTa add-atom semantics", () => {
     ).toEqual(["(quote (foo (+ 1 1)))"]);
   });
 });
+
+describe("stdlib stringToChars / charsToString", () => {
+  it("stringToChars splits a string into single-character symbols", () => {
+    expect(r1('!(stringToChars "abc")')).toEqual(["(a b c)"]);
+  });
+
+  it("stringToChars of the empty string is the empty expression", () => {
+    expect(r1('!(stringToChars "")')).toEqual(["()"]);
+  });
+
+  it("charsToString joins a character list into a string", () => {
+    expect(r1("!(charsToString (a b c))")).toEqual(['"abc"']);
+  });
+
+  it("round-trips a string through its characters", () => {
+    // charsToString takes an Expression argument (unevaluated, like car-atom and hyperon-experimental), so
+    // a decoder binds the character list with let, or walks it with list ops, rather than nesting directly.
+    expect(r1('!(let $cs (stringToChars "e1_ep") (charsToString $cs))')).toEqual(['"e1_ep"']);
+  });
+
+  it("decomposes a legacy typed-symbol name into its characters", () => {
+    expect(r1('!(stringToChars "e1_ep")')).toEqual(["(e 1 _ e p)"]);
+  });
+
+  it("round-trips a string whose characters are operator symbols", () => {
+    // This is why charsToString takes Expression rather than %Undefined%: the character list of "+ab" is
+    // `(+ a b)`, so evaluating the argument would run it as an addition instead of joining it back.
+    expect(r1('!(stringToChars "+ab")')).toEqual(["(+ a b)"]);
+    expect(r1('!(let $cs (stringToChars "+ab") (charsToString $cs))')).toEqual(['"+ab"']);
+  });
+
+  it("keeps an astral character whole rather than splitting its surrogate pair", () => {
+    expect(r1('!(stringToChars "a\u{1F600}b")')).toEqual(["(a \u{1F600} b)"]);
+  });
+
+  it("evaluates the argument of stringToChars, so it composes with String-producing calls", () => {
+    expect(r1("!(stringToChars (repr foo))")).toEqual(["(f o o)"]);
+  });
+});
