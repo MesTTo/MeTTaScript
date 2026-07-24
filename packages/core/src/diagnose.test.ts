@@ -150,6 +150,75 @@ describe("analyzeSource — imported declarations", () => {
   });
 });
 
+describe("analyzeSource — top-level actions the interpreter never runs", () => {
+  // MeTTa evaluates a top-level form only when it carries `!`; every other form is added to the space as
+  // data. That is right for facts and rules, but an op whose signature returns the unit type `(->)` yields
+  // nothing to match on, so storing the call is inert: the assertion never checks, the `add-atom` never adds,
+  // the `println!` never prints. Confirmed against the runtime: a file holding `(assertEqual 1 2)` runs clean,
+  // while `!(assertEqual 1 2)` reports `results-are-not-equal`.
+  const actionsOf = (src: string) =>
+    analyzeSource(src, cfg).filter((d) => d.code === "unevaluated-action");
+
+  it("flags an unbanged assertion and underlines the whole form", () => {
+    const src = "(assertEqualToResult (retract a) (1))";
+    const diags = actionsOf(src);
+    expect(diags).toHaveLength(1);
+    expect(diags[0]!.severity).toBe(DiagnosticSeverity.Warning);
+    expect(diags[0]!.message).toContain("assertEqualToResult");
+    expect(diags[0]!.range.start).toEqual({ line: 0, character: 0 });
+    expect(diags[0]!.range.end).toEqual({ line: 0, character: src.length });
+  });
+
+  it("suggests inserting `!` before the form", () => {
+    const fix = actionsOf("(assertEqual 1 1)")[0]!.suggestions?.[0];
+    expect(fix?.replacement).toBe("!");
+    // a zero-width span at the form's start, so applying it inserts rather than replaces
+    expect(fix?.span.start).toEqual({ line: 0, character: 0 });
+    expect(fix?.span.end).toEqual({ line: 0, character: 0 });
+  });
+
+  it("stays silent when the form carries its `!`", () => {
+    expect(actionsOf("!(assertEqual 1 1)")).toEqual([]);
+  });
+
+  it("stays silent when a comment sits between the `!` and its form", () => {
+    // The parser binds a pending top-level `!` to the next form across comments, so this banner layout runs.
+    expect(actionsOf("!;;; banner\n(assertEqual 1 1)")).toEqual([]);
+  });
+
+  it("flags space mutation and output ops the same way", () => {
+    expect(actionsOf("(add-atom &self (fact a))")).toHaveLength(1);
+    expect(actionsOf('(println! "hi")')).toHaveLength(1);
+  });
+
+  it("reads the unit return type from a user declaration, not a list of builtin names", () => {
+    const diags = actionsOf("(: my-effect (-> Number (->)))\n(my-effect 1)");
+    expect(diags).toHaveLength(1);
+    expect(diags[0]!.range.start.line).toBe(1);
+  });
+
+  it("reads it from an imported declaration too", () => {
+    const imported = atomsOf("(: remote-log (-> String (->)))");
+    expect(analyzeSource('(remote-log "hi")', cfg, imported)).toHaveLength(1);
+    // without the signature in scope the head is untyped data, so nothing is reported
+    expect(analyzeSource('(remote-log "hi")', cfg)).toEqual([]);
+  });
+
+  it("leaves rules, type declarations, and doc atoms alone", () => {
+    expect(actionsOf("(= (run) (assertEqual 1 1))")).toEqual([]);
+    expect(actionsOf("(: assertEqual (-> Atom Atom (->)))")).toEqual([]);
+    expect(actionsOf('(@doc my-add (@desc "adds"))')).toEqual([]);
+  });
+
+  it("leaves plain data and untyped heads alone", () => {
+    expect(actionsOf("(likes Sam pizza)")).toEqual([]);
+  });
+
+  it("defers to the arity error when the call matches no declared overload", () => {
+    expect(analyzeSource("(assertEqual 1)", cfg).map((d) => d.code)).toEqual(["arity-mismatch"]);
+  });
+});
+
 describe("importedDefinitions", () => {
   it("flattens a resolved import map and de-duplicates aliased module entries", () => {
     const module = {

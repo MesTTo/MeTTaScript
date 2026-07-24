@@ -121,6 +121,67 @@ function checkArity(src: string, node: SpannedNode, env: MinEnv, out: Diagnostic
   });
 }
 
+/** The unit type `(->)`: an arrow expression with no parameters and no result. The stdlib gives it as the
+ *  return type of every op that exists only for its effect, so a call to one yields nothing to match on. */
+function isUnitType(t: Atom | undefined): boolean {
+  return (
+    t?.kind === "expr" &&
+    t.items.length === 1 &&
+    t.items[0]?.kind === "sym" &&
+    t.items[0].name === "->"
+  );
+}
+
+/** Does every arrow type declared for `name` return the unit type? True for the assert family,
+ *  `add-atom`/`remove-atom`/`add-reduct`, `print!`/`println!`, and any user op declared `(-> ... (->))`.
+ *  Read from the signatures themselves, so it needs no list of builtin names. */
+function isActionOp(env: MinEnv, name: string): boolean {
+  const arrows = (env.types.get(name) ?? []).filter(
+    (t) => typeHead(t) === "->" && t.kind === "expr" && t.items.length >= 2,
+  );
+  return (
+    arrows.length > 0 &&
+    arrows.every((t) => t.kind === "expr" && isUnitType(t.items[t.items.length - 1]))
+  );
+}
+
+/** A top-level action form the interpreter stores instead of running. MeTTa evaluates a top-level form only
+ *  when it carries `!`; every other form is added to the space as data. That is what you want for a fact or a
+ *  rule, but an op returning the unit type produces nothing a later query can match, so the stored call is
+ *  inert: the assertion never checks, the `add-atom` never adds, the `println!` never prints. The failure is
+ *  silent, which is why an unbanged `assertEqualToResult` reads as a passing test. */
+function checkUnevaluatedAction(
+  src: string,
+  node: SpannedNode,
+  env: MinEnv,
+  out: Diagnostic[],
+): void {
+  if (node.bang === true || node.children === undefined) return;
+  const name = headName(node);
+  if (name === undefined) return;
+  // An op that also carries a non-arrow type can legitimately be stored as data, matching checkArity.
+  if (hasTupleType(env, name)) return;
+  if (!isActionOp(env, name)) return;
+  // A call matching no declared overload is already reported as an arity mismatch; that is the real problem.
+  if (!declaredArities(env, name).has(node.children.length - 1)) return;
+  const range = spanToRange(src, node.span.start, node.span.end);
+  out.push({
+    range,
+    severity: DiagnosticSeverity.Warning,
+    code: "unevaluated-action",
+    message: `\`${name}\` runs for its effect, so this top-level form is stored as data and never evaluated`,
+    relatedInformation: [{ message: "a top-level form runs only when it carries a leading `!`" }],
+    suggestions: [
+      {
+        span: { start: range.start, end: range.start },
+        replacement: "!",
+        applicability: Applicability.MachineApplicable,
+        message: "prefix it with `!` to run it",
+      },
+    ],
+  });
+}
+
 /** Parameter types the interpreter passes UNEVALUATED: `Atom` (spec `metta`: `$type == Atom` returns the
  *  argument as-is) and the `Variable`/`Expression` meta-types a form binds or matches. A call sitting at
  *  such a position, a case/if/let branch, a match/unify pattern, or a quoted term, is data the interpreter
@@ -183,7 +244,11 @@ export function analyze(
   const known = config.undefinedSymbols ? knownNames(env) : new Set<string>();
   const matcher = config.undefinedSymbols ? new FuzzyMatcher(known) : undefined;
   const dataPositions = unevaluatedArgPositions(env);
-  for (const node of cst) walk(src, node, env, config, known, matcher, dataPositions, false, out);
+  for (const node of cst) {
+    // Only a top-level node carries the `!` marker, so this check sits outside the recursive walk.
+    checkUnevaluatedAction(src, node, env, out);
+    walk(src, node, env, config, known, matcher, dataPositions, false, out);
+  }
   const seen = new Set<string>();
   const deduped = out.filter((d) => {
     const k = `${d.range.start.line}:${d.range.start.character}:${d.code}`;
