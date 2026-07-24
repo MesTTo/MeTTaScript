@@ -1,6 +1,6 @@
 {
   "name": "@mettascript/debug",
-  "version": "2.5.1",
+  "version": "2.6.0",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",

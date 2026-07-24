@@ -1,3 +1,47 @@
+# MeTTaScript 2.6.0
+
+Two additions. `metta check` now catches a top-level action form that is stored as data instead of run, and
+the standard library gained the pair of grounded ops that take a string apart into characters and put it
+back together. The engine is otherwise unchanged: no existing program's evaluation or output differs.
+
+## A stored action form is reported
+
+MeTTa evaluates a top-level form only when it carries a leading `!`; every other form is added to the space
+as data. That is what you want for a fact or a rule. It is not what you want for an op that exists for its
+effect, because such an op returns the unit type `(->)`, which produces nothing a later query can match. The
+stored call is inert: the assertion never checks, the `add-atom` never adds, the `println!` never prints.
+Nothing reports it, so an unbanged `assertEqualToResult` reads as a passing test.
+
+`metta check` now warns on that form and offers to insert the `!`:
+
+```
+warning: `assertEqualToResult` runs for its effect, so this top-level form is stored as data and never evaluated
+```
+
+The check reads the unit return type from each op's own signature rather than from a list of builtin names,
+so an op you declare `(-> ... (->))` yourself is covered on the same footing as the assert family,
+`add-atom`, and `println!`. It is a warning, so it never changes the exit code and cannot break a gate. It
+stays quiet when the `!` is separated from its form by a comment, which still binds, when the op also
+carries a non-arrow type, and when the argument count matches no declared overload, since the arity error
+already names the real problem.
+
+## Characters of a string
+
+`atom_concat` joins symbols but cannot split one, so a name like `e1_ep` could not be taken apart into a base
+and a sort at run time. `stringToChars` splits a `String` into an `Expression` of single-character symbols
+and `charsToString` joins one back, matching hyperon-experimental and mettalog, where a character is a
+single-character symbol:
+
+```metta
+!(stringToChars "e1_ep")                                   ; (e 1 _ e p)
+!(let $cs (stringToChars "e1_ep") (charsToString $cs))     ; "e1_ep"
+```
+
+The character list is ordinary data, so `car-atom`, `cdr-atom`, and `decons-atom` walk it. `charsToString`
+takes its list unevaluated, the way `car-atom` does, because the characters of `"+ab"` are `(+ a b)` and
+evaluating that argument would run an addition instead of joining it back; bind a computed list with `let`.
+Astral characters stay whole rather than splitting into surrogate halves.
+
 # MeTTaScript 2.5.1
 
 A `metta check` accuracy fix. The static analyzer stopped reporting false arity errors on overloaded doc
