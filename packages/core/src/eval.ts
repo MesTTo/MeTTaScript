@@ -16,6 +16,7 @@ import {
   type ExprAtom,
   emptyExpr,
   expr,
+  gbool,
   gint,
   gstr,
   type InternTable,
@@ -406,6 +407,9 @@ const EMBEDDED = new Set([
   "import!",
   // Sets interpreter settings in-language (Hyperon `pragma!`); stateful, so handled here not as a pure op.
   "pragma!",
+  // Reads the level set by `(pragma! log-level ...)`. Handled here, not as a pure grounded op, because the
+  // level lives on the world; `log!` itself is a standard-library definition over this predicate.
+  "log-enabled?",
   // TS-native extension (not upstream MeTTa): atomic space mutation with rollback.
   "transaction",
   // TS-native concurrency primitives (async-only); see docs/.../concurrency-primitives.md.
@@ -1619,6 +1623,20 @@ function namedSpaceCandidateGetter(
   };
 }
 
+// ---------- log levels ----------
+// Ranked by severity, so a setting admits every level at or below its own rank. `off` is 0 and admits
+// nothing, which is the default: severity ranks start at 1 so a plain `rank <= world.logLevel` comparison
+// rejects everything while logging is off, with no separate "is it enabled" branch.
+const LOG_OFF = 0;
+const LOG_RANKS: ReadonlyMap<string, number> = new Map([
+  ["off", LOG_OFF],
+  ["error", 1],
+  ["warn", 2],
+  ["info", 3],
+  ["debug", 4],
+  ["trace", 5],
+]);
+
 export interface World {
   spaces: Map<string, NamedSpace>;
   store: Map<number, Atom>;
@@ -1654,6 +1672,11 @@ export interface World {
   // the fresh-variable namespace.
   maxSteps: number;
   stepStart: number;
+  // Enabled logging severity as a rank, set in-language by `(pragma! log-level <level>)`. LOG_OFF is the
+  // default, so a program that never sets it logs nothing and every `log!` returns unit without touching its
+  // payload. Held on the world, not in a space, so the check `log!` makes is a field read rather than a
+  // match: that is what keeps an unconfigured log call off the cost of the program it instruments.
+  logLevel: number;
 }
 export interface St {
   counter: number;
@@ -1688,6 +1711,7 @@ export const initSt = (): St => ({
     removedStaticVarRules: false,
     maxStackDepth: DEFAULT_MAX_STACK_DEPTH,
     maxSteps: DEFAULT_MAX_STEPS,
+    logLevel: LOG_OFF,
     stepStart: 0,
   },
 });
@@ -1708,6 +1732,7 @@ function cloneWorld(w: World): World {
     maxStackDepth: w.maxStackDepth,
     maxSteps: w.maxSteps,
     stepStart: w.stepStart,
+    logLevel: w.logLevel,
   };
 }
 
@@ -1783,6 +1808,7 @@ function mergeWorlds(base: World, branches: readonly World[]): World {
     maxStackDepth: base.maxStackDepth,
     maxSteps: base.maxSteps,
     stepStart: base.stepStart,
+    logLevel: base.logLevel,
   };
   indexSelfRules(merged, selfExtra);
   return merged;
@@ -4277,7 +4303,29 @@ function* interpretStack1G(
         else w.maxSteps = Number(n);
         return [[finItem(prev, emptyExpr, it.bnd)], { counter: st.counter, world: w }];
       }
+      if (key.kind === "sym" && key.name === "log-level") {
+        const val = inst(env, it.bnd, it2[2]!);
+        const rank = val.kind === "sym" ? LOG_RANKS.get(val.name) : undefined;
+        if (rank === undefined) return [[finItem(prev, errAtom(a, "UnknownLogLevel"), it.bnd)], st];
+        const w = cloneWorld(st.world);
+        w.logLevel = rank;
+        return [[finItem(prev, emptyExpr, it.bnd)], { counter: st.counter, world: w }];
+      }
       return [[finItem(prev, emptyExpr, it.bnd)], st];
+    }
+    // `(log-enabled? <level>)`: does the level set by `(pragma! log-level ...)` admit this one? The whole
+    // point of answering it here is that it is a read of one field on the world, so the guard in front of a
+    // log call costs a comparison. `log!` is built on it in the standard library, where `if`'s Atom-typed
+    // branches give the laziness that keeps an unadmitted payload from being reduced at all.
+    case "log-enabled?": {
+      if (it2.length !== 2) break;
+      const level = inst(env, it.bnd, it2[1]!);
+      const rank = level.kind === "sym" ? LOG_RANKS.get(level.name) : undefined;
+      if (rank === undefined) return [[finItem(prev, errAtom(a, "UnknownLogLevel"), it.bnd)], st];
+      // True/False are grounded booleans in this engine, not symbols; a bare sym("False") would not
+      // match the prelude's `(= (if False $t $e) $e)` and would leave the if unreduced.
+      const on = rank !== LOG_OFF && rank <= st.world.logLevel;
+      return [[finItem(prev, gbool(on), it.bnd)], st];
     }
     case "bind!": {
       if (it2.length !== 3) break;
@@ -4398,6 +4446,7 @@ function appendSpace(env: MinEnv, w0: World, name: string, atoms: Atom[]): World
       maxStackDepth: w0.maxStackDepth,
       maxSteps: w0.maxSteps,
       stepStart: w0.stepStart,
+      logLevel: w0.logLevel,
     };
   }
   const spaces = new Map(w0.spaces);
