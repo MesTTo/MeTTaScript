@@ -214,6 +214,15 @@ describe("analyzeSource — top-level actions the interpreter never runs", () =>
     expect(actionsOf("(likes Sam pizza)")).toEqual([]);
   });
 
+  it("flags a bare bind! or import!, which bind nothing and load nothing", () => {
+    // Both are interpreter forms that exist for their effect. Until they carried a unit return type this
+    // check could not see them, so a missing `!` left the token unbound or the module unloaded in silence.
+    expect(actionsOf("(bind! &s (new-space))")).toHaveLength(1);
+    expect(actionsOf("(import! &self lib)")).toHaveLength(1);
+    expect(actionsOf("!(bind! &s (new-space))")).toEqual([]);
+    expect(actionsOf("!(import! &self lib)")).toEqual([]);
+  });
+
   it("defers to the arity error when the call matches no declared overload", () => {
     expect(analyzeSource("(assertEqual 1)", cfg).map((d) => d.code)).toEqual(["arity-mismatch"]);
   });

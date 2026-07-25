@@ -119,6 +119,14 @@ export const STDLIB_SRC = `
   (= (log! $level $payload)
      (if (log-enabled? $level) (println! (Log $level $payload)) ()))
 
+  ; bind! and import! are interpreter forms that exist for their effect, but neither carried a type, so a
+  ; top-level one written without its bang was stored as data and nothing reported it: the token was never
+  ; bound, the module never loaded, and the first symptom was a later match failing. Declaring the unit
+  ; return type is what lets the checker see them. The token and the module name are Atom-typed because
+  ; neither is reduced; bind!'s value is %Undefined% because it is, as in (bind! &s (new-space)).
+  (: bind! (-> Atom %Undefined% (->)))
+  (: import! (-> Atom Atom (->)))
+
   ; Partial application is ordinary PeTTa behavior. A known under-applied head becomes
   ; (partial head args); applying that closure rebuilds the fuller call and evaluates it.
   (: partial (-> Atom Expression Atom))
