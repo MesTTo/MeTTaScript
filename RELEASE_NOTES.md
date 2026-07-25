@@ -1,3 +1,44 @@
+# MeTTaScript 2.7.0
+
+Leveled logging you can leave in the code, and two interpreter forms that now carry the types they always
+had. No existing program's evaluation or output changes.
+
+## Logging that costs nothing until you switch it on
+
+Instrumenting a function with `println!` means paying to build the message on every call, forever, which is
+why that instrumentation gets deleted rather than left in place. Logging is now a level:
+
+```metta
+!(pragma! log-level info)
+!(log! info (summarize $kb))     ; (Log info <value>)
+!(log! debug (expensive $kb))    ; nothing: debug is below info, and the payload is not built
+```
+
+Levels rank `error < warn < info < debug < trace`, and a setting admits everything at or above its severity.
+Logging is off until a program sets the pragma, so a library that logs is silent in a program that never asks
+for it. `(log-enabled? <level>)` answers the same question for a caller that wants its own sink, such as
+recording events as atoms in a space instead of printing them.
+
+Two things keep the off path cheap. The level is a field on the interpreter's world, so `log-enabled?` reads
+it rather than matching against a space. And `log!`'s payload is declared `Atom`, so the unevaluated branches
+of `if` leave it alone: the expression that would build the message is never reduced. That lazy argument is
+what Rust's `log` crate gets from a closure and Log4j2 from a lambda; MeTTa's parameter types give it
+directly.
+
+Measured on a 200-iteration loop with tabling off, the off path is flat across a hundredfold change in
+payload cost, 68.6 ms at `(work 10)` and 68.7 ms at `(work 1000)`, while the same loop with the level set
+scales with it, 145 ms to 4765 ms. The same guard written in MeTTa over a space is flat too, but costs about
+40% more per call.
+
+## A missing bang on bind! or import! is reported
+
+`metta check` decides an operator is an action by reading the unit return type `(->)` off its signature.
+`bind!` and `import!` never carried a signature, so it could not see them: a top-level
+`(bind! &s (new-space))` or `(import! &self lib)` written without its leading `!` was stored as data, the
+token stayed unbound and the module never loaded, and nothing said so. The first symptom was a later `match`
+quietly finding nothing. Both now declare the types they already had, so the existing `unevaluated-action`
+warning covers them.
+
 # MeTTaScript 2.6.0
 
 Two additions. `metta check` now catches a top-level action form that is stored as data instead of run, and
