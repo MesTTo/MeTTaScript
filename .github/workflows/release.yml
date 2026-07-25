@@ -1,8 +1,9 @@
 name: Publish
 
 # Publishes the @mettascript/* packages and their @metta-ts/* compatibility shims
-# to npm with provenance (a signed link back to this repo and commit). Runs when a
-# v* tag is pushed, or on demand.
+# to npm with provenance (a signed link back to this repo and commit), then draws
+# the GitHub release for the tag from RELEASE_NOTES.md. Runs when a v* tag is
+# pushed, or on demand.
 on:
   push:
     tags: ["v*"]
@@ -12,7 +13,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write # create the GitHub release for the tag
       id-token: write # required for npm provenance attestations
     steps:
       - uses: actions/checkout@v4
@@ -27,3 +28,28 @@ jobs:
       - run: pnpm -r --filter "./packages/*" --filter "./compat/*" publish --access public --provenance --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # The tag alone is not the release: it publishes to npm but leaves nothing on the repo's
+      # releases page. Cut the release from the version's own RELEASE_NOTES.md section, so the
+      # notes that ship are the ones written for the version rather than a generated commit list.
+      - name: Create the GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          # Take the "# MeTTaScript <version>" section up to the next level-1 heading.
+          awk -v want="# MeTTaScript ${version}" '
+            $0 == want { inside = 1; print; next }
+            inside && /^# MeTTaScript / { exit }
+            inside { print }
+          ' RELEASE_NOTES.md > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "RELEASE_NOTES.md has no section for ${version}" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" \
+            --title "MeTTaScript ${version}" \
+            --notes-file release-notes.md \
+            --latest
