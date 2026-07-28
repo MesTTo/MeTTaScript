@@ -186,7 +186,8 @@
          (FuzzShrinkError
            CandidateGenerationFailed
            (ErrorCode $code)
-           $details))
+           $details
+           $progress))
         ($valid
          (_fuzz-shrink-search
            (Candidates $valid)
@@ -340,7 +341,8 @@
    (FuzzShrinkError
      VisitedTreeLookupFailed
      (ErrorCode $code)
-     $details))
+     $details
+     $progress))
 
 (= (_fuzz-shrink-consider-replay
      (FuzzShrinkReplay $value $actual-tree)
@@ -496,7 +498,8 @@
    (FuzzShrinkError
      VisitedTreeLookupFailed
      (ErrorCode $code)
-     $details))
+     $details
+     $progress))
 
 (= (_fuzz-run-shrinker
      $generator
@@ -522,11 +525,13 @@
        0
        (cons-atom $decision ()))))
 
-(= (_fuzz-shrink-claim $status)
+(= (_fuzz-shrink-claim $status $reason)
    (switch $status
      ((LocallyMinimal
        (LocallyMinimalUnder
          (Order mettascript-shrink-v1)))
+      (Disabled
+       (NotShrunk (Reason $reason)))
       ($stopped
        (SmallestFoundUnder
          (Order mettascript-shrink-v1)
@@ -601,11 +606,17 @@
      (OriginalValue $original-value)
      (OriginalDecision $original-decision)
      (OriginalDetails $original-details)
+     (OriginalLabels $original-labels)
+     (OriginalCollected $original-collected)
+     (OriginalCoverage $original-coverage)
      (OriginalAnnotations $original-annotations)
      (OriginalPropertyResults $original-results)
      (SmallestValue $smallest-value)
      (SmallestDecision $smallest-decision)
      (SmallestDetails $smallest-details)
+     (SmallestLabels $smallest-labels)
+     (SmallestCollected $smallest-collected)
+     (SmallestCoverage $smallest-coverage)
      (SmallestAnnotations $smallest-annotations)
      (PropertyResults $smallest-results)
      (Replay
@@ -620,7 +631,7 @@
        (Reason $reason)
        (Attempts $attempts)
        (Accepted $accepted)
-       (_fuzz-shrink-claim $status))
+       (_fuzz-shrink-claim $status $reason))
      (_fuzz-run-statistics $state)))
 
 (= (_fuzz-build-flaky
@@ -907,7 +918,14 @@
          $accepted))))
 
 (= (_fuzz-after-shrink
-     (FuzzShrinkError $code $first $second)
+     (FuzzShrinkError
+       $code
+       $first
+       $second
+       (FuzzShrinkProgress
+         $attempts
+         $accepted
+         $visited))
      (FuzzFailureContext
        $property-id
        $generator
@@ -923,15 +941,31 @@
        $config
        $state
        $signature))
-   (FuzzInvalid
-     ShrinkError
-     (Property $property-id)
-     (Phase $phase)
-     (CaseIndex $case-index)
-     (ErrorCode $code)
-     $first
-     $second
-     (_fuzz-run-statistics $state)))
+   (_fuzz-build-failure
+     (FuzzFailureContext
+       $property-id
+       $generator
+       $property
+       $quantifier
+       $phase
+       $case-index
+       $origin
+       $size
+       $original-value
+       $original-decision
+       $original-case
+       $config
+       $state
+       $signature)
+     (FuzzShrinkTarget
+       $original-value
+       $original-decision
+       $original-case)
+     (FuzzShrinkSummary
+       Error
+       (ShrinkError $code $first $second)
+       $attempts
+       $accepted)))
 
 (= (_fuzz-after-post-stability
      (FuzzStable $first $second)

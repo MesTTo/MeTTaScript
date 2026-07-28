@@ -364,8 +364,54 @@ describe("MeTTa fuzz runner", () => {
     expect(result).toContain(
       "(Status Disabled) (Reason ExternalEffectsWithoutReset) (Attempts 0) (Accepted 0)",
     );
+    expect(result).toContain("(NotShrunk (Reason ExternalEffectsWithoutReset))");
+    expect(result).not.toContain("SmallestFoundUnder");
     expect(result).toContain("(OriginalValue 0)");
     expect(result).toContain("(SmallestValue 0)");
+  });
+
+  it("retains failing-case labels, collected values, coverage, and notes", () => {
+    const result = printed(`
+      (: reported-failure (-> Atom FuzzProperty))
+      (= (reported-failure $value)
+         (if (> $value 5)
+             (counterexample
+               (Input $value)
+               (collect
+                 $value
+                 (classify
+                   True
+                   FailureCase
+                   (cover
+                     10
+                     True
+                     FailureCovered
+                     (fuzz-fail TooLarge (Value $value))))))
+             (fuzz-pass)))
+      !(fuzz-check
+         reported-failure
+         (gen-int 0 100)
+         reported-failure
+         (fuzz-config
+           (Runs 1)
+           (MaxSize 100)
+           (MaxShrinks 100)
+           (MaxShrinkImprovements 100)
+           (EdgeCases 2)))
+    `)[1]![0]!;
+
+    expect(result).toContain("(OriginalLabels (Labels (FailureCase)))");
+    expect(result).toContain("(OriginalCollected (Collected (100)))");
+    expect(result).toContain(
+      "(OriginalCoverage (Coverage ((CoverageObservation 10 FailureCovered True))))",
+    );
+    expect(result).toContain("(OriginalAnnotations (Annotations ((Input 100))))");
+    expect(result).toContain("(SmallestLabels (Labels (FailureCase)))");
+    expect(result).toContain("(SmallestCollected (Collected (6)))");
+    expect(result).toContain(
+      "(SmallestCoverage (Coverage ((CoverageObservation 10 FailureCovered True))))",
+    );
+    expect(result).toContain("(SmallestAnnotations (Annotations ((Input 6))))");
   });
 
   it("reports pre-shrink result-bag instability as flaky", () => {
