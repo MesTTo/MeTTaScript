@@ -258,16 +258,26 @@ export class MeTTa {
   /** Register an async grounded operation callable from MeTTa source by `name` (resolved by the async
    *  runner). The function receives argument atoms and resolves to result atoms, optionally with
    *  evaluator-applied effects such as adding/removing atoms or binding a token. A rejection becomes a
-   *  MeTTa `(Error ...)` atom. Use it for I/O: fetch, a DAS query, a timer. */
-  registerAsyncOperation(name: string, op: (args: Atom[]) => Promise<AsyncOperationReturn>): void {
-    core.registerAsyncGroundedOperation(this.env, name, async (args) => {
-      try {
-        const raw = await op(args.map(Atom.fromCAtom));
-        return asyncOperationReturnToReduceResult(raw);
-      } catch (e) {
-        return { tag: "runtimeError", msg: e instanceof Error ? e.message : String(e) };
-      }
-    });
+   *  MeTTa `(Error ...)` atom. The effect defaults to `AsyncHost`; only declare a narrower effect when the
+   *  handler satisfies that contract. Use it for I/O: fetch, a DAS query, a timer. */
+  registerAsyncOperation(
+    name: string,
+    op: (args: Atom[]) => Promise<AsyncOperationReturn>,
+    effect: core.GroundedOperationEffect = "AsyncHost",
+  ): void {
+    core.registerAsyncGroundedOperation(
+      this.env,
+      name,
+      async (args) => {
+        try {
+          const raw = await op(args.map(Atom.fromCAtom));
+          return asyncOperationReturnToReduceResult(raw);
+        } catch (e) {
+          return { tag: "runtimeError", msg: e instanceof Error ? e.message : String(e) };
+        }
+      },
+      effect,
+    );
   }
 
   /** Parse every top-level atom of a program. */
@@ -327,16 +337,26 @@ export class MeTTa {
   /** Register a grounded operation callable from MeTTa source by `name`. The function receives argument
    *  atoms and returns result atoms. A thrown error becomes a MeTTa `(Error ...)` atom instead of
    *  crashing the run. Throw {@link IncorrectArgumentError} to leave the expression unevaluated so other
-   *  rewrite rules can try (MeTTa's multiple dispatch on a type mismatch). */
-  registerOperation(name: string, op: (args: Atom[]) => Atom[]): void {
-    core.registerGroundedOperation(this.env, name, (args) => {
-      try {
-        return { tag: "ok", results: op(args.map(Atom.fromCAtom)).map((a) => a.catom) };
-      } catch (e) {
-        if (e instanceof IncorrectArgumentError) return { tag: "noReduce" };
-        return { tag: "runtimeError", msg: e instanceof Error ? e.message : String(e) };
-      }
-    });
+   *  rewrite rules can try (MeTTa's multiple dispatch on a type mismatch). The effect defaults to `Host`;
+   *  a `Pure` or `World` declaration opts the handler into fuzz-sandbox execution. */
+  registerOperation(
+    name: string,
+    op: (args: Atom[]) => Atom[],
+    effect: core.GroundedOperationEffect = "Host",
+  ): void {
+    core.registerGroundedOperation(
+      this.env,
+      name,
+      (args) => {
+        try {
+          return { tag: "ok", results: op(args.map(Atom.fromCAtom)).map((a) => a.catom) };
+        } catch (e) {
+          if (e instanceof IncorrectArgumentError) return { tag: "noReduce" };
+          return { tag: "runtimeError", msg: e instanceof Error ? e.message : String(e) };
+        }
+      },
+      effect,
+    );
   }
 
   /** Every type the runner infers for an atom (Hyperon `get_atom_types`). */

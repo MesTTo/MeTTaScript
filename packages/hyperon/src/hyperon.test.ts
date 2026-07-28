@@ -197,6 +197,17 @@ describe("MeTTa runner", () => {
     expect(out[0]!.map((a) => a.toString())).toEqual(["42"]);
   });
 
+  it("passes explicit operation effects to the fuzz sandbox", () => {
+    const m = new MeTTa();
+    m.registerOperation("pure-seven", () => [ValueAtom(7)], "Pure");
+    const out = m.run(`
+      (: _fuzz-eval-case (-> Atom Number Number Atom Atom))
+      (: pure-seven (-> Number))
+      !(_fuzz-eval-case (pure-seven) 1000 100 Sandboxed)
+    `);
+    expect(out[0]![0]!.toString()).toMatch(/^\(FuzzCaseOutcome Completed \(, 7\) [0-9]+\)$/);
+  });
+
   it("registers an async operation with evaluator-applied effects", async () => {
     const m = new MeTTa();
     m.registerAsyncOperation("install-async-rule", async () => ({

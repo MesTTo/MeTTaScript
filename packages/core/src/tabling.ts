@@ -28,6 +28,7 @@ export const IMPURE_OPS: ReadonlySet<string> = new Set([
   "bind!",
   "import!",
   "transaction",
+  "_fuzz-eval-case",
   "context-space",
   "par",
   "race",

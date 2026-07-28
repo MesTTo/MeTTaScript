@@ -2,7 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { runProgram, standardTokenizer } from "./runner";
 import { format, parseAll } from "./parser";
 import type { Atom } from "./atom";
@@ -110,6 +110,19 @@ describe("runner + stdlib prelude", () => {
     `);
     expect(r[0]!.results.map(format)).toEqual(["()"]);
     expect(r[1]!.results.map(format)).toEqual(["is-range-empty"]);
+  });
+
+  it("random-int does not use its optional RNG argument as reproducible state", () => {
+    const random = vi.spyOn(Math, "random").mockReturnValueOnce(0.1).mockReturnValueOnce(0.9);
+    try {
+      const r = runProgram(`
+        !(random-int &same-rng 0 10)
+        !(random-int &same-rng 0 10)
+      `);
+      expect(r.map((query) => query.results.map(format))).toEqual([["1"], ["9"]]);
+    } finally {
+      random.mockRestore();
+    }
   });
 
   it("get-type-space consults the named space's type declarations", () => {
