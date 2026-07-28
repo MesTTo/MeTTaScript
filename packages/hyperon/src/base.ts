@@ -7,6 +7,7 @@
  * `hyperon.runner`. TypeScript surface over `@metta-ts/core`.
  */
 import "@mettascript/libraries";
+import "@mettascript/fuzz";
 import * as core from "@mettascript/core";
 import { Atom } from "./atoms";
 import { Bindings, BindingsSet } from "./bindings";

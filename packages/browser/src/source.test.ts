@@ -16,6 +16,28 @@ const lastResults = (rs: ReturnType<typeof runSource>): string[] =>
   rs.at(-1)?.results.map(format) ?? [];
 
 describe("browser source runners", () => {
+  it("uses the same deterministic fuzz kernel vectors as the package entry", () => {
+    const results = runSource(`
+      !(import! &self fuzz)
+      !(_fuzz-rng-init 42)
+      !(let* (
+        ($r0 (_fuzz-rng-init 42))
+        ((FuzzDraw $a $r1) (_fuzz-draw-int $r0 -10 10))
+        ((FuzzDraw $b $r2) (_fuzz-draw-int $r1 -10 10))
+        ((FuzzDraw $c $r3) (_fuzz-draw-int $r2 -10 10)))
+        ($a $b $c $r3))
+      !(_fuzz-atom-key Alpha (pair $left $left $right))
+      !(_fuzz-make-variable 17)
+    `);
+    expect(results.map((result) => result.results.map(format))).toEqual([
+      ["()"],
+      ["(FuzzRng xorshift128plus-v1 -1 -43 42 0)"],
+      ["(-9 -3 -5 (FuzzRng xorshift128plus-v1 352322880 526288222 704468 -1339159583))"],
+      ['"mettascript-atom-key-v1;E4:S4:pair;V2:%0;V2:%0;V2:%1;"'],
+      ["$fuzz-17"],
+    ]);
+  });
+
   it("runs a source string with in-memory imports", () => {
     const imports = new Map<string, Atom[]>([
       [

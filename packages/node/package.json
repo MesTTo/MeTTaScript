@@ -30,6 +30,7 @@
   "dependencies": {
     "@mettascript/core": "workspace:*",
     "@mettascript/debug": "workspace:*",
+    "@mettascript/fuzz": "workspace:*",
     "@mettascript/libraries": "workspace:*",
     "@mettascript/prolog": "workspace:*",
     "@mettascript/py": "workspace:*"

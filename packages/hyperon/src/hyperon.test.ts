@@ -162,6 +162,16 @@ describe("parser", () => {
 });
 
 describe("MeTTa runner", () => {
+  it("auto-registers the deterministic fuzz module", () => {
+    const m = new MeTTa();
+    const out = m.run(`
+      !(import! &self fuzz)
+      !(_fuzz-make-variable 17)
+    `);
+    expect(out[0]!.map((a) => a.toString())).toEqual(["()"]);
+    expect(out[1]!.map((a) => a.toString())).toEqual(["$fuzz-17"]);
+  });
+
   it("evaluates arithmetic", () => {
     const m = new MeTTa();
     const out = m.run("!(+ 1 2)");

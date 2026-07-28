@@ -1,9 +1,10 @@
 {
-  "name": "@mettascript/hyperon",
-  "version": "2.7.0",
+  "name": "@mettascript/fuzz",
+  "version": "2.5.1",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
+  "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
@@ -16,36 +17,35 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean",
-    "docs": "typedoc"
+    "generate": "node scripts/generate-module.mjs",
+    "generate:check": "node scripts/generate-module.mjs --check",
+    "prebuild": "pnpm generate:check",
+    "build": "tsup src/index.ts --format esm --dts --clean"
   },
   "dependencies": {
     "@mettascript/core": "workspace:*",
-    "@mettascript/fuzz": "workspace:*",
-    "@mettascript/libraries": "workspace:*"
+    "pure-rand": "8.4.2"
   },
   "author": "MesTTo",
   "engines": {
     "node": ">=20"
   },
-  "sideEffects": false,
-  "module": "./dist/index.js",
+  "sideEffects": true,
   "publishConfig": {
     "access": "public"
   },
-  "description": "A TypeScript class API over @mettascript/core, modeled on Python hyperon (atoms, spaces, grounded operations).",
+  "description": "MeTTa-native property testing, shrinking, state-machine testing, and bounded verification for MeTTaScript.",
   "keywords": [
     "metta",
     "hyperon",
-    "opencog",
-    "atomspace",
-    "symbolic-ai",
-    "typescript"
+    "property-testing",
+    "fuzzing",
+    "model-checking"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/MesTTo/MeTTaScript.git",
-    "directory": "packages/hyperon"
+    "directory": "packages/fuzz"
   },
   "homepage": "https://github.com/MesTTo/MeTTaScript#readme",
   "bugs": {
