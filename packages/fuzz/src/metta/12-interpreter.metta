@@ -680,38 +680,46 @@
         ($valid
          (fuzz-generate $generator $valid $size))))))
 
+(= (_fuzz-validate-finished-replay
+     $expected-tree
+     $actual-tree
+     $remaining
+     $cursor
+     $result)
+   (if (== $remaining ())
+       (if (== $expected-tree $actual-tree)
+           $result
+           (_fuzz-generation-error
+             ReplayMismatch
+             (ExpectedTree $expected-tree)
+             (ActualTree $actual-tree)))
+       (_fuzz-generation-error
+         TrailingReplayDecisions
+         (Path $cursor)
+         (Remaining $remaining))))
+
 (= (_fuzz-finish-replay $expected-tree $result)
    (switch $result
      (((FuzzSample
         $value
         (FuzzDriver Replay (ReplayState $remaining $cursor))
         $actual-tree)
-       (if (== $remaining ())
-           (if (== $expected-tree $actual-tree)
-               $result
-               (_fuzz-generation-error
-                 ReplayMismatch
-                 (ExpectedTree $expected-tree)
-                 (ActualTree $actual-tree)))
-           (_fuzz-generation-error
-             TrailingReplayDecisions
-             (Path $cursor)
-             (Remaining $remaining))))
+       (_fuzz-validate-finished-replay
+         $expected-tree
+         $actual-tree
+         $remaining
+         $cursor
+         $result))
       ((FuzzGenerationDiscard
         $reason
         (FuzzDriver Replay (ReplayState $remaining $cursor))
         $actual-tree)
-       (if (== $remaining ())
-           (if (== $expected-tree $actual-tree)
-               $result
-               (_fuzz-generation-error
-                 ReplayMismatch
-                 (ExpectedTree $expected-tree)
-                 (ActualTree $actual-tree)))
-           (_fuzz-generation-error
-             TrailingReplayDecisions
-             (Path $cursor)
-             (Remaining $remaining))))
+       (_fuzz-validate-finished-replay
+         $expected-tree
+         $actual-tree
+         $remaining
+         $cursor
+         $result))
       ((FuzzGenerationError $code $details) $result)
       ($bad
        (_fuzz-generation-error

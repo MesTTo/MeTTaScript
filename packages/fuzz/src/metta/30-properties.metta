@@ -2,48 +2,121 @@
 ;
 ; SPDX-License-Identifier: MIT
 
+; Canonical property outcomes.
 (= (fuzz-pass)
-   FuzzPass)
+   (Pass))
 
 (= (fuzz-fail $tag $details)
-   (FuzzFail $tag $details))
+   (Fail $tag $details))
 
 (= (fuzz-discard $reason)
-   (FuzzDiscard $reason))
+   (Discard $reason))
 
-(= (fuzz-equal $actual $expected)
+(= (expect-true $condition $details)
+   (if $condition
+       (Pass)
+       (Fail ExpectedTrue $details)))
+
+(= (expect-false $condition $details)
+   (if $condition
+       (Fail ExpectedFalse $details)
+       (Pass)))
+
+(= (expect-atom-equal $actual $expected)
    (if (== $actual $expected)
-       FuzzPass
-       (FuzzFail
+       (Pass)
+       (Fail
          NotEqual
-         (Actual $actual)
-         (Expected $expected))))
+         ((Actual $actual) (Expected $expected)))))
 
-(= (fuzz-alpha-equal $actual $expected)
+(= (expect-alpha-equal $actual $expected)
    (if (=alpha $actual $expected)
-       FuzzPass
-       (FuzzFail
+       (Pass)
+       (Fail
          NotAlphaEqual
-         (Actual $actual)
-         (Expected $expected))))
+         ((Actual $actual) (Expected $expected)))))
 
-(= (fuzz-implies $condition $outcome)
+(= (expect-results-exact $actual $expected)
+   (if (== $actual $expected)
+       (Pass)
+       (Fail
+         ResultsNotExact
+         ((Actual $actual) (Expected $expected)))))
+
+(= (expect-results-alpha $actual $expected)
+   (if (=alpha $actual $expected)
+       (Pass)
+       (Fail
+         ResultsNotAlphaEqual
+         ((Actual $actual) (Expected $expected)))))
+
+(= (_fuzz-remove-exact-loop $target $remaining $prefix)
+   (if (== $remaining ())
+       NotFound
+       (let* ((($value $tail) (decons-atom $remaining)))
+         (if (== $target $value)
+             (Removed (append $prefix $tail))
+             (_fuzz-remove-exact-loop
+               $target
+               $tail
+               (append $prefix (cons-atom $value ())))))))
+
+(= (_fuzz-remove-exact $target $values)
+   (_fuzz-remove-exact-loop $target $values ()))
+
+(= (_fuzz-results-multiset-equal $left $right)
+   (if (== $left ())
+       (== $right ())
+       (let* ((($value $tail) (decons-atom $left))
+              ($removed (_fuzz-remove-exact $value $right)))
+         (switch $removed
+           (((Removed $remaining)
+             (_fuzz-results-multiset-equal $tail $remaining))
+            (NotFound False)
+            ($bad False))))))
+
+(= (_fuzz-every-member-exact $values $other)
+   (if (== $values ())
+       True
+       (let* ((($value $tail) (decons-atom $values)))
+         (if (is-member $value $other)
+             (_fuzz-every-member-exact $tail $other)
+             False))))
+
+(= (_fuzz-results-set-equal $left $right)
+   (and
+     (_fuzz-every-member-exact $left $right)
+     (_fuzz-every-member-exact $right $left)))
+
+(= (expect-results-multiset $actual $expected)
+   (if (_fuzz-results-multiset-equal $actual $expected)
+       (Pass)
+       (Fail
+         ResultsNotMultisetEqual
+         ((Actual $actual) (Expected $expected)))))
+
+(= (expect-results-set $actual $expected)
+   (if (_fuzz-results-set-equal $actual $expected)
+       (Pass)
+       (Fail
+         ResultsNotSetEqual
+         ((Actual $actual) (Expected $expected)))))
+
+; The property argument stays lazy so a false precondition cannot run it.
+(= (implies $condition $property)
    (if $condition
-       $outcome
-       (FuzzDiscard ImplicationFalse)))
+       $property
+       (Discard ImplicationFalse)))
 
-(= (fuzz-annotate $annotation $outcome)
-   (FuzzAnnotated $annotation $outcome))
-
-(= (fuzz-classify $condition $label $outcome)
+(= (classify $condition $label $property)
    (if $condition
-       (FuzzClassified $label $outcome)
-       $outcome))
+       (FuzzClassified $label $property)
+       $property))
 
-(= (fuzz-collect $value $outcome)
-   (FuzzCollected $value $outcome))
+(= (collect $value $property)
+   (FuzzCollected $value $property))
 
-(= (fuzz-cover $minimum-percent $label $condition $outcome)
+(= (cover $minimum-percent $condition $label $property)
    (if (and
          (<= 0 $minimum-percent)
          (<= $minimum-percent 100))
@@ -51,10 +124,42 @@
          $minimum-percent
          $label
          $condition
-         $outcome)
+         $property)
        (FuzzInvalidProperty
          InvalidCoveragePercentage
          (MinimumPercent $minimum-percent))))
+
+(= (counterexample $note $property)
+   (FuzzAnnotated $note $property))
+
+; Compatibility aliases use the canonical outcomes.
+(= (fuzz-equal $actual $expected)
+   (expect-atom-equal $actual $expected))
+
+(= (fuzz-alpha-equal $actual $expected)
+   (expect-alpha-equal $actual $expected))
+
+(= (fuzz-implies $condition $property)
+   (implies $condition $property))
+
+(= (fuzz-annotate $note $property)
+   (counterexample $note $property))
+
+(= (fuzz-classify $condition $label $property)
+   (classify $condition $label $property))
+
+(= (fuzz-collect $value $property)
+   (collect $value $property))
+
+(= (fuzz-cover $minimum-percent $label $condition $property)
+   (cover $minimum-percent $condition $label $property))
+
+; Quantifier wrappers are passed as the property-function argument to fuzz-check.
+(= (all-results $property)
+   (FuzzPropertyFunction All $property))
+
+(= (any-result $property)
+   (FuzzPropertyFunction Any $property))
 
 (= (_fuzz-normalized-add-annotation $annotation $normalized)
    (switch $normalized
@@ -76,7 +181,7 @@
          (append $annotations (cons-atom $annotation ()))))
       ($bad
        (NormalizedProperty
-         Error
+         Invalid
          InvalidPropertyWrapper
          (Value $bad)
          ()
@@ -104,7 +209,7 @@
          $annotations))
       ($bad
        (NormalizedProperty
-         Error
+         Invalid
          InvalidPropertyWrapper
          (Value $bad)
          ()
@@ -132,7 +237,7 @@
          $annotations))
       ($bad
        (NormalizedProperty
-         Error
+         Invalid
          InvalidPropertyWrapper
          (Value $bad)
          ()
@@ -166,7 +271,7 @@
            $annotations)))
       ($bad
        (NormalizedProperty
-         Error
+         Invalid
          InvalidPropertyWrapper
          (Value $bad)
          ()
@@ -176,24 +281,15 @@
 
 (= (_fuzz-normalize-property-result $result)
    (switch $result
-     ((FuzzPass
+     (((Pass)
        (NormalizedProperty Pass None () () () () ()))
       (True
        (NormalizedProperty Pass None () () () () ()))
       (False
        (NormalizedProperty Fail BooleanFalse () () () () ()))
-      ((FuzzFail $tag $first $second)
-       (NormalizedProperty
-         Fail
-         $tag
-         ($first $second)
-         ()
-         ()
-         ()
-         ()))
-      ((FuzzFail $tag $details)
+      ((Fail $tag $details)
        (NormalizedProperty Fail $tag $details () () () ()))
-      ((FuzzDiscard $reason)
+      ((Discard $reason)
        (NormalizedProperty Discard Discarded $reason () () () ()))
       ((FuzzAnnotated $annotation $outcome)
        (_fuzz-normalized-add-annotation
@@ -214,10 +310,37 @@
          $hit
          (_fuzz-normalize-property-result $outcome)))
       ((FuzzInvalidProperty $code $details)
-       (NormalizedProperty Error $code $details () () () ()))
+       (NormalizedProperty Invalid $code $details () () () ()))
+      ((Error $subject ResourceLimit)
+       (NormalizedProperty
+         Cutoff
+         ResourceLimit
+         (Error $subject ResourceLimit)
+         ()
+         ()
+         ()
+         ()))
+      ((Error $subject StackOverflow)
+       (NormalizedProperty
+         Cutoff
+         StackOverflow
+         (Error $subject StackOverflow)
+         ()
+         ()
+         ()
+         ()))
+      ((Error $subject TableResourceLimit)
+       (NormalizedProperty
+         Cutoff
+         TableResourceLimit
+         (Error $subject TableResourceLimit)
+         ()
+         ()
+         ()
+         ()))
       ((Error $subject $reason)
        (NormalizedProperty
-         Error
+         Fail
          LanguageError
          (Error $subject $reason)
          ()
@@ -226,8 +349,8 @@
          ()))
       ($bad
        (NormalizedProperty
-         Error
-         InvalidPropertyResult
+         Invalid
+         MalformedPropertyResult
          (Value $bad)
          ()
          ()
@@ -246,7 +369,8 @@
         $pass-count
         $first-fail
         $first-discard
-        $first-error
+        $first-cutoff
+        $first-invalid
         $labels
         $collected
         $coverage
@@ -272,15 +396,20 @@
                     (if (== $status Discard)
                         (_fuzz-first-result $first-discard $normalized)
                         $first-discard))
-                  ($next-error
-                    (if (== $status Error)
-                        (_fuzz-first-result $first-error $normalized)
-                        $first-error)))
+                  ($next-cutoff
+                    (if (== $status Cutoff)
+                        (_fuzz-first-result $first-cutoff $normalized)
+                        $first-cutoff))
+                  ($next-invalid
+                    (if (== $status Invalid)
+                        (_fuzz-first-result $first-invalid $normalized)
+                        $first-invalid)))
              (PropertyClassification
                $next-pass-count
                $next-fail
                $next-discard
-               $next-error
+               $next-cutoff
+               $next-invalid
                (append $labels $new-labels)
                (append $collected $new-collected)
                (append $coverage $new-coverage)
@@ -290,9 +419,10 @@
              $pass-count
              $first-fail
              $first-discard
+             $first-cutoff
              (Some
                (NormalizedProperty
-                 Error
+                 Invalid
                  InvalidNormalizedProperty
                  (Value $bad)
                  ()
@@ -334,7 +464,8 @@
             $pass-count
             $first-fail
             $first-discard
-            $first-error
+            $first-cutoff
+            $first-invalid
             $labels
             $collected
             $coverage
@@ -351,7 +482,7 @@
              (Steps $steps)))
           ($bad-state
            (FuzzCaseResult
-             Error
+             Invalid
              InvalidClassificationState
              (Details (Value $bad-state))
              (Labels ())
@@ -362,7 +493,7 @@
              (Steps $steps))))))
       ($bad
        (FuzzCaseResult
-         Error
+         Invalid
          InvalidNormalizedProperty
          (Details (Value $bad))
          (Labels ())
@@ -372,55 +503,170 @@
          (Results $results)
          (Steps $steps))))))
 
-(= (_fuzz-pass-case $state $results $steps)
+(= (_fuzz-synthetic-case $status $tag $details $state $results $steps)
    (_fuzz-case-from-normalized
-     (NormalizedProperty Pass None () () () () ())
+     (NormalizedProperty $status $tag $details () () () ())
      $state
      $results
      $steps))
 
-(= (_fuzz-error-case $tag $details $results $steps)
-   (let $state
-         (PropertyClassification 0 None None None () () () ())
-     (_fuzz-case-from-normalized
-       (NormalizedProperty Error $tag $details () () () ())
-       $state
-       $results
-       $steps)))
+(= (_fuzz-case-from-option
+     $option
+     $fallback-status
+     $fallback-tag
+     $state
+     $results
+     $steps)
+   (switch $option
+     (((Some $normalized)
+       (_fuzz-case-from-normalized
+         $normalized
+         $state
+         $results
+         $steps))
+      (None
+       (_fuzz-synthetic-case
+         $fallback-status
+         $fallback-tag
+         ()
+         $state
+         $results
+         $steps))
+      ($bad
+       (_fuzz-synthetic-case
+         Invalid
+         InvalidClassificationOption
+         (Value $bad)
+         $state
+         $results
+         $steps)))))
 
-(= (_fuzz-cutoff-case $tag $details $results $steps)
-   (let $state
-         (PropertyClassification 0 None None None () () () ())
-     (_fuzz-case-from-normalized
-       (NormalizedProperty Cutoff $tag $details () () () ())
-       $state
-       $results
-       $steps)))
-
-(= (_fuzz-finish-all-discard $state $results $steps)
+(= (_fuzz-finish-default-after-fail $state $results $steps)
    (switch $state
      (((PropertyClassification
         $pass-count
         $first-fail
         $first-discard
-        $first-error
+        $first-cutoff
+        $first-invalid
         $labels
         $collected
         $coverage
         $annotations)
-       (switch $first-discard
-         (((Some $discard)
+       (switch $first-cutoff
+         (((Some $cutoff)
            (_fuzz-case-from-normalized
-             $discard
+             $cutoff
              $state
              $results
              $steps))
           (None
-           (_fuzz-pass-case $state $results $steps)))))
+           (if (> $pass-count 0)
+               (_fuzz-synthetic-case
+                 Pass
+                 None
+                 ()
+                 $state
+                 $results
+                 $steps)
+               (_fuzz-case-from-option
+                 $first-discard
+                 Invalid
+                 NoPropertyResult
+                 $state
+                 $results
+                 $steps))))))
       ($bad-state
-       (_fuzz-error-case
+       (_fuzz-synthetic-case
+         Invalid
          InvalidClassificationState
          (Value $bad-state)
+         $state
+         $results
+         $steps)))))
+
+(= (_fuzz-finish-default $state $results $steps)
+   (switch $state
+     (((PropertyClassification
+        $pass-count
+        $first-fail
+        $first-discard
+        $first-cutoff
+        $first-invalid
+        $labels
+        $collected
+        $coverage
+        $annotations)
+       (switch $first-fail
+         (((Some $failure)
+           (_fuzz-case-from-normalized
+             $failure
+             $state
+             $results
+             $steps))
+          (None
+           (_fuzz-finish-default-after-fail
+             $state
+             $results
+             $steps)))))
+      ($bad-state
+       (_fuzz-synthetic-case
+         Invalid
+         InvalidClassificationState
+         (Value $bad-state)
+         $state
+         $results
+         $steps)))))
+
+(= (_fuzz-finish-all-after-fail $state $results $steps)
+   (switch $state
+     (((PropertyClassification
+        $pass-count
+        $first-fail
+        $first-discard
+        $first-cutoff
+        $first-invalid
+        $labels
+        $collected
+        $coverage
+        $annotations)
+       (switch $first-cutoff
+         (((Some $cutoff)
+           (_fuzz-case-from-normalized
+             $cutoff
+             $state
+             $results
+             $steps))
+          (None
+           (switch $first-discard
+             (((Some $discard)
+               (_fuzz-case-from-normalized
+                 $discard
+                 $state
+                 $results
+                 $steps))
+              (None
+               (if (> $pass-count 0)
+                   (_fuzz-synthetic-case
+                     Pass
+                     None
+                     ()
+                     $state
+                     $results
+                     $steps)
+                   (_fuzz-synthetic-case
+                     Invalid
+                     NoPropertyResult
+                     ()
+                     $state
+                     $results
+                     $steps)))))))))
+      ($bad-state
+       (_fuzz-synthetic-case
+         Invalid
+         InvalidClassificationState
+         (Value $bad-state)
+         $state
          $results
          $steps)))))
 
@@ -430,7 +676,8 @@
         $pass-count
         $first-fail
         $first-discard
-        $first-error
+        $first-cutoff
+        $first-invalid
         $labels
         $collected
         $coverage
@@ -443,55 +690,27 @@
              $results
              $steps))
           (None
-           (_fuzz-finish-all-discard
+           (_fuzz-finish-all-after-fail
              $state
              $results
              $steps)))))
       ($bad-state
-       (_fuzz-error-case
+       (_fuzz-synthetic-case
+         Invalid
          InvalidClassificationState
          (Value $bad-state)
+         $state
          $results
          $steps)))))
 
-(= (_fuzz-finish-any-discard $state $results $steps)
+(= (_fuzz-finish-any-after-pass $state $results $steps)
    (switch $state
      (((PropertyClassification
         $pass-count
         $first-fail
         $first-discard
-        $first-error
-        $labels
-        $collected
-        $coverage
-        $annotations)
-       (switch $first-discard
-         (((Some $discard)
-           (_fuzz-case-from-normalized
-             $discard
-             $state
-             $results
-             $steps))
-          (None
-           (_fuzz-error-case
-             EmptyPropertyResult
-             ()
-             $results
-             $steps)))))
-      ($bad-state
-       (_fuzz-error-case
-         InvalidClassificationState
-         (Value $bad-state)
-         $results
-         $steps)))))
-
-(= (_fuzz-finish-any-fail $state $results $steps)
-   (switch $state
-     (((PropertyClassification
-        $pass-count
-        $first-fail
-        $first-discard
-        $first-error
+        $first-cutoff
+        $first-invalid
         $labels
         $collected
         $coverage
@@ -504,14 +723,27 @@
              $results
              $steps))
           (None
-           (_fuzz-finish-any-discard
-             $state
-             $results
-             $steps)))))
+           (switch $first-cutoff
+             (((Some $cutoff)
+               (_fuzz-case-from-normalized
+                 $cutoff
+                 $state
+                 $results
+                 $steps))
+              (None
+               (_fuzz-case-from-option
+                 $first-discard
+                 Invalid
+                 NoPropertyResult
+                 $state
+                 $results
+                 $steps))))))))
       ($bad-state
-       (_fuzz-error-case
+       (_fuzz-synthetic-case
+         Invalid
          InvalidClassificationState
          (Value $bad-state)
+         $state
          $results
          $steps)))))
 
@@ -521,38 +753,51 @@
         $pass-count
         $first-fail
         $first-discard
-        $first-error
+        $first-cutoff
+        $first-invalid
         $labels
         $collected
         $coverage
         $annotations)
        (if (> $pass-count 0)
-           (_fuzz-pass-case $state $results $steps)
-           (_fuzz-finish-any-fail
+           (_fuzz-synthetic-case
+             Pass
+             None
+             ()
+             $state
+             $results
+             $steps)
+           (_fuzz-finish-any-after-pass
              $state
              $results
              $steps)))
       ($bad-state
-       (_fuzz-error-case
+       (_fuzz-synthetic-case
+         Invalid
          InvalidClassificationState
          (Value $bad-state)
+         $state
          $results
          $steps)))))
 
-(= (_fuzz-finish-no-error
+(= (_fuzz-finish-valid-classification
      $quantifier
      $state
      $results
      $steps)
-   (if (== $quantifier All)
-       (_fuzz-finish-all $state $results $steps)
-       (if (== $quantifier Any)
-           (_fuzz-finish-any $state $results $steps)
-           (_fuzz-error-case
-             InvalidQuantifier
-             (Quantifier $quantifier)
-             $results
-             $steps))))
+   (if (== $quantifier Default)
+       (_fuzz-finish-default $state $results $steps)
+       (if (== $quantifier All)
+           (_fuzz-finish-all $state $results $steps)
+           (if (== $quantifier Any)
+               (_fuzz-finish-any $state $results $steps)
+               (_fuzz-synthetic-case
+                 Invalid
+                 InvalidQuantifier
+                 (Quantifier $quantifier)
+                 $state
+                 $results
+                 $steps)))))
 
 (= (_fuzz-finish-property-classification
      $quantifier
@@ -564,44 +809,99 @@
         $pass-count
         $first-fail
         $first-discard
-        $first-error
+        $first-cutoff
+        $first-invalid
         $labels
         $collected
         $coverage
         $annotations)
-       (switch $first-error
-         (((Some $error)
+       (switch $first-invalid
+         (((Some $invalid)
            (_fuzz-case-from-normalized
-             $error
+             $invalid
              $state
              $results
              $steps))
           (None
-           (_fuzz-finish-no-error
+           (_fuzz-finish-valid-classification
              $quantifier
              $state
              $results
              $steps)))))
       ($bad-state
-       (_fuzz-error-case
+       (_fuzz-synthetic-case
+         Invalid
          InvalidClassificationState
          (Value $bad-state)
+         $state
          $results
          $steps)))))
 
-(= (_fuzz-classify-property-results $quantifier $results $steps)
+(= (_fuzz-initial-classification $outcome-status)
+   (if (== $outcome-status Completed)
+       (PropertyClassification
+         0 None None None None () () () ())
+       (if (== $outcome-status ResourceLimit)
+           (PropertyClassification
+             0
+             None
+             None
+             (Some
+               (NormalizedProperty
+                 Cutoff ResourceLimit () () () () ()))
+             None
+             ()
+             ()
+             ()
+             ())
+           (if (== $outcome-status StackOverflow)
+               (PropertyClassification
+                 0
+                 None
+                 None
+                 (Some
+                   (NormalizedProperty
+                     Cutoff StackOverflow () () () () ()))
+                 None
+                 ()
+                 ()
+                 ()
+                 ())
+               (PropertyClassification
+                 0
+                 None
+                 None
+                 None
+                 (Some
+                   (NormalizedProperty
+                     Invalid
+                     InvalidEvaluatorStatus
+                     (Status $outcome-status)
+                     ()
+                     ()
+                     ()
+                     ()))
+                 ()
+                 ()
+                 ()
+                 ())))))
+
+(= (_fuzz-classify-property-results
+     $quantifier
+     $results
+     $steps
+     $outcome-status)
    (if (== $results ())
-       (_fuzz-error-case EmptyPropertyResult () $results $steps)
+       (let $state (_fuzz-initial-classification $outcome-status)
+         (_fuzz-synthetic-case
+           Invalid
+           NoPropertyResult
+           ()
+           $state
+           $results
+           $steps))
        (let* (($initial
-                (PropertyClassification
-                  0
-                  None
-                  None
-                  None
-                  ()
-                  ()
-                  ()
-                  ()))
+                (_fuzz-initial-classification $outcome-status))
               ($classified
                 (_fuzz-classify-results-loop
                   $results
@@ -619,42 +919,54 @@
      $maximum-steps
      $maximum-depth
      $effect-policy)
-   (let $outcome
-         (_fuzz-eval-case
-           ($property $value)
-           $maximum-steps
-           $maximum-depth
-           $effect-policy)
-     (switch $outcome
-       (((FuzzCaseOutcome Completed $results $steps)
-         (_fuzz-classify-property-results
-           $quantifier
-           $results
-           $steps))
-        ((FuzzCaseOutcome
-           (EffectDenied $effect $operation)
-           $results
-           $steps)
-         (_fuzz-error-case
-           EffectDenied
-           ((Effect $effect) (Operation $operation))
-           $results
-           $steps))
-        ((FuzzCaseOutcome ResourceLimit $results $steps)
-         (_fuzz-cutoff-case
-           ResourceLimit
-           (OutcomeResults $results)
-           $results
-           $steps))
-        ((FuzzCaseOutcome StackOverflow $results $steps)
-         (_fuzz-cutoff-case
-           StackOverflow
-           (OutcomeResults $results)
-           $results
-           $steps))
-        ($bad
-         (_fuzz-error-case
-           InvalidEvaluatorOutcome
-           (Value $bad)
-           ()
-           0))))))
+   (let $resolved-policy $effect-policy
+     (let $outcome
+           (_fuzz-eval-case
+             ($property $value)
+             $maximum-steps
+             $maximum-depth
+             $resolved-policy)
+       (switch $outcome
+         (((FuzzCaseOutcome Completed $results $steps)
+           (_fuzz-classify-property-results
+             $quantifier
+             $results
+             $steps
+             Completed))
+          ((FuzzCaseOutcome ResourceLimit $results $steps)
+           (_fuzz-classify-property-results
+             $quantifier
+             $results
+             $steps
+             ResourceLimit))
+          ((FuzzCaseOutcome StackOverflow $results $steps)
+           (_fuzz-classify-property-results
+             $quantifier
+             $results
+             $steps
+             StackOverflow))
+          ((FuzzCaseOutcome
+             (EffectDenied $effect $operation)
+             $results
+             $steps)
+           (let $state
+                 (PropertyClassification
+                   0 None None None None () () () ())
+             (_fuzz-synthetic-case
+               HostFault
+               EffectDenied
+               ((Effect $effect) (Operation $operation))
+               $state
+               $results
+               $steps)))
+          ($bad
+           (let $state
+                 (PropertyClassification
+                   0 None None None None () () () ())
+             (_fuzz-synthetic-case
+               Invalid
+               InvalidEvaluatorOutcome
+               (Value $bad)
+               $state
+               ()
+               0))))))))
