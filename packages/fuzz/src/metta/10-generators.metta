@@ -12,6 +12,11 @@
 (= (_fuzz-generation-error $code $first $second $third)
    (FuzzGenerationError $code (Details $first $second $third)))
 
+(= (_fuzz-generation-error $code $first $second $third $fourth)
+   (FuzzGenerationError
+     $code
+     (Details $first $second $third $fourth)))
+
 (= (_fuzz-if-generation-error $candidate $otherwise)
    (switch $candidate
      (((FuzzGenerationError $code $details) $candidate)

@@ -2,8 +2,13 @@
 ;
 ; SPDX-License-Identifier: MIT
 
-(= (_fuzz-int-decision $lower $upper $value)
-   (Decision Int (Bounds $lower $upper) (Value $value) ()))
+(= (_fuzz-int-decision $lower $upper $origin $value)
+   (Decision
+     Int
+     (Bounds $lower $upper)
+     (Origin $origin)
+     (Value $value)
+     ()))
 
 (= (fuzz-random-driver $seed)
    (if (_fuzz-is-integer $seed)
@@ -65,14 +70,14 @@
           ($mid (/ (+ $lower $upper) 2)))
      (_fuzz-edge-add $mid $lower $upper $f)))
 
-(= (_fuzz-driver-int-random $rng $lower $upper)
+(= (_fuzz-driver-int-random $rng $lower $upper $origin)
    (let $draw (_fuzz-draw-int $rng $lower $upper)
      (switch $draw
        (((FuzzDraw $value $next-rng)
          (DriverChoice
            $value
            (FuzzDriver Random $next-rng)
-           (_fuzz-int-decision $lower $upper $value)))
+           (_fuzz-int-decision $lower $upper $origin $value)))
         ($bad
          (_fuzz-generation-error KernelError (OperationResult $bad)))))))
 
@@ -84,20 +89,35 @@
      (DriverChoice
        $value
        (FuzzDriver Edge (+ $index 1))
-       (_fuzz-int-decision $lower $upper $value))))
+       (_fuzz-int-decision $lower $upper $origin $value))))
 
-(= (_fuzz-driver-int-replay $state $lower $upper)
+(= (_fuzz-driver-int-replay $state $lower $upper $origin)
    (switch $state
      (((ReplayState $decisions $cursor)
        (if (== $decisions ())
            (_fuzz-generation-error ReplayMismatch
              (Path $cursor)
-             (Expected (Decision Int (Bounds $lower $upper) (Value Any) ()))
+             (Expected
+               (Decision
+                 Int
+                 (Bounds $lower $upper)
+                 (Origin $origin)
+                 (Value Any)
+                 ()))
              (Actual EndOfTrace))
            (let* ((($decision $tail) (decons-atom $decisions)))
              (switch $decision
-               (((Decision Int (Bounds $seen-lower $seen-upper) (Value $value) ())
-                 (if (and (== $lower $seen-lower) (== $upper $seen-upper))
+               (((Decision
+                   Int
+                   (Bounds $seen-lower $seen-upper)
+                   (Origin $seen-origin)
+                   (Value $value)
+                   ())
+                 (if (and
+                       (== $lower $seen-lower)
+                       (and
+                         (== $upper $seen-upper)
+                         (== $origin $seen-origin)))
                      (if (and (<= $lower $value) (<= $value $upper))
                          (DriverChoice
                            $value
@@ -110,7 +130,8 @@
                      (_fuzz-generation-error ReplayMismatch
                        (Path $cursor)
                        (ExpectedBounds $lower $upper)
-                       (ActualBounds $seen-lower $seen-upper))))
+                       (ActualBounds $seen-lower $seen-upper)
+                       (Origins $origin $seen-origin))))
                 ($bad
                  (_fuzz-generation-error ReplayMismatch
                    (Path $cursor)
@@ -125,7 +146,7 @@
          (cons-atom $lower $tail))
        ()))
 
-(= (_fuzz-driver-int-exhaustive $state $lower $upper)
+(= (_fuzz-driver-int-exhaustive $state $lower $upper $origin)
    (switch $state
      (((ExhaustiveState $limit $domain-size)
        (let* (($choice-count (+ (- $upper $lower) 1))
@@ -142,7 +163,7 @@
                    (FuzzDriver
                      Exhaustive
                      (ExhaustiveState $limit $required))
-                   (_fuzz-int-decision $lower $upper $value)))))))
+                   (_fuzz-int-decision $lower $upper $origin $value)))))))
       ($bad-state
        (_fuzz-generation-error
          MalformedExhaustiveState
@@ -168,7 +189,7 @@
              (Cursor $cursor)
              (Remaining $remaining)))))
 
-(= (_fuzz-driver-int-bytes $state $lower $upper)
+(= (_fuzz-driver-int-bytes $state $lower $upper $origin)
    (switch $state
      (((BytesState $bytes $cursor)
        (let* (($span (+ (- $upper $lower) 1))
@@ -180,7 +201,7 @@
                (DriverChoice
                  $value
                  (FuzzDriver Bytes (BytesState $bytes $next-cursor))
-                 (_fuzz-int-decision $lower $upper $value))))
+                 (_fuzz-int-decision $lower $upper $origin $value))))
             ((FuzzGenerationError $code $details) $read)
             ($bad
              (_fuzz-generation-error
@@ -194,14 +215,14 @@
        (_fuzz-generation-error InvalidIntegerBounds (Bounds $lower $upper))
        (switch $driver
          (((FuzzDriver Random $rng)
-           (_fuzz-driver-int-random $rng $lower $upper))
+           (_fuzz-driver-int-random $rng $lower $upper $origin))
           ((FuzzDriver Edge $index)
            (_fuzz-driver-int-edge $index $lower $upper $origin))
           ((FuzzDriver Replay $state)
-           (_fuzz-driver-int-replay $state $lower $upper))
+           (_fuzz-driver-int-replay $state $lower $upper $origin))
           ((FuzzDriver Exhaustive $state)
-           (_fuzz-driver-int-exhaustive $state $lower $upper))
+           (_fuzz-driver-int-exhaustive $state $lower $upper $origin))
           ((FuzzDriver Bytes $state)
-           (_fuzz-driver-int-bytes $state $lower $upper))
+           (_fuzz-driver-int-bytes $state $lower $upper $origin))
           ($bad
            (_fuzz-generation-error MalformedDriver (Driver $bad)))))))

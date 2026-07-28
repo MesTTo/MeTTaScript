@@ -53,6 +53,21 @@
 (: fuzz-generate-bytes (-> %Undefined% Expression Number %Undefined%))
 (: fuzz-replay (-> %Undefined% Atom Number %Undefined%))
 
+; Property outcomes and case classification.
+(: _fuzz-eval-case (-> Atom Number Number Atom Atom))
+(: fuzz-pass (-> %Undefined%))
+(: fuzz-fail (-> Atom Atom %Undefined%))
+(: fuzz-discard (-> Atom %Undefined%))
+(: fuzz-equal (-> %Undefined% %Undefined% %Undefined%))
+(: fuzz-alpha-equal (-> %Undefined% %Undefined% %Undefined%))
+(: fuzz-implies (-> Bool Atom %Undefined%))
+(: fuzz-annotate (-> %Undefined% Atom %Undefined%))
+(: fuzz-classify (-> Bool %Undefined% Atom %Undefined%))
+(: fuzz-collect (-> %Undefined% Atom %Undefined%))
+(: fuzz-cover (-> Number %Undefined% Bool Atom %Undefined%))
+(: _fuzz-normalize-property-result (-> Atom %Undefined%))
+(: _fuzz-evaluate-property (-> Atom Atom Atom Number Number Atom %Undefined%))
+
 ; Helpers that intentionally receive generated expressions as data.
 (: _fuzz-if-generation-error (-> %Undefined% Atom %Undefined%))
 (: _fuzz-is-integer (-> Number Bool))

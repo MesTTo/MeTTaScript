@@ -4,12 +4,7 @@
 
 import "./index.js";
 import { describe, expect, it } from "vitest";
-import { format, runProgram } from "@mettascript/core";
-
-const printed = (body: string): string[][] =>
-  runProgram(`!(import! &self fuzz)\n${body}`, 10_000_000).map((query) =>
-    query.results.map(format),
-  );
+import { printedWithFuzz as printed } from "./test-utils.js";
 
 describe("MeTTa fuzz generators", () => {
   it("returns data errors for malformed constructor arguments", () => {
@@ -62,7 +57,7 @@ describe("MeTTa fuzz generators", () => {
 
   it("uses enough input bytes to reach every integer offset", () => {
     expect(printed("!(fuzz-generate-bytes (gen-int 0 70000) (1 2 3) 1)")[1]).toEqual([
-      "(FuzzSample 66051 (FuzzDriver Bytes (BytesState (1 2 3) 3)) (Decision Int (Bounds 0 70000) (Value 66051) ()))",
+      "(FuzzSample 66051 (FuzzDriver Bytes (BytesState (1 2 3) 3)) (Decision Int (Bounds 0 70000) (Origin 0) (Value 66051) ()))",
     ]);
   });
 
@@ -148,7 +143,7 @@ describe("MeTTa fuzz generators", () => {
         !(fuzz-generate-edge (gen-filter (gen-int 1 1) never 2) 0 3)
       `)[1],
     ).toEqual([
-      "(FuzzGenerationDiscard (FilterExhausted (MaximumAttempts 2)) (FuzzDriver Edge 2) (Decision Filter (MaximumAttempts 2) (Attempts 2) ((Decision Int (Bounds 1 1) (Value 1) ()) (Decision Int (Bounds 1 1) (Value 1) ()))))",
+      "(FuzzGenerationDiscard (FilterExhausted (MaximumAttempts 2)) (FuzzDriver Edge 2) (Decision Filter (MaximumAttempts 2) (Attempts 2) ((Decision Int (Bounds 1 1) (Origin 1) (Value 1) ()) (Decision Int (Bounds 1 1) (Origin 1) (Value 1) ()))))",
     ]);
   });
 
@@ -225,26 +220,26 @@ describe("MeTTa fuzz generators", () => {
       printed(`
         !(fuzz-replay
            (gen-int 0 2)
-           (Decision Int (Bounds 0 3) (Value 1) ())
+           (Decision Int (Bounds 0 3) (Origin 0) (Value 1) ())
            1)
         !(fuzz-replay
            (gen-int 0 2)
            (Decision Tuple (Count 2) ()
-             ((Decision Int (Bounds 0 2) (Value 1) ())
-              (Decision Int (Bounds 0 1) (Value 0) ())))
+             ((Decision Int (Bounds 0 2) (Origin 0) (Value 1) ())
+              (Decision Int (Bounds 0 1) (Origin 0) (Value 0) ())))
            1)
         !(fuzz-replay
            (gen-int 0 2)
-           (Decision Int (Bounds 0 2) (Value 3) ())
+           (Decision Int (Bounds 0 2) (Origin 0) (Value 3) ())
            1)
         !(fuzz-replay (gen-int 0 2) malformed 1)
       `).slice(1),
     ).toEqual([
       [
-        "(FuzzGenerationError ReplayMismatch (Details (Path 0) (ExpectedBounds 0 2) (ActualBounds 0 3)))",
+        "(FuzzGenerationError ReplayMismatch (Details (Path 0) (ExpectedBounds 0 2) (ActualBounds 0 3) (Origins 0 0)))",
       ],
       [
-        "(FuzzGenerationError TrailingReplayDecisions (Details (Path 1) (Remaining ((Decision Int (Bounds 0 1) (Value 0) ())))))",
+        "(FuzzGenerationError TrailingReplayDecisions (Details (Path 1) (Remaining ((Decision Int (Bounds 0 1) (Origin 0) (Value 0) ())))))",
       ],
       ["(FuzzGenerationError ReplayValueOutOfBounds (Details (Path 0) (Bounds 0 2) (Value 3)))"],
       ["(FuzzGenerationError MalformedDecisionTree (Details (Decision malformed)))"],

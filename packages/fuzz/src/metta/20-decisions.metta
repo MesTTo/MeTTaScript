@@ -16,7 +16,7 @@
 
 (= (_fuzz-decision-leaves $decision)
    (switch $decision
-     (((Decision Int $metadata $selection ())
+     (((Decision Int $bounds $origin $selection ())
        (cons-atom $decision ()))
       ((Decision $kind $metadata $selection $children)
        (_fuzz-decision-leaves-many $children ()))
