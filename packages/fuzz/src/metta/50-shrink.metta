@@ -575,7 +575,15 @@
 ; The output order is the public shrink relation.
 (= (_fuzz-shrink-candidates $decision)
    (switch $decision
-     (((Decision $kind $metadata $selection $children)
+     (((Decision
+        Int
+        (Bounds $lower $upper)
+        (Origin $origin)
+        (Value $value)
+        ())
+       (_fuzz-deduplicate-trees
+         (_fuzz-int-decision-candidates $decision)))
+      ((Decision $kind $metadata $selection $children)
        (let $root-candidates
              (_fuzz-built-in-root-candidates $decision)
          (let $child-candidates

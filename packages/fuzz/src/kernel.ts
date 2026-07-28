@@ -8,6 +8,7 @@ import {
   type ReduceResult,
   atomEq,
   expr,
+  gbool,
   gint,
   groundType,
   gstr,
@@ -216,6 +217,23 @@ const deduplicateExact: GroundFn = (args) => {
   return ok(expr(unique));
 };
 
+const exactMember: GroundFn = (args) => {
+  if (args.length !== 2) return arityError("_fuzz-exact-member", 2, args.length);
+  const values = args[1]!;
+  if (values.kind !== "expr")
+    return operationError("InvalidMembershipInput", "_fuzz-exact-member", "ExpectedExpression");
+
+  const needle = args[0]!;
+  const needleKey = structuralAtomKey(needle, "Exact");
+  if (!needleKey.ok) return ok(needleKey.reason);
+  for (const value of values.items) {
+    const valueKey = structuralAtomKey(value, "Exact");
+    if (!valueKey.ok) return ok(valueKey.reason);
+    if (valueKey.key === needleKey.key && atomEq(value, needle)) return ok(gbool(true));
+  }
+  return ok(gbool(false));
+};
+
 const makeVariable: GroundFn = (args) => {
   if (args.length !== 1) return arityError("_fuzz-make-variable", 1, args.length);
   const index = integerValue(args[0]!);
@@ -233,6 +251,7 @@ const KERNEL_OPERATIONS = [
   ["_fuzz-draw-int", drawInt],
   ["_fuzz-atom-key", atomKey],
   ["_fuzz-deduplicate-exact", deduplicateExact],
+  ["_fuzz-exact-member", exactMember],
   ["_fuzz-make-variable", makeVariable],
 ] as const;
 

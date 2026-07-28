@@ -29,6 +29,7 @@ const FUZZ_OPERATIONS = [
   "_fuzz-draw-int",
   "_fuzz-atom-key",
   "_fuzz-deduplicate-exact",
+  "_fuzz-exact-member",
   "_fuzz-make-variable",
 ] as const;
 
@@ -91,6 +92,7 @@ describe("deterministic fuzz kernel", () => {
         !(get-type _fuzz-draw-int)
         !(get-type _fuzz-atom-key)
         !(get-type _fuzz-deduplicate-exact)
+        !(get-type _fuzz-exact-member)
         !(get-type _fuzz-make-variable)
       `),
     ).toEqual([
@@ -99,6 +101,7 @@ describe("deterministic fuzz kernel", () => {
       ["(-> Atom Number Number Atom)"],
       ["(-> Symbol Atom Atom)"],
       ["(-> Expression Atom)"],
+      ["(-> Atom Expression Atom)"],
       ["(-> Number Variable)"],
     ]);
   });
@@ -162,6 +165,7 @@ describe("deterministic fuzz kernel", () => {
         !(let $r (_fuzz-rng-init 0) (_fuzz-draw-int $r 2 1))
         !(_fuzz-atom-key Unknown a)
         !(_fuzz-deduplicate-exact nope)
+        !(_fuzz-exact-member a nope)
         !(_fuzz-make-variable -1)
       `),
     ).toEqual([
@@ -173,6 +177,9 @@ describe("deterministic fuzz kernel", () => {
       ["(FuzzKernelError InvalidKeyMode (Operation _fuzz-atom-key) ExpectedExactOrAlpha)"],
       [
         "(FuzzKernelError InvalidDeduplicationInput (Operation _fuzz-deduplicate-exact) ExpectedExpression)",
+      ],
+      [
+        "(FuzzKernelError InvalidMembershipInput (Operation _fuzz-exact-member) ExpectedExpression)",
       ],
       [
         "(FuzzKernelError InvalidVariableIndex (Operation _fuzz-make-variable) ExpectedNonNegativeInteger)",
@@ -209,6 +216,17 @@ describe("deterministic fuzz kernel", () => {
           (a b a $x $y $x 3 3.0 (pair a) (pair a)))
       `),
     ).toEqual([["()"], ["(a b $x $y 3 (pair a))"]]);
+  });
+
+  it("confirms exact membership after structural-key hits", () => {
+    const member = operation("_fuzz-exact-member");
+    expect(format(oneResult(member, [variable("x"), expr([variable("y"), variable("x")])]))).toBe(
+      "True",
+    );
+    expect(format(oneResult(member, [variable("z"), expr([variable("y"), variable("x")])]))).toBe(
+      "False",
+    );
+    expect(format(oneResult(member, [gint(3), expr([gfloat(3)])]))).toBe("True");
   });
 
   it("matches exact and alpha equality for replayable atoms", () => {

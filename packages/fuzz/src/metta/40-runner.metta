@@ -786,6 +786,8 @@
 (= (_fuzz-failed
      $property-id
      $generator
+     $property
+     $quantifier
      $phase
      $case-index
      $origin
@@ -793,50 +795,22 @@
      $value
      $decision
      $case
+     $config
      $state)
-   (switch $case
-     (((FuzzCaseResult
-        Fail
-        $tag
-        $details
-        $labels
-        $collected
-        $coverage
-        $annotations
-        (Results $results)
-        $steps)
-       (let* (($signature (_fuzz-failure-signature $tag))
-              ($generator-key (_fuzz-atom-key Exact $generator))
-              ($replay
-               (FuzzReplay
-                 (Format 1)
-                 (Origin $origin)
-                 (GeneratorKey $generator-key)
-                 (DecisionTree $decision)
-                 (ConcreteValue $value))))
-         (FuzzFailed
-           (Property $property-id)
-           (Phase $phase)
-           (CaseIndex $case-index)
-           (FailureTag $tag)
-           (FailureSignature $signature)
-           (OriginalValue $value)
-           (OriginalDecision $decision)
-           (SmallestValue $value)
-           (SmallestDecision $decision)
-           (PropertyResults $results)
-           (Replay $replay)
-           (Shrink
-             (Order mettascript-shrink-v1)
-             (Status Disabled)
-             (Attempts 0)
-             (Accepted 0))
-           (_fuzz-run-statistics $state))))
-      ($bad
-       (FuzzInvalid
-         InvalidFailureCase
-         (Property $property-id)
-         (Case $bad))))))
+   (_fuzz-finalize-failure
+     $property-id
+     $generator
+     $property
+     $quantifier
+     $phase
+     $case-index
+     $origin
+     $size
+     $value
+     $decision
+     $case
+     $config
+     $state))
 
 (= (_fuzz-invalid-case
      $property-id
@@ -934,6 +908,8 @@
 (= (_fuzz-handle-case
      $property-id
      $generator
+     $property
+     $quantifier
      $phase
      $case-index
      $origin
@@ -966,6 +942,8 @@
        (_fuzz-failed
          $property-id
          $generator
+         $property
+         $quantifier
          $phase
          $case-index
          $origin
@@ -973,6 +951,7 @@
          $value
          $decision
          $case
+         $config
          $state))
       ((FuzzCaseResult Invalid $tag $details $labels $collected $coverage $annotations $results $steps)
        (_fuzz-invalid-case
@@ -1079,6 +1058,8 @@
                       (_fuzz-handle-case
                         $property-id
                         $generator
+                        $property
+                        $quantifier
                         $phase
                         $index
                         (Concrete (Replay $replay))
@@ -1173,6 +1154,8 @@
                             (_fuzz-handle-case
                               $property-id
                               $generator
+                              $property
+                              $quantifier
                               Edge
                               $raw-index
                               (Edge (Index $raw-index))
@@ -1279,6 +1262,8 @@
                       (_fuzz-handle-case
                         $property-id
                         $generator
+                        $property
+                        $quantifier
                         Random
                         $attempt-index
                         (Random

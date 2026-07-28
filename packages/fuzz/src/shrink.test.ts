@@ -12,8 +12,16 @@ describe("MeTTa fuzz shrink relation", () => {
       printed(`
         !(_fuzz-int-value-candidates 100 0 100 0)
         !(_fuzz-int-value-candidates 7 0 10 5)
+        !(_fuzz-shrink-candidates
+           (Decision Int (Bounds 0 100) (Origin 0) (Value 100) ()))
       `).slice(1),
-    ).toEqual([["(0 50 75 88 94 97 99)"], ["(5 6 0 10)"]]);
+    ).toEqual([
+      ["(0 50 75 88 94 97 99)"],
+      ["(5 6 0 10)"],
+      [
+        "((Decision Int (Bounds 0 100) (Origin 0) (Value 0) ()) (Decision Int (Bounds 0 100) (Origin 0) (Value 50) ()) (Decision Int (Bounds 0 100) (Origin 0) (Value 75) ()) (Decision Int (Bounds 0 100) (Origin 0) (Value 88) ()) (Decision Int (Bounds 0 100) (Origin 0) (Value 94) ()) (Decision Int (Bounds 0 100) (Origin 0) (Value 97) ()) (Decision Int (Bounds 0 100) (Origin 0) (Value 99) ()))",
+      ],
+    ]);
   });
 
   it("removes the largest legal list chunks first", () => {
@@ -26,7 +34,6 @@ describe("MeTTa fuzz shrink relation", () => {
             (Decision Int (Bounds 0 9) (Origin 0) (Value 3) ())
             (Decision Int (Bounds 0 9) (Origin 0) (Value 4) ()))))
     `)[1]![0]!;
-
     expect(candidates).toMatch(/^\(\(Decision List \(Bounds 0 4\) \(Length 0\)/);
     expect(candidates).toContain("(Decision List (Bounds 0 4) (Length 2)");
     expect(candidates).toContain("(Decision List (Bounds 0 4) (Length 3)");

@@ -11,6 +11,7 @@
 (: _fuzz-draw-int (-> Atom Number Number Atom))
 (: _fuzz-atom-key (-> Symbol Atom Atom))
 (: _fuzz-deduplicate-exact (-> Expression Atom))
+(: _fuzz-exact-member (-> Atom Expression Atom))
 (: _fuzz-make-variable (-> Number Variable))
 
 ; Public generator, driver, sample, and property data.

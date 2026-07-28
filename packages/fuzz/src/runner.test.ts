@@ -4,7 +4,39 @@
 
 import "./index.js";
 import { describe, expect, it } from "vitest";
+import {
+  expr,
+  gint,
+  registerBuiltinGroundedOperation,
+  sym,
+  type GroundFn,
+} from "@mettascript/core";
 import { printedWithFuzz as printed } from "./test-utils.js";
+
+let flakyTick = 0;
+const flakyPropertyResult: GroundFn = () => ({
+  tag: "ok",
+  results: [expr([sym("Fail"), sym("UnstableResult"), expr([sym("Tick"), gint(flakyTick++)])])],
+});
+registerBuiltinGroundedOperation("_fuzz-test-flaky-property-result", flakyPropertyResult, "Pure");
+
+let postShrinkFlakyTick = 0;
+const postShrinkFlakyPropertyResult: GroundFn = (args) => {
+  const value = args[0] ?? sym("MissingValue");
+  const tick = postShrinkFlakyTick++;
+  return {
+    tag: "ok",
+    results:
+      tick === 9
+        ? [expr([sym("Pass")])]
+        : [expr([sym("Fail"), sym("TooLarge"), expr([sym("Value"), value])])],
+  };
+};
+registerBuiltinGroundedOperation(
+  "_fuzz-test-post-shrink-flaky-property-result",
+  postShrinkFlakyPropertyResult,
+  "Pure",
+);
 
 describe("MeTTa fuzz runner", () => {
   it("normalizes option-based configuration and rejects invalid options", () => {
@@ -197,6 +229,194 @@ describe("MeTTa fuzz runner", () => {
     expect(first).toContain('(FailureSignature "mettascript-atom-key-v1;');
     expect(first).toContain(
       "(FuzzReplay (Format 1) (Origin (Random (Rng xorshift128plus-v1) (Seed 19) (Case 0) (Size 0)))",
+    );
+  });
+
+  it("shrinks the first generated failure and reports a replayable local minimum", () => {
+    const result = printed(`
+      (: greater-than-five (-> Atom FuzzProperty))
+      (= (greater-than-five $value)
+         (if (> $value 5)
+             (fuzz-fail TooLarge (Value $value))
+             (fuzz-pass)))
+      !(fuzz-check
+         integer-minimum
+         (gen-int 0 100)
+         greater-than-five
+         (fuzz-config
+           (Runs 1)
+           (MaxSize 100)
+           (MaxShrinks 100)
+           (MaxShrinkImprovements 100)
+           (CaseSteps 10000)
+           (CaseDepth 100)
+           (EdgeCases 2)))
+    `)[1]![0]!;
+
+    expect(result).toContain("(OriginalValue 100)");
+    expect(result).toContain("(SmallestValue 6)");
+    expect(result).toContain(
+      "(SmallestDecision (Decision Int (Bounds 0 100) (Origin 0) (Value 6) ()))",
+    );
+    expect(result).toContain(
+      "(Shrink (Order mettascript-shrink-v1) (Status LocallyMinimal) (Reason None) (Attempts 9) (Accepted 5) (LocallyMinimalUnder (Order mettascript-shrink-v1)))",
+    );
+    expect(result).toContain("(Replay (FuzzReplay (Format 1) (Origin (Edge (Index 1)))");
+    expect(result).toContain("(ConcreteValue 6)");
+  });
+
+  it("preserves the failure tag by default and can accept any failure", () => {
+    const out = printed(`
+      (: two-failures (-> Atom FuzzProperty))
+      (= (two-failures $value)
+         (if (> $value 50)
+             (fuzz-fail Large (Value $value))
+             (if (> $value 0)
+                 (fuzz-fail Small (Value $value))
+                 (fuzz-pass))))
+      !(fuzz-check
+         same-tag
+         (gen-int 0 100)
+         two-failures
+         (fuzz-config
+           (Runs 1)
+           (MaxSize 100)
+           (MaxShrinks 100)
+           (MaxShrinkImprovements 100)
+           (FailureMode SameFailureTag)
+           (EdgeCases 2)))
+      !(fuzz-check
+         any-tag
+         (gen-int 0 100)
+         two-failures
+         (fuzz-config
+           (Runs 1)
+           (MaxSize 100)
+           (MaxShrinks 100)
+           (MaxShrinkImprovements 100)
+           (FailureMode AnyFailure)
+           (EdgeCases 2)))
+    `);
+
+    expect(out[1]![0]).toContain("(OriginalFailureTag Large)");
+    expect(out[1]![0]).toContain("(FailureTag Large)");
+    expect(out[1]![0]).toContain("(SmallestValue 51)");
+    expect(out[2]![0]).toContain("(OriginalFailureTag Large)");
+    expect(out[2]![0]).toContain("(FailureTag Small)");
+    expect(out[2]![0]).toContain("(SmallestValue 1)");
+  });
+
+  it("counts property evaluations and accepted improvements separately", () => {
+    const out = printed(`
+      (: greater-than-five (-> Atom FuzzProperty))
+      (= (greater-than-five $value)
+         (if (> $value 5)
+             (fuzz-fail TooLarge (Value $value))
+             (fuzz-pass)))
+      !(fuzz-check
+         one-attempt
+         (gen-int 0 100)
+         greater-than-five
+         (fuzz-config
+           (Runs 1)
+           (MaxSize 100)
+           (MaxShrinks 1)
+           (MaxShrinkImprovements 100)
+           (EdgeCases 2)))
+      !(fuzz-check
+         one-improvement
+         (gen-int 0 100)
+         greater-than-five
+         (fuzz-config
+           (Runs 1)
+           (MaxSize 100)
+           (MaxShrinks 100)
+           (MaxShrinkImprovements 1)
+           (EdgeCases 2)))
+    `);
+
+    expect(out[1]![0]).toContain("(SmallestValue 100)");
+    expect(out[1]![0]).toContain(
+      "(Status MaxShrinksReached) (Reason None) (Attempts 1) (Accepted 0)",
+    );
+    expect(out[2]![0]).toContain("(SmallestValue 50)");
+    expect(out[2]![0]).toContain(
+      "(Status MaxShrinkImprovementsReached) (Reason None) (Attempts 2) (Accepted 1)",
+    );
+  });
+
+  it("does not replay external effects without a reset adapter", () => {
+    const result = printed(`
+      (: external-property (-> Atom FuzzProperty))
+      (= (external-property $value)
+         (fuzz-fail ExternalFailure (Value $value)))
+      !(fuzz-check
+         external
+         (gen-int 0 10)
+         external-property
+         (fuzz-config
+           (Runs 1)
+           (MaxShrinks 100)
+           (EffectPolicy ExternalEffects)
+           (EdgeCases 1)))
+    `)[1]![0]!;
+
+    expect(result).toContain(
+      "(Status Disabled) (Reason ExternalEffectsWithoutReset) (Attempts 0) (Accepted 0)",
+    );
+    expect(result).toContain("(OriginalValue 0)");
+    expect(result).toContain("(SmallestValue 0)");
+  });
+
+  it("reports pre-shrink result-bag instability as flaky", () => {
+    flakyTick = 0;
+    const result = printed(`
+      (: unstable-property (-> Atom FuzzProperty))
+      (= (unstable-property $value)
+         (_fuzz-test-flaky-property-result))
+      !(fuzz-check
+         unstable
+         (gen-int 1 1)
+         unstable-property
+         (fuzz-config
+           (Runs 1)
+           (MaxShrinks 10)
+           (EdgeCases 1)))
+    `)[1]![0]!;
+
+    expect(result).toMatch(/^\(FuzzFlaky \(Property unstable\) \(Phase Edge\) \(CaseIndex 0\)/);
+    expect(result).toContain("(Stage PreShrink)");
+    expect(result).toContain("(ExpectedCase (FuzzCaseObservation Fail UnstableResult");
+    expect(result).toContain("(Reason PreShrinkReplayMismatch)");
+  });
+
+  it("checks the minimized failure twice before claiming local minimality", () => {
+    postShrinkFlakyTick = 0;
+    const result = printed(`
+      (: post-shrink-unstable (-> Atom FuzzProperty))
+      (= (post-shrink-unstable $value)
+         (if (> $value 5)
+             (_fuzz-test-post-shrink-flaky-property-result $value)
+             (fuzz-pass)))
+      !(fuzz-check
+         post-shrink-unstable
+         (gen-int 0 100)
+         post-shrink-unstable
+         (fuzz-config
+           (Runs 1)
+           (MaxSize 100)
+           (MaxShrinks 100)
+           (MaxShrinkImprovements 100)
+           (EdgeCases 2)))
+    `)[1]![0]!;
+
+    expect(result).toMatch(
+      /^\(FuzzFlaky \(Property post-shrink-unstable\) \(Phase Edge\) \(CaseIndex 1\)/,
+    );
+    expect(result).toContain("(Stage PostShrink)");
+    expect(result).toContain("(ExpectedValue 6)");
+    expect(result).toContain(
+      "(Status LocallyMinimal) (Reason PostShrinkReplayMismatch) (Attempts 9) (Accepted 5)",
     );
   });
 });
