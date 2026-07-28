@@ -6,7 +6,7 @@
 ; Adapted from PeTTa examples/peano.metta for MeTTa-TS (Hyperon) conventions.
 
 (= (add-atom-no-duplicate $Space $Atom)
-   (if (== (,) (collapse (once (match $Space $Atom $Atom))))
+   (if (== () (collapse (once (match $Space $Atom $Atom))))
        (add-atom $Space $Atom)
        (empty)))
 

@@ -69,7 +69,7 @@ describe("_fuzz-eval-case result capture", () => {
       "!(_fuzz-eval-case (superpose (first second first)) 10000 100 Sandboxed)",
     )[0]!;
     expect(result).toHaveLength(1);
-    expect(result[0]).toMatch(/^\(FuzzCaseOutcome Completed \(, first second first\) [0-9]+\)$/);
+    expect(result[0]).toMatch(/^\(FuzzCaseOutcome Completed \(first second first\) [0-9]+\)$/);
   });
 
   it("distinguishes a zero-result property from an Empty atom", () => {
@@ -77,8 +77,8 @@ describe("_fuzz-eval-case result capture", () => {
       !(_fuzz-eval-case (superpose ()) 10000 100 Sandboxed)
       !(_fuzz-eval-case Empty 10000 100 Sandboxed)
     `);
-    expect(out[0]![0]).toMatch(/^\(FuzzCaseOutcome Completed \(,\) [0-9]+\)$/);
-    expect(out[1]![0]).toMatch(/^\(FuzzCaseOutcome Completed \(, Empty\) [0-9]+\)$/);
+    expect(out[0]![0]).toMatch(/^\(FuzzCaseOutcome Completed \(\) [0-9]+\)$/);
+    expect(out[1]![0]).toMatch(/^\(FuzzCaseOutcome Completed \(Empty\) [0-9]+\)$/);
   });
 
   it("does not evaluate the lazy body before installing the effect barrier", () => {
@@ -111,10 +111,10 @@ describe("_fuzz-eval-case rollback", () => {
       !(collapse (match &self (kept $x) $x))
     `);
 
-    expect(out[0]![0]).toContain("(, 9 (, 2) (,))");
+    expect(out[0]![0]).toContain("(9 (2) ())");
     expect(out[1]).toEqual(["(case-only)"]);
-    expect(out[2]).toEqual(["(,)"]);
-    expect(out[3]).toEqual(["(, 1)"]);
+    expect(out[2]).toEqual(["()"]);
+    expect(out[3]).toEqual(["(1)"]);
   });
 
   it("restores named spaces, state cells, and tokens", () => {
@@ -132,8 +132,8 @@ describe("_fuzz-eval-case rollback", () => {
       ! case-token
     `);
 
-    expect(out[2]![0]).toContain("(, 4)");
-    expect(out[3]).toEqual(["(,)"]);
+    expect(out[2]![0]).toContain("(4)");
+    expect(out[3]).toEqual(["()"]);
     expect(out[4]).toEqual(["2"]);
     expect(out[5]).toEqual(["case-token"]);
   });
@@ -153,9 +153,9 @@ describe("_fuzz-eval-case rollback", () => {
     `);
 
     expect(out[0]![0]).toContain("(Error subject failure)");
-    expect(out[1]).toEqual(["(,)"]);
+    expect(out[1]).toEqual(["()"]);
     expect(out[2]![0]).toContain("ResourceLimit");
-    expect(out[3]).toEqual(["(,)"]);
+    expect(out[3]).toEqual(["()"]);
   });
 
   it("restores evaluator caches invalidated by a case-local runtime rule", () => {
@@ -197,7 +197,7 @@ describe("_fuzz-eval-case rollback", () => {
       !(new-space)
     `);
     const before = out[0]![0]!;
-    const inside = /\(, (&space-[0-9]+)\)/.exec(out[1]![0]!)?.[1];
+    const inside = /\((&space-[0-9]+)\)/.exec(out[1]![0]!)?.[1];
     const after = out[2]![0]!;
     expect([before, inside, after]).toEqual(["&space-0", "&space-1", "&space-2"]);
   });
@@ -265,7 +265,7 @@ describe("_fuzz-eval-case effect policy", () => {
     );
     expect(calls).toBe(1);
     expect(pairs.map((pair) => format(pair[0]))[0]).toMatch(
-      /^\(FuzzCaseOutcome Completed \(, 7\) [0-9]+\)$/,
+      /^\(FuzzCaseOutcome Completed \(7\) [0-9]+\)$/,
     );
   });
 
@@ -340,7 +340,7 @@ describe("_fuzz-eval-case effect policy", () => {
       parseAtom("(collapse (match &self (world-effect $x) $x))"),
     );
     expect(calls).toBe(1);
-    expect(matches.map((pair) => format(pair[0]))).toEqual(["(,)"]);
+    expect(matches.map((pair) => format(pair[0]))).toEqual(["()"]);
   });
 
   it("allows host effects only when ExternalEffects is requested explicitly", () => {
@@ -348,7 +348,7 @@ describe("_fuzz-eval-case effect policy", () => {
     restoreOutput = setOutputSink((line) => lines.push(line));
     const out = printed("!(_fuzz-eval-case (println! external-line) 10000 100 ExternalEffects)");
     expect(lines).toEqual(["external-line"]);
-    expect(out[0]![0]).toMatch(/^\(FuzzCaseOutcome Completed \(, \(\)\) [0-9]+\)$/);
+    expect(out[0]![0]).toMatch(/^\(FuzzCaseOutcome Completed \(\(\)\) [0-9]+\)$/);
   });
 
   it("does not let a nested case escalate a sandboxed policy", () => {

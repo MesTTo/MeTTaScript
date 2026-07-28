@@ -1,3 +1,14 @@
+# Unreleased
+
+`collapse` now matches current Hyperon and returns a plain expression of its ordered results. Zero
+results produce `()`, one result produces `(value)`, and multiple results produce `(first second ...)`.
+The comma symbol is ordinary data when passed to `superpose`.
+
+Programs that compared an empty collapse with `(,)` must compare it with `()`. Programs that first bound
+the collapsed expression and then removed its leading comma with `cdr-atom` should use the bound expression
+directly. The existing `superpose (cdr-atom (collapse ...))` computed-tuple idiom is unchanged because
+`superpose` evaluates that well-typed argument before splitting it.
+
 # MeTTaScript 2.7.0
 
 Leveled logging you can leave in the code, and two interpreter forms that now carry the types they always

@@ -215,7 +215,7 @@ describe("MeTTa runner", () => {
       (: pure-seven (-> Number))
       !(_fuzz-eval-case (pure-seven) 1000 100 Sandboxed)
     `);
-    expect(out[0]![0]!.toString()).toMatch(/^\(FuzzCaseOutcome Completed \(, 7\) [0-9]+\)$/);
+    expect(out[0]![0]!.toString()).toMatch(/^\(FuzzCaseOutcome Completed \(7\) [0-9]+\)$/);
   });
 
   it("registers an async operation with evaluator-applied effects", async () => {

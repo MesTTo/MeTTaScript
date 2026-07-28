@@ -11,4 +11,4 @@
          (match &self (foo $1) (bar $1))))
 
 !(test (collapse (matchtrickery))
-       (, (bar a) (bar b)))
+       ((bar a) (bar b)))

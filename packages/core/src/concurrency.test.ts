@@ -30,7 +30,7 @@ afterEach(() => {
 
 describe("par", () => {
   it("evaluates branches concurrently and unions their results", async () => {
-    expect(await last("!(collapse (par (aw 3) (aw 4) (aw 2)))")).toEqual(["(, 3 4 2)"]);
+    expect(await last("!(collapse (par (aw 3) (aw 4) (aw 2)))")).toEqual(["(3 4 2)"]);
   });
 
   it("runs concurrently (total time ~ slowest branch, not the sum)", async () => {
@@ -45,7 +45,7 @@ describe("par", () => {
         !(par (add-atom &self (k 1)) (add-atom &self (k 2)) (add-atom &self (k 3)))
         !(collapse (match &self (k $v) $v))
       `),
-    ).toEqual(["(, 1 2 3)"]);
+    ).toEqual(["(1 2 3)"]);
   });
 });
 
@@ -64,7 +64,7 @@ describe("race / once", () => {
       !(race (let $x (aw 40) (add-atom &self (k slow))) (aw 2))
       !(collapse (match &self (k $v) $v))
     `);
-    expect(out).toEqual(["(,)"]); // empty tuple: (k slow) was never added; the loser was cancelled before its add-atom
+    expect(out).toEqual(["()"]); // empty tuple: (k slow) was never added; the loser was cancelled before its add-atom
   });
 
   it("once cuts nondeterminism to the first result (and works synchronously)", async () => {

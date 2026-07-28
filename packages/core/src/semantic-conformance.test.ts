@@ -207,8 +207,8 @@ describe("superpose argument policy (Hyperon-identical)", () => {
 
 describe("superpose argument policy (deliberate dialect divergences)", () => {
   // These three keep PeTTa's evaluate-then-split for a WELL-TYPED call argument, which computed
-  // tuples rely on (`(case (superpose (cdr-atom (collapse (match …)))) …)` in the corpus). Hyperon
-  // 0.2.10 never evaluates the argument and would return the raw split noted per case.
+  // tuples rely on. Hyperon 0.2.10 never evaluates the argument and would return the raw split noted
+  // per case.
 
   it("evaluates a well-typed nullary call before splitting", () => {
     // Hyperon 0.2.10 returns `[t]` (raw split). PeTTa and this engine evaluate `(t)` first.

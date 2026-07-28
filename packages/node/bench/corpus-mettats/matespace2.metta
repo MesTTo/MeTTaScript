@@ -6,18 +6,18 @@
 ; Adapted from PeTTa examples/matespace2.metta for MeTTa-TS (Hyperon) conventions.
 
 (= (add-atom-no-duplicate $Space $Atom)
-   (if (== (,) (collapse (once (match $Space $Atom $Atom))))
+   (if (== () (collapse (once (match $Space $Atom $Atom))))
        (add-atom $Space $Atom)
        (empty)))
 
 ;Rewrite rules:
 (= (expand)
-   (case (superpose (cdr-atom (collapse (match &self (num $t) $t))))
+   (case (superpose (collapse (match &self (num $t) $t)))
          (($t ((add-atom-no-duplicate &self (num (M $t)))
                (add-atom-no-duplicate &self (num (W $t))))))))
 
 (= (mate)
-   (case (superpose (cdr-atom (collapse (match &self (num (M $t)) $t))))
+   (case (superpose (collapse (match &self (num (M $t)) $t)))
          (($t (case (once (match &self (num (W $t)) $t))
                     (($t (add-atom-no-duplicate &self (num (C $t))))))))))
 

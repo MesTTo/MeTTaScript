@@ -317,8 +317,6 @@ const frame = (
 
 const notReducibleA = sym("NotReducible");
 const emptyA = sym("Empty");
-const collapsedEmptyA = expr([sym(",")]);
-const collapsedEmptySpellings: readonly Atom[] = [emptyExpr, collapsedEmptyA];
 const unitA = emptyExpr;
 const errAtom = (a: Atom, msg: string): Atom => expr([sym("Error"), a, sym(msg)]);
 const errTextAtom = (a: Atom, msg: string): Atom => expr([sym("Error"), a, gstr(msg)]);
@@ -2194,7 +2192,7 @@ function* evalOpG(env: MinEnv, st: St, prev: Stack, x: Atom, b: Bindings): Gen<[
       const namedMatch = tryFastNamedOnceMatch(env, st, match, b);
       if (namedMatch !== undefined) {
         const items = namedMatch.value === undefined ? [] : [namedMatch.value];
-        return [[evalResult(prev, expr([sym(","), ...items]), b)], namedMatch.state];
+        return [[evalResult(prev, expr(items), b)], namedMatch.state];
       }
     }
   }
@@ -3011,10 +3009,10 @@ export function checkApplication(
 /** The superpose/hyperpose argument policy. Hyperon 0.2.10 never evaluates the argument tuple: it splits
  *  the raw expression and evaluates each ELEMENT as a result, so `(superpose (+ - *))` enumerates the
  *  three operators as data. PeTTa instead evaluates the argument and splits the value, which computed
- *  tuples rely on: `(superpose (cdr-atom (collapse (match …))))` must reduce before splitting. The engine
- *  reconciles the two: an argument that is a well-typed call keeps the evaluate-then-split path, while a
- *  tuple whose head cannot be applied (a type or arity error — operators carried as data) is enumerated
- *  raw, matching Hyperon. Runtime errors from well-typed calls still evaluate and propagate as errors.
+ *  tuples rely on. The engine reconciles the two: an argument that is a well-typed call keeps the
+ *  evaluate-then-split path, while a tuple whose head cannot be applied (a type or arity error; operators
+ *  carried as data) is enumerated raw, matching Hyperon. Runtime errors from well-typed calls still
+ *  evaluate and propagate as errors.
  *  `hyperpose`'s concurrent path (`hyperposeBranchSources`) already forks the raw items, so this also
  *  converges its sequential fallback with the parallel branches. `collapse-extract` (LeaTTa's bag
  *  spread) is unaffected and always evaluates. */
@@ -4418,7 +4416,7 @@ function* interpretStack1G(
         const outcome = makeExpr(env, [
           sym("FuzzCaseOutcome"),
           sym("ResourceLimit"),
-          makeExpr(env, [sym(","), limited]),
+          makeExpr(env, [limited]),
           gint(0),
         ]);
         return [[finItem(prev, outcome, it.bnd)], st];
@@ -4462,7 +4460,7 @@ function* interpretStack1G(
       const outcome = makeExpr(env, [
         sym("FuzzCaseOutcome"),
         fuzzCaseStatus(results),
-        makeExpr(env, [sym(","), ...results]),
+        makeExpr(env, results),
         gint(BigInt(Math.max(0, caseState.counter - st.counter))),
       ]);
       return [
@@ -5147,8 +5145,8 @@ function matchFromEmptyCollapseCheck(a: Atom): ExprAtom | undefined {
     x.kind === "expr" && opOf(x) === "collapse" && x.items.length === 2
       ? matchInsideOnce(x.items[1]!)
       : undefined;
-  if (collapsedEmptySpellings.some((e) => atomEq(left, e))) return collapseArg(right);
-  if (collapsedEmptySpellings.some((e) => atomEq(right, e))) return collapseArg(left);
+  if (atomEq(left, emptyExpr)) return collapseArg(right);
+  if (atomEq(right, emptyExpr)) return collapseArg(left);
   return undefined;
 }
 
@@ -7325,7 +7323,7 @@ function tryFastUniqueChoiceFunction(
     choicePlanApplication(env, world),
   );
   if (planned === undefined) return undefined;
-  return [sym(","), ...planned];
+  return planned;
 }
 
 function streamCaseSource(
@@ -7694,8 +7692,7 @@ function* mettaEvalBodyG(
           choicePlanDataExpression(env, lst.world),
           choicePlanApplication(env, lst.world),
         );
-        if (planned !== undefined)
-          return flushReturn([[makeExpr(env, [sym(","), ...planned]), lbnd]], lst);
+        if (planned !== undefined) return flushReturn([[makeExpr(env, planned), lbnd]], lst);
         const collapsedOp = opOf(collapsedCall);
         const tableVersion =
           collapsedOp === undefined ||
@@ -7724,7 +7721,7 @@ function* mettaEvalBodyG(
               lst,
             );
           if (native?.tag === "ok") {
-            const unique = dedupAlphaStable([sym(","), ...native.answers]);
+            const unique = dedupAlphaStable(native.answers);
             return flushReturn([[makeExpr(env, unique), lbnd]], lst);
           }
         }
@@ -7742,7 +7739,7 @@ function* mettaEvalBodyG(
               trampoline,
             );
             enforceDistinctLimit(env, answers.length);
-            const unique = dedupAlphaStable([sym(","), ...answers.map((answer) => answer[0])]);
+            const unique = dedupAlphaStable(answers.map((answer) => answer[0]));
             return flushReturn([[makeExpr(env, unique), lbnd]], distinctState);
           } catch (error) {
             if (error !== DISTINCT_RESOURCE_LIMIT) throw error;
@@ -7763,15 +7760,14 @@ function* mettaEvalBodyG(
             choicePlanDataExpression(env, lst.world),
             choicePlanApplication(env, lst.world),
           );
-          if (planned !== undefined)
-            return flushReturn([[makeExpr(env, [sym(","), ...planned]), lbnd]], lst);
+          if (planned !== undefined) return flushReturn([[makeExpr(env, planned), lbnd]], lst);
         }
         const match = matchInsideOnce(args[0]!);
         if (match !== undefined) {
           const namedMatch = tryFastNamedOnceMatch(env, lst, match, lbnd);
           if (namedMatch !== undefined && !counterExceedsStepLimit(lst, namedMatch.state.counter)) {
             const items = namedMatch.value === undefined ? [] : [namedMatch.value];
-            return flushReturn([[expr([sym(","), ...items]), lbnd]], namedMatch.state);
+            return flushReturn([[expr(items), lbnd]], namedMatch.state);
           }
         }
       }

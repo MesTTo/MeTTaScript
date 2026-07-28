@@ -56,9 +56,9 @@ describe("runner + stdlib prelude", () => {
     `);
 
     expect(r[1]!.results.map(format)).toEqual(['"(function1)"']);
-    expect(r[2]!.results.map(format)).toEqual(["(,)"]);
+    expect(r[2]!.results.map(format)).toEqual(["()"]);
     expect(r[4]!.results.map(format)).toEqual(['"(OK)"']);
-    expect(r[5]!.results.map(format)).toEqual(["(, (OK))"]);
+    expect(r[5]!.results.map(format)).toEqual(["((OK))"]);
   });
 
   it("remove-atom deletes runtime &self rules from the function index", () => {
@@ -72,7 +72,7 @@ describe("runner + stdlib prelude", () => {
 
     expect(r[1]!.results.map(format)).toEqual(["old"]);
     expect(r[3]!.results.map(format)).toEqual(["(dyn)"]);
-    expect(r[4]!.results.map(format)).toEqual(["(,)"]);
+    expect(r[4]!.results.map(format)).toEqual(["()"]);
   });
 
   it("cons-atom requires an expression tail (does not wrap a non-expression)", () => {
@@ -201,13 +201,13 @@ describe("runner + stdlib prelude", () => {
     expect(q('!(!= 5 "S")')).toEqual(['(Error (!= 5 "S") (BadArgType 2 Number String))']);
     expect(q("!(!= (Error source cause) anything)")).toEqual(["(Error source cause)"]);
     expect(q("!(collapse (!= (superpose (1 2)) (superpose (1 3))))")).toEqual([
-      "(, False True True True)",
+      "(False True True True)",
     ]);
   });
 
   it("keeps != type metadata out of &self", () => {
     expect(q("(left != right)\n!(collapse (match &self ($a != $b) ($a $b)))")).toEqual([
-      "(, (left right))",
+      "((left right))",
     ]);
   });
 
@@ -261,7 +261,7 @@ describe("runner + stdlib prelude", () => {
   it("keeps Empty in result bags like LeaTTa", () => {
     expect(q("! Empty")).toEqual(["Empty"]);
     expect(q("!(superpose (Empty a))")).toEqual(["Empty", "a"]);
-    expect(q("!(collapse (superpose (Empty a)))")).toEqual(["(, Empty a)"]);
+    expect(q("!(collapse (superpose (Empty a)))")).toEqual(["(Empty a)"]);
     expect(q("!(unify a a Empty fail)")).toEqual(["Empty"]);
     expect(q("!(unify a b then Empty)")).toEqual(["Empty"]);
     expect(
@@ -302,6 +302,6 @@ describe("runner + stdlib prelude", () => {
       100_000,
       imports,
     ).map((group) => group.results.map(format));
-    expect(out.slice(-2)).toEqual([["(, only)"], ["(, only)"]]);
+    expect(out.slice(-2)).toEqual([["(only)"], ["(only)"]]);
   });
 });

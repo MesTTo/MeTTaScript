@@ -64,7 +64,7 @@ describe("compiled impure body (matespace VM de-risk)", () => {
 
   const mateOnce = `
     (= (add-atom-no-duplicate $Space $Atom)
-       (if (== (,) (collapse (once (match $Space $Atom $Atom))))
+       (if (== () (collapse (once (match $Space $Atom $Atom))))
            (add-atom $Space $Atom)
            (empty)))
     (= (mate)
@@ -84,7 +84,7 @@ describe("compiled impure body (matespace VM de-risk)", () => {
     expect(c.out).toEqual(run(mateOnce, false).out);
     expect(c.out[2]).toEqual(["()"]);
     expect(c.out[3]).toEqual([]);
-    expect(c.out[4]).toEqual(["(, (M Z) (W Z) (C Z))"]);
+    expect(c.out[4]).toEqual(["((M Z) (W Z) (C Z))"]);
   });
 
   // The regression guard for the matespace/scale OOM. A self-call recurses natively, so a deep impure
@@ -103,7 +103,7 @@ describe("compiled impure body (matespace VM de-risk)", () => {
     expect(compiled).toEqual(run(deep, false));
     // It overflowed rather than completing, and the partial build rolled back to an empty space.
     expect(compiled.out[0]![0]).toContain("StackOverflow");
-    expect(compiled.out[1]).toEqual(["(,)"]);
+    expect(compiled.out[1]).toEqual(["()"]);
   });
 
   // A doubly-recursive impure function whose body returns a TUPLE of two recursive calls, matespacefast's

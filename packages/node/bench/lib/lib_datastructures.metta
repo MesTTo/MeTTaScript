@@ -26,6 +26,6 @@
 ;Fast Hashmap-like existence check via repra:
 (= (add-unique-or-fail $space $Expression)
    (let $st (s (repra $Expression))
-        (if (== (,) (collapse (once (match $space $st True))))
+        (if (== () (collapse (once (match $space $st True))))
             (add-atom $space $st)
             (empty))))

@@ -7,15 +7,13 @@ SPDX-License-Identifier: MIT
 
 LeaTTa (`/home/user/Dev/LeaTTa`, the user's own Lean 4 formalization of MeTTa, version 1.0.6) is a
 total, machine-checked `MettaHyperonFull` semantics that passes Hyperon's own 270-assertion oracle.
-We use its binary as the core differential oracle when settling evaluator behavior, for example
-whether `superpose` evaluates its tuple argument as a cross-product and how empty collapsed bags are
-represented.
+We use its binary as a differential oracle when settling evaluator behavior. Current Hyperon remains
+the authority for core operation semantics when the two runtimes disagree.
 
-Priority order for this branch is LeaTTa first, LeaTTa source second, Hyperon Experimental and the
-conformance corpus as regression evidence third, and PeTTa for compatibility and optimization ideas.
-PeTTa is not a semantic authority. This file records the decisions we have checked against LeaTTa, the
-open MeTTaScript gaps that still need alignment, and how LeaTTa's "Improvements over Hyperon" list maps
-onto MeTTaScript.
+Priority order for this branch is current Hyperon source and its conformance corpus first, then LeaTTa
+as a checked differential model, and PeTTa for compatibility and optimization ideas. PeTTa is not a
+semantic authority. This file records the decisions checked against LeaTTa, the open MeTTaScript gaps,
+and how LeaTTa's "Improvements over Hyperon" list maps onto MeTTaScript.
 
 ## Running the binary
 
@@ -38,10 +36,9 @@ reduces a MeTTaIL term. Two usage notes:
 
 - Results are wrapped in `[...]`; multiple nondeterministic results are comma-joined inside, e.g.
   `!(superpose (1 2 3))` prints `[1, 2, 3]`.
-- A collapsed / tuple Expression is printed with a leading `,`: `!(collapse (match &self (foo $x) $x))`
-  prints `[(, 1 2 3 1)]`. MeTTaScript now uses the same visible comma-tuple convention for collapsed
-  nondeterministic bags.
-- The empty collapsed bag prints as `(,)`. The unit atom still prints as `()`.
+- Current Hyperon and MeTTaScript print a collapsed result as a plain expression:
+  `!(collapse (match &self (foo $x) $x))` prints `[(1 2 3 1)]`.
+- An empty collapsed result prints as `()`. The same syntax is also the unit atom, as in Hyperon.
 
 ## Open semantic target: arity no-reduce
 

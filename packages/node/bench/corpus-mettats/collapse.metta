@@ -3,7 +3,7 @@
 ;
 ; SPDX-License-Identifier: MIT
 ;
-; Adapted from PeTTa examples/collapse.metta for MeTTa-TS (LeaTTa) conventions.
+; Adapted from PeTTa examples/collapse.metta for MeTTa-TS (Hyperon) conventions.
 
 !(test (collapse (1 2 3))
-       (, (1 2 3)))
+       ((1 2 3)))

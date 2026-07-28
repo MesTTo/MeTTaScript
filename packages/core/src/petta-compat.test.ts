@@ -50,16 +50,16 @@ describe("PeTTa-compat stdlib ops", () => {
     expect(one("(= (length (Cons $h $t)) custom)\n!(length (a b c))")).toBe("3");
   });
 
-  it("the corpus `test` op is strict and uses LeaTTa conventions", () => {
-    // `collapse` returns an explicit comma tuple.
-    expect(one("!(test (collapse (superpose (1 2 3))) (, 1 2 3))")).toBe("()");
+  it("the corpus `test` op is strict about expected values", () => {
+    // Hyperon's `collapse` returns a plain expression.
+    expect(one("!(test (collapse (superpose (1 2 3))) (1 2 3))")).toBe("()");
     // Written in MeTTaScript conventions: grounded Bool `False`, full float `8.0`.
     expect(one("!(test (is-member z (a b)) False)")).toBe("()");
     expect(one("!(test (+ 3.0 5.0) 8.0)")).toBe("()");
     // A genuinely different value fails.
     expect(one("!(test (+ 1 1) 3)")).toContain("test-failed");
-    // And the comparison is strict: non-LeaTTa expected values do NOT pass.
-    expect(one("!(test (collapse (superpose (1 2 3))) (1 2 3))")).toContain("test-failed");
+    // The comparison is strict: the old comma-tagged collapse representation does not pass.
+    expect(one("!(test (collapse (superpose (1 2 3))) (, 1 2 3))")).toContain("test-failed");
     expect(one("!(test (is-member z (a b)) false)")).toContain("test-failed");
     expect(one("!(test (+ 3.0 5.0) 9)")).toContain("test-failed");
   });

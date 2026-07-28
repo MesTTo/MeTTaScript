@@ -318,12 +318,11 @@
 
   (: NARS.CollapseToList (-> Atom Expression))
   (@doc NARS.CollapseToList
-    (@desc "Collect nondeterministic results and convert this engine's comma-headed collapse tuple into a plain expression list")
+    (@desc "Collect nondeterministic results as a plain expression list and remove Empty sentinels")
     (@params ((@param "Nondeterministic query to collapse")))
     (@return "A plain expression list of the collapsed results"))
   (= (NARS.CollapseToList $query)
-     (let* (($collapsed (collapse $query))
-            ($plain (cdr-atom $collapsed)))
+     (let $plain (collapse $query)
        (exclude-item Empty $plain)))
 
   (: StampDisjoint (-> Expression Expression Bool))

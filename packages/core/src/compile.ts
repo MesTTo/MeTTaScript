@@ -2052,9 +2052,7 @@ function choiceUnionSeed(env: MinEnv, rhs: Atom): ChoiceUnionClause | undefined 
     !choiceUnionStaticData(env, source)
   )
     return undefined;
-  const first = source.items[0]!;
-  const start = first.kind === "sym" && first.name === "," ? 1 : 0;
-  return { tag: "seed", values: source.items.slice(start) };
+  return { tag: "seed", values: source.items };
 }
 
 function choiceUnionRecursiveCall(atom: Atom, functor: string, parameter: string): boolean {
@@ -4154,10 +4152,8 @@ function compileImpGrounded(
   };
 }
 
-const collapsedEmptyExpr = expr([sym(",")]);
-
 // Structural pieces of the add-if-absent idiom, matched over the RULE's atoms (variables in place):
-// `(if (== (,) (collapse (once (match S A A)))) (add-atom S A) (empty))`. The same shape the
+// `(if (== () (collapse (once (match S A A)))) (add-atom S A) (empty))`. The same shape the
 // interpreter's tryFastNamedAddIfAbsent recognises at runtime; compiled it becomes one ops call.
 function impMatchInsideOnce(a: Atom): ExprAtom | undefined {
   if (a.kind !== "expr" || a.items.length !== 2) return undefined;
@@ -4180,8 +4176,8 @@ function impEmptyCollapseMatch(a: Atom): ExprAtom | undefined {
       ? impMatchInsideOnce(x.items[1]!)
       : undefined;
   };
-  if (atomEq(a.items[1]!, collapsedEmptyExpr)) return fromCollapse(a.items[2]!);
-  if (atomEq(a.items[2]!, collapsedEmptyExpr)) return fromCollapse(a.items[1]!);
+  if (atomEq(a.items[1]!, emptyExpr)) return fromCollapse(a.items[2]!);
+  if (atomEq(a.items[2]!, emptyExpr)) return fromCollapse(a.items[1]!);
   return undefined;
 }
 

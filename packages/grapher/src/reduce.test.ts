@@ -36,6 +36,15 @@ describe("reduce", () => {
     expect(trace[1]!.map(String).sort()).toEqual(["Heads", "Tails"]);
   });
 
+  it("keeps a collapsed result bag as one expression in the final animation frontier", () => {
+    const m = new MeTTa();
+    const query = parse("(collapse (superpose (1 2 2)))");
+    const trace = reduceTrace(query, m);
+    expect(trace.length).toBeGreaterThan(1);
+    expect(trace.at(-1)!.map(String)).toEqual(["(1 2 2)"]);
+    expect(trace.at(-1)!.map(String)).toEqual(m.evaluateAtom(query).map(String));
+  });
+
   it("does not force the untaken branch of if (laziness via types)", () => {
     const m = new MeTTa();
     // both branches would loop if evaluated; only the taken one is reduced

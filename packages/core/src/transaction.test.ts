@@ -8,7 +8,7 @@ import { format } from "./parser";
 
 // `transaction` (TS-native extension, opt-in via `!(import! &self concurrency)`): evaluate the body
 // and commit its space mutations only on success; roll back (snapshot/restore the copy-on-write world)
-// on a thrown Error atom or zero results. `collapse` renders a LeaTTa comma tuple `(, a b ...)`.
+// on a thrown Error atom or zero results. `collapse` returns Hyperon's plain result expression `(a b ...)`.
 const last = (src: string): string[] => {
   const rs = runProgram(src);
   return rs[rs.length - 1]!.results.map(format);
@@ -23,7 +23,7 @@ describe("transaction", () => {
         !(transaction (add-atom &self (cnt 7)))
         !(collapse (match &self (cnt $v) $v))
       `),
-    ).toEqual(["(, 5 7)"]);
+    ).toEqual(["(5 7)"]);
   });
 
   it("rolls back when the body adds then produces zero results", () => {
@@ -34,7 +34,7 @@ describe("transaction", () => {
         !(transaction (let $u (add-atom &self (cnt 6)) (superpose ())))
         !(collapse (match &self (cnt $v) $v))
       `),
-    ).toEqual(["(, 5)"]);
+    ).toEqual(["(5)"]);
   });
 
   it("the transaction itself returns the body's results (zero on rollback)", () => {
@@ -55,6 +55,6 @@ describe("transaction", () => {
         !(transaction (let $u (add-atom &self (cnt 9)) (superpose (1 Empty))))
         !(collapse (match &self (cnt $v) $v))
       `),
-    ).toEqual(["(, 5 9)"]);
+    ).toEqual(["(5 9)"]);
   });
 });

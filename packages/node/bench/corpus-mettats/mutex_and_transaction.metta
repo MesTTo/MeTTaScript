@@ -43,8 +43,8 @@
 
 ;while this is fine as all places modifying the (cnt $n) relation simultaneously (mutexinc only in this case) use the same mutex:
 !(hyperpose ((mutexinc) (mutexinc) (mutexinc) (mutexinc) (mutexinc)))
-!(test (collapse (get-atoms &temp)) (, (cnt 42)))
+!(test (collapse (get-atoms &temp)) ((cnt 42)))
 
 ;This won't affect the cnt since the transaction is setup to fail:
 !(Transaction_rollback_fail_to_inc)
-!(test (collapse (get-atoms &temp)) (, (cnt 42)))
+!(test (collapse (get-atoms &temp)) ((cnt 42)))

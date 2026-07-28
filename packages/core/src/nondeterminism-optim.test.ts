@@ -56,7 +56,7 @@ describe("compiled pure choice evaluation", () => {
   it("preserves nested superpose order and multiplicity", () => {
     const src = "!(collapse (superpose ((superpose (1 2)) (superpose (3 4)))))";
     const reference = withoutChoicePlan(src);
-    expect(formatted(src)).toEqual([["(, 1 3 1 4 2 3 2 4)"]]);
+    expect(formatted(src)).toEqual([["(1 3 1 4 2 3 2 4)"]]);
     expect(formatted(src)).toEqual(formatted(reference));
   });
 
@@ -69,7 +69,7 @@ describe("compiled pure choice evaluation", () => {
           (+ $X $Y)))`;
     const reference = withoutChoicePlan(src);
     expect(formatted(src)).toEqual(formatted(reference));
-    expect(formatted(src)[0]).toEqual(["(, 2 2 3 2 2 3 3 3 4)"]);
+    expect(formatted(src)[0]).toEqual(["(2 2 3 2 2 3 3 3 4)"]);
   });
 
   it("streams first-seen answers for unique choice products", () => {
@@ -81,11 +81,11 @@ describe("compiled pure choice evaluation", () => {
                   ($Y (superpose $T)))
             (+ $X $Y))))`;
     const reference = withoutChoicePlan(src);
-    expect(formatted(src)).toEqual([["(, 2 3 4)"]]);
+    expect(formatted(src)).toEqual([["(2 3 4)"]]);
     expect(formatted(src)).toEqual(formatted(reference));
   });
 
-  it("spreads collapsed result bags without emitting the comma marker", () => {
+  it("treats a comma inside the superposed expression as an ordinary result", () => {
     const src = `
       !(collapse (superpose (,)))
       !(collapse (superpose (, 1 2)))`;
@@ -104,7 +104,7 @@ describe("compiled pure choice evaluation", () => {
              ()))
       !(range 1 7)`;
     const reference = withoutChoicePlan(src);
-    expect(formatted(src)).toEqual([["(,)"]]);
+    expect(formatted(src)).toEqual([["()"]]);
     expect(formatted(src)).toEqual(formatted(reference));
   });
 
@@ -112,7 +112,7 @@ describe("compiled pure choice evaluation", () => {
     for (const op of ["==", "!="]) {
       const src = `!(collapse (${op} 5 "S"))`;
       const reference = withoutChoicePlan(src);
-      expect(formatted(src)).toEqual([[`(, (Error (${op} 5 "S") (BadArgType 2 Number String)))`]]);
+      expect(formatted(src)).toEqual([[`((Error (${op} 5 "S") (BadArgType 2 Number String)))`]]);
       expect(formatted(src)).toEqual(formatted(reference));
     }
   });
@@ -120,7 +120,7 @@ describe("compiled pure choice evaluation", () => {
   it("preserves != choice products", () => {
     const src = `!(collapse (let* (($T (1 2)) ($X (superpose $T)) ($Y (superpose $T))) (!= $X $Y)))`;
     const reference = withoutChoicePlan(src);
-    expect(formatted(src)).toEqual([["(, False True True False)"]]);
+    expect(formatted(src)).toEqual([["(False True True False)"]]);
     expect(formatted(src)).toEqual(formatted(reference));
   });
 
@@ -172,7 +172,7 @@ describe("compiled pure choice evaluation", () => {
           ($F 3)))`;
     const reference = withoutChoicePlan(src);
 
-    expect(formatted(src)).toEqual([["(, 5)"]]);
+    expect(formatted(src)).toEqual([["(5)"]]);
     expect(formatted(src)).toEqual(formatted(reference));
   });
 
@@ -185,7 +185,7 @@ describe("compiled pure choice evaluation", () => {
     )[0]!.atom;
     const [pairs] = mettaEval(env, FUEL, initSt(), [], query);
 
-    expect(pairs.map((pair) => format(pair[0]))).toEqual(["(, 99 99 99 99)"]);
+    expect(pairs.map((pair) => format(pair[0]))).toEqual(["(99 99 99 99)"]);
   });
 });
 

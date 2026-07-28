@@ -43,7 +43,7 @@ Auto type-checking can be enabled
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 !(assertEqualToResult
    (collapse (+ 5 "S"))
-   ((, (Error (+ 5 "S") (BadArgType 2 Number String)))))
+   (((Error (+ 5 "S") (BadArgType 2 Number String)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

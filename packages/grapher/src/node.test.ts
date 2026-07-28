@@ -60,6 +60,19 @@ describe("Node reduction GIFs", () => {
     expect((await gifMetadata(bytes)).pages).toBe(3);
   });
 
+  it.each<NodeGifView>(["blocks", "graph", "side-by-side"])(
+    "renders a plain-expression collapse result in the %s animation",
+    async (view) => {
+      const bytes = await renderReductionGif("(collapse (superpose (1 2 2)))", {
+        ...QUICK,
+        view,
+      });
+      const metadata = await gifMetadata(bytes);
+      expect(metadata.format).toBe("gif");
+      expect(metadata.pages).toBeGreaterThan(1);
+    },
+  );
+
   it("preserves the first and final SVG frames through rasterization and GIF encoding", async () => {
     const query = parseProgram("(+ 10 (* 25 2))")[0]!;
     const animation = blockReductionSvgs(reduceTrace(query, new MeTTa()), QUICK);

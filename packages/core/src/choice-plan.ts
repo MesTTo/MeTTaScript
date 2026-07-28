@@ -217,9 +217,7 @@ function compileSuperpose(
     run(frame, emit) {
       source.run(frame, (value) => {
         if (value.kind !== "expr") return abort();
-        const first = value.items[0];
-        const start = first?.kind === "sym" && first.name === "," ? 1 : 0;
-        for (let index = start; index < value.items.length; index++) emit(value.items[index]!);
+        for (const item of value.items) emit(item);
       });
     },
   };

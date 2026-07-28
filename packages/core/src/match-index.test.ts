@@ -56,7 +56,7 @@ describe("match functor indexing", () => {
         !(add-atom &self (Q x 9))
         !(collapse (match &self (P $k $v) $v))
       `),
-    ).toEqual(["(, 1 2)"]);
+    ).toEqual(["(1 2)"]);
   });
 
   it("a variable-headed query still scans everything", () => {
@@ -65,7 +65,7 @@ describe("match functor indexing", () => {
         !(add-atom &self (Foo 1))
         !(collapse (match &self ($f 1) $f))
       `),
-    ).toEqual(["(, Foo)"]);
+    ).toEqual(["(Foo)"]);
   });
 
   it("conjunctive match works through the index", () => {
@@ -75,7 +75,7 @@ describe("match functor indexing", () => {
         !(add-atom &self (link B C))
         !(collapse (match &self (, (link $x $y) (link $y $z)) ($x $z)))
       `),
-    ).toEqual(["(, (A C))"]);
+    ).toEqual(["((A C))"]);
   });
 
   it("scales: one match over a 100k-atom KB is fast and correct", () => {
@@ -118,7 +118,7 @@ describe("match functor indexing", () => {
         !(add-atom &self (edge $a 9))
         !(collapse (match &self (edge 1 $y) $y))
       `),
-    ).toEqual(["(, 2 9)"]);
+    ).toEqual(["(2 9)"]);
   });
 
   it("keeps a custom grounded matcher eligible for a leaf-key query", () => {
@@ -282,7 +282,7 @@ describe("static nested argument-head indexing", () => {
         !(remove-atom &self (edge (red c) (north n) second))
         !(collapse (match &self (edge (red $x) (north $y) $value) $value))
       `),
-    ).toEqual(["(, first third)"]);
+    ).toEqual(["(first third)"]);
   });
 
   it("falls back when state resolution can change a nested head", () => {
@@ -313,7 +313,7 @@ describe("static nested argument-head indexing", () => {
         !(add-atom &self (edge (red c) runtime))
         !(collapse (match &self (edge (red $key) $value) $value))
       `),
-    ).toEqual(["(, static runtime)"]);
+    ).toEqual(["(static runtime)"]);
   });
 
   it("falls back for a nested constraint inside a conjunction", () => {
@@ -325,7 +325,7 @@ describe("static nested argument-head indexing", () => {
         !(collapse
           (match &self (, (edge (red $key) $value) (allowed $value)) $value))
       `),
-    ).toEqual(["(, first)"]);
+    ).toEqual(["(first)"]);
   });
 
   it("preserves the full candidate counter through once", () => {
