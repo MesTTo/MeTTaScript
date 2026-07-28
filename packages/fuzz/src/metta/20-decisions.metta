@@ -29,3 +29,12 @@
        (((FuzzGenerationError $code $details) $leaves)
         ($valid
          (FuzzDriver Replay (ReplayState $valid 0)))))))
+
+(= (_fuzz-shrink-replay-driver $decision-tree)
+   (let $leaves (_fuzz-decision-leaves $decision-tree)
+     (switch $leaves
+       (((FuzzGenerationError $code $details) $leaves)
+        ($valid
+         (FuzzDriver
+           ShrinkReplay
+           (ShrinkReplayState $valid 0)))))))

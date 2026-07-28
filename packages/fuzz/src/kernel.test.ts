@@ -28,6 +28,7 @@ const FUZZ_OPERATIONS = [
   "_fuzz-rng-init",
   "_fuzz-draw-int",
   "_fuzz-atom-key",
+  "_fuzz-deduplicate-exact",
   "_fuzz-make-variable",
 ] as const;
 
@@ -89,6 +90,7 @@ describe("deterministic fuzz kernel", () => {
         !(get-type _fuzz-rng-init)
         !(get-type _fuzz-draw-int)
         !(get-type _fuzz-atom-key)
+        !(get-type _fuzz-deduplicate-exact)
         !(get-type _fuzz-make-variable)
       `),
     ).toEqual([
@@ -96,6 +98,7 @@ describe("deterministic fuzz kernel", () => {
       ["(-> Number Atom)"],
       ["(-> Atom Number Number Atom)"],
       ["(-> Symbol Atom Atom)"],
+      ["(-> Expression Atom)"],
       ["(-> Number Variable)"],
     ]);
   });
@@ -158,6 +161,7 @@ describe("deterministic fuzz kernel", () => {
         !(_fuzz-draw-int (FuzzRng xorshift128plus-v1 0 0 0 0) 0 1)
         !(let $r (_fuzz-rng-init 0) (_fuzz-draw-int $r 2 1))
         !(_fuzz-atom-key Unknown a)
+        !(_fuzz-deduplicate-exact nope)
         !(_fuzz-make-variable -1)
       `),
     ).toEqual([
@@ -167,6 +171,9 @@ describe("deterministic fuzz kernel", () => {
       ["(FuzzKernelError InvalidRngState (Operation _fuzz-draw-int) ExpectedFuzzRng)"],
       ["(FuzzKernelError InvalidBounds (Operation _fuzz-draw-int) LowerExceedsUpper)"],
       ["(FuzzKernelError InvalidKeyMode (Operation _fuzz-atom-key) ExpectedExactOrAlpha)"],
+      [
+        "(FuzzKernelError InvalidDeduplicationInput (Operation _fuzz-deduplicate-exact) ExpectedExpression)",
+      ],
       [
         "(FuzzKernelError InvalidVariableIndex (Operation _fuzz-make-variable) ExpectedNonNegativeInteger)",
       ],
@@ -192,6 +199,16 @@ describe("deterministic fuzz kernel", () => {
     expect(atomKey("Exact", left)).not.toBe(atomKey("Exact", renamed));
     expect(atomKey("Alpha", left)).toBe(atomKey("Alpha", renamed));
     expect(atomKey("Alpha", left)).not.toBe(atomKey("Alpha", different));
+  });
+
+  it("deduplicates exact atoms in stable order and confirms key collisions", () => {
+    expect(
+      printed(`
+        !(import! &self fuzz)
+        !(_fuzz-deduplicate-exact
+          (a b a $x $y $x 3 3.0 (pair a) (pair a)))
+      `),
+    ).toEqual([["()"], ["(a b $x $y 3 (pair a))"]]);
   });
 
   it("matches exact and alpha equality for replayable atoms", () => {

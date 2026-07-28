@@ -215,6 +215,33 @@ describe("MeTTa fuzz generators", () => {
     expect(result).toEqual(["(ReplayIdentity True True)"]);
   });
 
+  it("repairs missing and dependency-invalidated shrink decisions", () => {
+    expect(
+      printed(`
+        (= (dependent $source)
+           (gen-int $source (+ $source 2)))
+        !(_fuzz-shrink-replay
+           (gen-bind (gen-int 0 5) dependent)
+           (Decision Bind (Function dependent) ()
+             ((Decision Int (Bounds 0 5) (Origin 0) (Value 0) ())
+              (Decision Int (Bounds 5 7) (Origin 5) (Value 7) ())))
+           4)
+        !(_fuzz-shrink-replay
+           (gen-tuple ((gen-int 1 3) (gen-int -2 2)))
+           (Decision Tuple (Count 2) ()
+             ((Decision Int (Bounds 1 3) (Origin 1) (Value 2) ())))
+           2)
+      `).slice(1),
+    ).toEqual([
+      [
+        "(FuzzShrinkReplay 0 (Decision Bind (Function dependent) () ((Decision Int (Bounds 0 5) (Origin 0) (Value 0) ()) (Decision Int (Bounds 0 2) (Origin 0) (Value 0) ()))))",
+      ],
+      [
+        "(FuzzShrinkReplay (2 0) (Decision Tuple (Count 2) () ((Decision Int (Bounds 1 3) (Origin 1) (Value 2) ()) (Decision Int (Bounds -2 2) (Origin 0) (Value 0) ()))))",
+      ],
+    ]);
+  });
+
   it("reports stale, trailing, malformed, and out-of-range replay decisions", () => {
     expect(
       printed(`

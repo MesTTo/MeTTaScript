@@ -192,6 +192,30 @@ const atomKey: GroundFn = (args) => {
   return ok(result.ok ? gstr(result.key) : result.reason);
 };
 
+const deduplicateExact: GroundFn = (args) => {
+  if (args.length !== 1) return arityError("_fuzz-deduplicate-exact", 1, args.length);
+  const values = args[0]!;
+  if (values.kind !== "expr")
+    return operationError(
+      "InvalidDeduplicationInput",
+      "_fuzz-deduplicate-exact",
+      "ExpectedExpression",
+    );
+
+  const buckets = new Map<string, Atom[]>();
+  const unique: Atom[] = [];
+  for (const value of values.items) {
+    const encoded = structuralAtomKey(value, "Exact");
+    if (!encoded.ok) return ok(encoded.reason);
+    const bucket = buckets.get(encoded.key);
+    if (bucket?.some((seen) => atomEq(seen, value)) === true) continue;
+    if (bucket === undefined) buckets.set(encoded.key, [value]);
+    else bucket.push(value);
+    unique.push(value);
+  }
+  return ok(expr(unique));
+};
+
 const makeVariable: GroundFn = (args) => {
   if (args.length !== 1) return arityError("_fuzz-make-variable", 1, args.length);
   const index = integerValue(args[0]!);
@@ -208,6 +232,7 @@ const KERNEL_OPERATIONS = [
   ["_fuzz-rng-init", rngInit],
   ["_fuzz-draw-int", drawInt],
   ["_fuzz-atom-key", atomKey],
+  ["_fuzz-deduplicate-exact", deduplicateExact],
   ["_fuzz-make-variable", makeVariable],
 ] as const;
 

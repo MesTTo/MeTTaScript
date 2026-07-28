@@ -91,6 +91,27 @@
        (FuzzDriver Edge (+ $index 1))
        (_fuzz-int-decision $lower $upper $origin $value))))
 
+(= (_fuzz-inspect-int-decision $decision $lower $upper $origin)
+   (switch $decision
+     (((Decision
+         Int
+         (Bounds $seen-lower $seen-upper)
+         (Origin $seen-origin)
+         (Value $value)
+         ())
+       (if (and
+             (== $lower $seen-lower)
+             (and
+               (== $upper $seen-upper)
+               (== $origin $seen-origin)))
+           (if (and (<= $lower $value) (<= $value $upper))
+               (CompatibleIntDecision $value)
+               (IntDecisionValueOutOfBounds $value))
+           (IntDecisionMetadataMismatch
+             (Bounds $seen-lower $seen-upper)
+             (Origin $seen-origin))))
+      ($bad (MalformedIntDecision $bad)))))
+
 (= (_fuzz-driver-int-replay $state $lower $upper $origin)
    (switch $state
      (((ReplayState $decisions $cursor)
@@ -105,40 +126,104 @@
                  (Value Any)
                  ()))
              (Actual EndOfTrace))
-           (let* ((($decision $tail) (decons-atom $decisions)))
-             (switch $decision
-               (((Decision
-                   Int
-                   (Bounds $seen-lower $seen-upper)
-                   (Origin $seen-origin)
-                   (Value $value)
-                   ())
-                 (if (and
-                       (== $lower $seen-lower)
-                       (and
-                         (== $upper $seen-upper)
-                         (== $origin $seen-origin)))
-                     (if (and (<= $lower $value) (<= $value $upper))
-                         (DriverChoice
-                           $value
-                           (FuzzDriver Replay (ReplayState $tail (+ $cursor 1)))
-                           $decision)
-                         (_fuzz-generation-error ReplayValueOutOfBounds
-                           (Path $cursor)
-                           (Bounds $lower $upper)
-                           (Value $value)))
-                     (_fuzz-generation-error ReplayMismatch
-                       (Path $cursor)
-                       (ExpectedBounds $lower $upper)
-                       (ActualBounds $seen-lower $seen-upper)
-                       (Origins $origin $seen-origin))))
-                ($bad
-                 (_fuzz-generation-error ReplayMismatch
-                   (Path $cursor)
-                   (Expected IntDecision)
-                   (Actual $bad))))))))
+           (let ($decision $tail) (decons-atom $decisions)
+             (let $inspected
+                   (_fuzz-inspect-int-decision
+                     $decision
+                     $lower
+                     $upper
+                     $origin)
+               (switch $inspected
+                 (((CompatibleIntDecision $value)
+                   (DriverChoice
+                     $value
+                     (FuzzDriver Replay (ReplayState $tail (+ $cursor 1)))
+                     $decision))
+                  ((IntDecisionValueOutOfBounds $value)
+                   (_fuzz-generation-error ReplayValueOutOfBounds
+                     (Path $cursor)
+                     (Bounds $lower $upper)
+                     (Value $value)))
+                  ((IntDecisionMetadataMismatch
+                     (Bounds $seen-lower $seen-upper)
+                     (Origin $seen-origin))
+                   (_fuzz-generation-error ReplayMismatch
+                     (Path $cursor)
+                     (ExpectedBounds $lower $upper)
+                     (ActualBounds $seen-lower $seen-upper)
+                     (Origins $origin $seen-origin)))
+                  ((MalformedIntDecision $bad)
+                   (_fuzz-generation-error ReplayMismatch
+                     (Path $cursor)
+                     (Expected IntDecision)
+                     (Actual $bad)))))))))
       ($bad-state
        (_fuzz-generation-error MalformedReplayState (State $bad-state))))))
+
+(= (_fuzz-shrink-replay-default-int
+     $decisions
+     $cursor
+     $lower
+     $upper
+     $origin)
+   (let $value (max $lower (min $upper $origin))
+     (DriverChoice
+       $value
+       (FuzzDriver
+         ShrinkReplay
+         (ShrinkReplayState $decisions $cursor))
+       (_fuzz-int-decision $lower $upper $origin $value))))
+
+(= (_fuzz-driver-int-shrink-replay-loop
+     $decisions
+     $cursor
+     $lower
+     $upper
+     $origin)
+   (if (== $decisions ())
+       (_fuzz-shrink-replay-default-int
+         ()
+         $cursor
+         $lower
+         $upper
+         $origin)
+       (let ($decision $tail) (decons-atom $decisions)
+         (let $next-cursor (+ $cursor 1)
+           (let $inspected
+                 (_fuzz-inspect-int-decision
+                   $decision
+                   $lower
+                   $upper
+                   $origin)
+             (switch $inspected
+               (((CompatibleIntDecision $value)
+                 (DriverChoice
+                   $value
+                   (FuzzDriver
+                     ShrinkReplay
+                     (ShrinkReplayState $tail $next-cursor))
+                   $decision))
+                ($incompatible
+                 (_fuzz-driver-int-shrink-replay-loop
+                   $tail
+                   $next-cursor
+                   $lower
+                   $upper
+                   $origin)))))))))
+
+(= (_fuzz-driver-int-shrink-replay $state $lower $upper $origin)
+   (switch $state
+     (((ShrinkReplayState $decisions $cursor)
+       (_fuzz-driver-int-shrink-replay-loop
+         $decisions
+         $cursor
+         $lower
+         $upper
+         $origin))
+      ($bad-state
+       (_fuzz-generation-error
+         MalformedShrinkReplayState
+         (State $bad-state))))))
 
 (= (_fuzz-inclusive-range $lower $upper)
    (if (<= $lower $upper)
@@ -220,6 +305,12 @@
            (_fuzz-driver-int-edge $index $lower $upper $origin))
           ((FuzzDriver Replay $state)
            (_fuzz-driver-int-replay $state $lower $upper $origin))
+          ((FuzzDriver ShrinkReplay $state)
+           (_fuzz-driver-int-shrink-replay
+             $state
+             $lower
+             $upper
+             $origin))
           ((FuzzDriver Exhaustive $state)
            (_fuzz-driver-int-exhaustive $state $lower $upper $origin))
           ((FuzzDriver Bytes $state)

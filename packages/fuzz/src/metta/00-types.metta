@@ -10,6 +10,7 @@
 (: _fuzz-rng-init (-> Number Atom))
 (: _fuzz-draw-int (-> Atom Number Number Atom))
 (: _fuzz-atom-key (-> Symbol Atom Atom))
+(: _fuzz-deduplicate-exact (-> Expression Atom))
 (: _fuzz-make-variable (-> Number Variable))
 
 ; Public generator, driver, sample, and property data.
@@ -52,6 +53,7 @@
 (: fuzz-generate-edge (-> %Undefined% Number Number %Undefined%))
 (: fuzz-generate-bytes (-> %Undefined% Expression Number %Undefined%))
 (: fuzz-replay (-> %Undefined% Atom Number %Undefined%))
+(: _fuzz-shrink-replay (-> %Undefined% Atom Number %Undefined%))
 
 ; Property outcomes and case classification.
 (: _fuzz-eval-case (-> Atom Number Number Atom Atom))

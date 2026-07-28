@@ -564,7 +564,9 @@
          (let $sample (superpose $valid)
            (_fuzz-wrap-sample
              Custom
-             (Name $name)
+             (CustomGenerator
+               (Name $name)
+               (Arguments $arguments))
              ()
              $sample)))))))
 
@@ -733,4 +735,24 @@
         ($valid
          (_fuzz-finish-replay
            $decision-tree
+           (fuzz-generate $generator $valid $size)))))))
+
+(= (_fuzz-finish-shrink-replay $result)
+   (switch $result
+     (((FuzzSample $value $driver $actual-tree)
+       (FuzzShrinkReplay $value $actual-tree))
+      ((FuzzGenerationDiscard $reason $driver $actual-tree)
+       (FuzzShrinkDiscard $reason $actual-tree))
+      ((FuzzGenerationError $code $details) $result)
+      ($bad
+       (_fuzz-generation-error
+         MalformedShrinkReplayResult
+         (Value $bad))))))
+
+(= (_fuzz-shrink-replay $generator $decision-tree $size)
+   (let $driver (_fuzz-shrink-replay-driver $decision-tree)
+     (switch $driver
+       (((FuzzGenerationError $code $details) $driver)
+        ($valid
+         (_fuzz-finish-shrink-replay
            (fuzz-generate $generator $valid $size)))))))
