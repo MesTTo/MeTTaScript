@@ -928,6 +928,13 @@ describe("grammar machine kernel operations", () => {
       [`(GrammarMachineStart ${source} (quote G) () 0 (WithDriver (FuzzDriver Edge 0) 0))`],
       "(GrammarMachineDone (GrammarResult (pair x y) (FuzzDriver Edge 1) 0 (Decision GrammarProduction (Target (quote G)) (ProductionIndex 0 0) ((Decision Int (Bounds 0 0) (Origin 0) (Value 0) ()) (Decision GrammarExpression (Arity 3) () ((Decision GrammarLiteral () (Value (quote pair)) ()) (Decision GrammarLiteral () (Value (quote x)) ()) (Decision GrammarLiteral () (Value (quote y)) ())))))))",
     );
+    golden(
+      "_fuzz-grammar-machine-op",
+      [
+        `(GrammarMachineStart ${source} (quote G) () 0 (WithDriver (FuzzDriver Exhaustive (ExhaustiveCursor () 0 ())) 0))`,
+      ],
+      "(GrammarMachineDone (GrammarResult (pair x y) (FuzzDriver Exhaustive (ExhaustiveCursor () 1 ((ExhaustiveFrame 0 1)))) 0 (Decision GrammarProduction (Target (quote G)) (ProductionIndex 0 0) ((Decision Int (Bounds 0 0) (Origin 0) (Value 0) ()) (Decision GrammarExpression (Arity 3) () ((Decision GrammarLiteral () (Value (quote pair)) ()) (Decision GrammarLiteral () (Value (quote x)) ()) (Decision GrammarLiteral () (Value (quote y)) ())))))))",
+    );
   });
 
   it("indexes productions by target", () => {

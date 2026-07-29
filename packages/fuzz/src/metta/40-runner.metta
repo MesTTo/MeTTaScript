@@ -1432,6 +1432,26 @@
        (_fuzz-initial-run-state))))
 
 (= (fuzz-check $property-id $generator $property-function $config)
+   (_fuzz-check-with
+     $property-id
+     $generator
+     $property-function
+     $config
+     RandomPhases))
+
+; Exhaustive mode makes a stronger claim than fuzz-check: every decision tree the generator
+; accepts at size MaxSize passes the property. It walks the whole domain with the exhaustive
+; cursor and skips the regression, example, edge, and random phases; pinned concrete cases
+; belong to fuzz-check.
+(= (fuzz-check-exhaustive $property-id $generator $property-function $config)
+   (_fuzz-check-with
+     $property-id
+     $generator
+     $property-function
+     $config
+     ExhaustiveDomain))
+
+(= (_fuzz-check-with $property-id $generator $property-function $config $mode)
    (switch $generator
      (((FuzzGenerationError $code $details)
       (FuzzInvalid
@@ -1457,12 +1477,19 @@
                            $property)
                      (switch $signature
                        ((ValidPropertySignature
-                         (_fuzz-start-run
-                           $property-id
-                           $valid-generator
-                           $property
-                           $quantifier
-                           $valid-config))
+                         (if (== $mode ExhaustiveDomain)
+                             (_fuzz-start-exhaustive
+                               $property-id
+                               $valid-generator
+                               $property
+                               $quantifier
+                               $valid-config)
+                             (_fuzz-start-run
+                               $property-id
+                               $valid-generator
+                               $property
+                               $quantifier
+                               $valid-config)))
                         ((FuzzInvalid $code $first $second)
                          $signature)
                         ((FuzzInvalid $code $details)
@@ -1477,3 +1504,242 @@
                      InvalidPropertyFunction
                      (Property $property-id)
                      (Value $bad))))))))))))))
+
+(= (_fuzz-start-exhaustive
+     $property-id
+     $generator
+     $property
+     $quantifier
+     $config)
+   (let $initial (_fuzz-initial-run-state)
+     (_fuzz-exhaustive-check-loop
+       (FuzzExhaustiveRun
+         $property-id
+         $generator
+         $property
+         $quantifier
+         $config
+         ()
+         0
+         0
+         $initial))))
+
+(= (_fuzz-exhaustive-check-loop $state)
+   (if (_fuzz-exhaustive-check-finished $state)
+       $state
+       (_fuzz-exhaustive-check-loop
+         (_fuzz-exhaustive-check-step $state))))
+
+(= (_fuzz-exhaustive-check-finished $state)
+   (unify $state
+     (FuzzExhaustiveRun
+       $property-id $generator $property $quantifier $config
+       $plan $enumerated $accepted $run-state)
+     False
+     True))
+
+; One cursor run per step. Generation discards are legitimate domain holes, so MaxDiscards
+; does not apply to them here; MaxEnumerated caps every terminal attempt instead.
+(= (_fuzz-exhaustive-check-step $state)
+   (unify $state
+     (FuzzExhaustiveRun
+       $property-id $generator $property $quantifier $config
+       $plan $enumerated $accepted $run-state)
+     (if (>= $enumerated (_fuzz-config-get MaxEnumerated $config))
+         (FuzzGaveUp
+           (Property $property-id)
+           EnumerationLimit
+           (_fuzz-exhaustive-statistics $enumerated $accepted $run-state))
+         (let* (($size (_fuzz-config-get MaxSize $config))
+                ($driver (_fuzz-exhaustive-resume-driver $plan))
+                ($generated (fuzz-generate $generator $driver $size)))
+           (switch $generated
+             (((FuzzSample
+                $value
+                (FuzzDriver Exhaustive (ExhaustiveCursor $choices $cursor $frames))
+                $tree)
+               (_fuzz-exhaustive-check-case
+                 $property-id $generator $property $quantifier $config
+                 $frames $enumerated $accepted $run-state $value $tree $size))
+              ((FuzzGenerationDiscard
+                $reason
+                (FuzzDriver Exhaustive (ExhaustiveCursor $choices $cursor $frames))
+                $tree)
+               (_fuzz-exhaustive-check-advance
+                 $property-id $generator $property $quantifier $config
+                 $frames
+                 (+ $enumerated 1)
+                 $accepted
+                 (_fuzz-state-generation-discard $run-state)))
+              ((FuzzGenerationError $code $details)
+               (FuzzInvalid
+                 GenerationError
+                 (Property $property-id)
+                 (Phase Exhaustive)
+                 (ErrorCode $code)
+                 $details))
+              ($bad
+               (FuzzInvalid
+                 MalformedGenerationResult
+                 (Property $property-id)
+                 (Phase Exhaustive)
+                 (Value $bad)))))))
+     (FuzzInvalid MalformedExhaustiveRunState (Value $state))))
+
+; Every accepted tree is replayed before its property case counts: the tree must rebuild the
+; same value through the replay driver, which is what licenses the final verified claim.
+(= (_fuzz-exhaustive-check-case
+     $property-id $generator $property $quantifier $config
+     $frames $enumerated $accepted $run-state $value $tree $size)
+   (let $replayed (fuzz-replay $generator $tree $size)
+     (switch $replayed
+       (((FuzzSample $replay-value $replay-driver $replay-tree)
+         (if (_fuzz-replay-equal $value $replay-value)
+             (let* (($coordinates
+                      (_fuzz-exhaustive-plan-prefix $frames ()))
+                    ($attempted
+                      (_fuzz-state-attempt Exhaustive $run-state))
+                    ($case
+                      (_fuzz-evaluate-property
+                        $property
+                        $quantifier
+                        $value
+                        (_fuzz-config-get CaseSteps $config)
+                        (_fuzz-config-get CaseDepth $config)
+                        (_fuzz-config-get EffectPolicy $config)))
+                    ($handled
+                      (_fuzz-handle-case
+                        $property-id
+                        $generator
+                        $property
+                        $quantifier
+                        Exhaustive
+                        $enumerated
+                        (Exhaustive
+                          (Choices $coordinates)
+                          (Case $enumerated)
+                          (Size $size))
+                        $size
+                        $value
+                        $tree
+                        $case
+                        $config
+                        $attempted
+                        Count)))
+               (switch $handled
+                 (((FuzzContinue Pass $next-state)
+                   (_fuzz-exhaustive-check-advance
+                     $property-id $generator $property $quantifier $config
+                     $frames
+                     (+ $enumerated 1)
+                     (+ $accepted 1)
+                     $next-state))
+                  ((FuzzContinue Discard $next-state)
+                   (_fuzz-exhaustive-check-advance
+                     $property-id $generator $property $quantifier $config
+                     $frames
+                     (+ $enumerated 1)
+                     (+ $accepted 1)
+                     $next-state))
+                  ($result $result))))
+             (FuzzInvalid
+               ExhaustiveReplayMismatch
+               (Property $property-id)
+               (Value $value)
+               (ReplayedValue $replay-value))))
+        ((FuzzGenerationError $code $details)
+         (FuzzInvalid
+           ExhaustiveReplayFailure
+           (Property $property-id)
+           (ErrorCode $code)
+           $details))
+        ((FuzzGenerationDiscard $replay-reason $replay-driver $replay-tree)
+         (FuzzInvalid
+           ExhaustiveReplayDiscarded
+           (Property $property-id)
+           (Reason $replay-reason)))
+        ($bad
+         (FuzzInvalid
+           MalformedReplayResult
+           (Property $property-id)
+           (Value $bad)))))))
+
+(= (_fuzz-exhaustive-check-advance
+     $property-id $generator $property $quantifier $config
+     $frames $enumerated $accepted $run-state)
+   (let $advanced (_fuzz-exhaustive-next-plan $frames)
+     (switch $advanced
+       (((ExhaustivePlan $plan)
+         (FuzzExhaustiveRun
+           $property-id $generator $property $quantifier $config
+           $plan $enumerated $accepted $run-state))
+        (ExhaustiveComplete
+         (_fuzz-finish-exhaustive
+           $property-id $enumerated $accepted $run-state))
+        ($bad
+         (FuzzInvalid
+           ExhaustiveAdvanceFailure
+           (Property $property-id)
+           (Value $bad)))))))
+
+; Verified demands the full walk: a non-empty accepted domain, no property discards (those
+; cases were never checked), and satisfied coverage requirements. Anything less is an
+; explicit invalid or gave-up result, never a pass.
+(= (_fuzz-finish-exhaustive $property-id $enumerated $accepted $run-state)
+   (if (== $accepted 0)
+       (let $statistics
+             (_fuzz-exhaustive-statistics $enumerated $accepted $run-state)
+         (FuzzInvalid
+           EmptyExhaustiveDomain
+           (Property $property-id)
+           $statistics))
+       (unify $run-state
+         (FuzzRunState
+           $passed
+           $property-discards
+           $generation-discards
+           $regressions
+           $examples
+           $edges
+           $random
+           $labels
+           $collected
+           $coverage)
+         (let $statistics
+               (_fuzz-exhaustive-statistics $enumerated $accepted $run-state)
+           (if (> $property-discards 0)
+               (FuzzGaveUp
+                 (Property $property-id)
+                 ExhaustivePropertyDiscards
+                 $statistics)
+               (let $insufficient
+                     (_fuzz-first-insufficient-coverage $coverage)
+                 (switch $insufficient
+                   (((Some
+                      (CoverageCount
+                        $minimum-percent
+                        $label
+                        $hits
+                        $total))
+                     (FuzzInsufficientCoverage
+                       (Property $property-id)
+                       (Requirement
+                         $label
+                         (MinimumPercent $minimum-percent)
+                         (Hits $hits)
+                         (Total $total))
+                       $statistics))
+                    (None
+                     (FuzzExhaustivelyVerified
+                       (Property $property-id)
+                       (DomainCount $accepted)
+                       (Enumerated $enumerated)
+                       $statistics)))))))
+         (FuzzInvalid InvalidRunState (State $run-state)))))
+
+(= (_fuzz-exhaustive-statistics $enumerated $accepted $run-state)
+   (let $statistics (_fuzz-run-statistics $run-state)
+     (ExhaustiveStatistics
+       (Enumerated $enumerated)
+       (DomainCount $accepted)
+       $statistics)))

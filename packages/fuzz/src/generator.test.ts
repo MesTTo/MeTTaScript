@@ -93,16 +93,22 @@ describe("MeTTa fuzz generators", () => {
 
   it("enumerates both signed zeros in their IEEE-754 order", () => {
     const results = printed(`
-      !(fuzz-generate
+      !(fuzz-enumerate
         (gen-float-range -0.0 0.0)
-        (fuzz-exhaustive-driver-limit 2)
+        16
         1)
     `)[1]!;
-    expect(results).toHaveLength(2);
-    expect(results[0]).toContain("(FuzzSample -0.0 ");
-    expect(results[0]).toContain("(Decision Int (Bounds -1 0) (Origin 0) (Value -1) ())");
-    expect(results[1]).toContain("(FuzzSample 0.0 ");
-    expect(results[1]).toContain("(Decision Int (Bounds -1 0) (Origin 0) (Value 0) ())");
+    expect(results).toHaveLength(1);
+    const enumeration = results[0]!;
+    expect(enumeration).toMatch(
+      /^\(FuzzEnumeration \(DomainCount 2\) \(Enumerated 2\) \(GenerationDiscards 0\)/,
+    );
+    expect([...enumeration.matchAll(/\(FuzzSample (-?0\.0) /g)].map((match) => match[1])).toEqual([
+      "-0.0",
+      "0.0",
+    ]);
+    expect(enumeration).toContain("(Decision Int (Bounds -1 0) (Origin 0) (Value -1) ())");
+    expect(enumeration).toContain("(Decision Int (Bounds -1 0) (Origin 0) (Value 0) ())");
   });
 
   it("covers declared IEEE-754 edge payloads for the full-bit generator", () => {
@@ -258,15 +264,21 @@ describe("MeTTa fuzz generators", () => {
   });
 
   it("enumerates the Cartesian decision domain in stable order", () => {
-    const results = printed(
-      "!(fuzz-generate (gen-tuple ((gen-int 0 1) (gen-bool))) (fuzz-exhaustive-driver) 2)",
-    )[1]!;
-    expect(results).toHaveLength(4);
-    expect(results.map((result) => /^\(FuzzSample (\([^)]*\))/.exec(result)?.[1])).toEqual([
-      "(0 False)",
-      "(0 True)",
-      "(1 False)",
-      "(1 True)",
+    const results = printed("!(fuzz-enumerate (gen-tuple ((gen-int 0 1) (gen-bool))) 16 2)")[1]!;
+    expect(results).toHaveLength(1);
+    const enumeration = results[0]!;
+    expect(enumeration).toMatch(
+      /^\(FuzzEnumeration \(DomainCount 4\) \(Enumerated 4\) \(GenerationDiscards 0\)/,
+    );
+    expect(
+      [...enumeration.matchAll(/\(FuzzSample (\([^)]*\)) /g)].map((match) => match[1]),
+    ).toEqual(["(0 False)", "(0 True)", "(1 False)", "(1 True)"]);
+    expect(
+      printed(
+        "!(fuzz-generate (gen-tuple ((gen-int 0 1) (gen-bool))) (fuzz-exhaustive-driver) 2)",
+      )[1],
+    ).toEqual([
+      "(FuzzSample (0 False) (FuzzDriver Exhaustive (ExhaustiveCursor () 2 ((ExhaustiveFrame 0 2) (ExhaustiveFrame 0 2)))) (Decision Tuple (Count 2) () ((Decision Int (Bounds 0 1) (Origin 0) (Value 0) ()) (Decision Bool (Count 2) (Value False) ((Decision Int (Bounds 0 1) (Origin 0) (Value 0) ()))))))",
     ]);
   });
 
@@ -287,19 +299,22 @@ describe("MeTTa fuzz generators", () => {
            $driver
            $size))
       (= (add-tag $value) (tagged $value))
-      !(fuzz-generate
+      !(fuzz-enumerate
          (gen-frequency
            ((1 (gen-const first))
             (2 (gen-const second))))
-         (fuzz-exhaustive-driver)
+         16
          1)
       !(fuzz-generate-edge (gen-custom Tagged (tag)) 0 1)
       !(fuzz-generate-edge (gen-custom Missing ()) 0 1)
     `);
 
-    expect(out[1]!.map((result) => /^\(FuzzSample ([^ ]+)/.exec(result)?.[1])).toEqual([
+    expect(out[1]).toHaveLength(1);
+    expect(out[1]![0]).toMatch(
+      /^\(FuzzEnumeration \(DomainCount 2\) \(Enumerated 2\) \(GenerationDiscards 0\)/,
+    );
+    expect([...out[1]![0]!.matchAll(/\(FuzzSample ([^ ]+) /g)].map((match) => match[1])).toEqual([
       "first",
-      "second",
       "second",
     ]);
     expect(out[2]![0]).toMatch(/^\(FuzzSample \(tagged 2\) /);
@@ -407,19 +422,35 @@ describe("MeTTa fuzz generators", () => {
     );
   });
 
-  it("accounts for the finite decision product before exhaustive expansion", () => {
-    expect(
-      printed(`
-        !(fuzz-generate
-           (gen-tuple ((gen-int 0 2) (gen-bool)))
-           (fuzz-exhaustive-driver-limit 5)
-           2)
-      `)[1],
-    ).toEqual([
-      "(FuzzGenerationError ExhaustiveDomainLimitExceeded (Details (Limit 5) (Required 6) (Bounds 0 1)))",
-      "(FuzzGenerationError ExhaustiveDomainLimitExceeded (Details (Limit 5) (Required 6) (Bounds 0 1)))",
-      "(FuzzGenerationError ExhaustiveDomainLimitExceeded (Details (Limit 5) (Required 6) (Bounds 0 1)))",
+  it("enumerates dependent generator domains exactly", () => {
+    const results = printed(`
+      (= (dependent-branch False) (gen-const only))
+      (= (dependent-branch True) (gen-bool))
+      !(fuzz-enumerate (gen-bind (gen-bool) dependent-branch) 16 1)
+      !(fuzz-enumerate (gen-const lone) 1 0)
+    `);
+    expect(results[1]).toHaveLength(1);
+    const enumeration = results[1]![0]!;
+    expect(enumeration).toMatch(
+      /^\(FuzzEnumeration \(DomainCount 3\) \(Enumerated 3\) \(GenerationDiscards 0\)/,
+    );
+    expect([...enumeration.matchAll(/\(FuzzSample ([^ ]+) /g)].map((match) => match[1])).toEqual([
+      "only",
+      "False",
+      "True",
     ]);
+    expect(results[2]![0]).toMatch(/^\(FuzzEnumeration \(DomainCount 1\) \(Enumerated 1\)/);
+  });
+
+  it("counts filter discards and truncates at the enumeration limit", () => {
+    const results = printed(`
+      (= (even-only $x) (== (% $x 2) 0))
+      !(fuzz-enumerate (gen-filter (gen-int 0 3) even-only 8) 16 1)
+    `)[1]!;
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatch(
+      /^\(FuzzEnumerationTruncated \(Enumerated 16\) \(DomainCount 12\) \(GenerationDiscards 4\)/,
+    );
   });
 
   it("composes tuple, list, option, map, bind, and sized generators", () => {

@@ -393,10 +393,7 @@ describe("MeTTa grammar and type-directed generators", () => {
         (Productions
           ((Production 9 Weighted heavy)
            (Production 1 Weighted light))))
-      !(fuzz-generate
-         (gen-grammar Weighted)
-         (fuzz-exhaustive-driver-limit 2)
-         0)
+      !(fuzz-enumerate (gen-grammar Weighted) 16 0)
       !(fuzz-generate-edge (gen-grammar Weighted) 0 0)
       !(fuzz-generate-edge (gen-grammar Weighted) 1 0)
       !(fuzz-generate-bytes (gen-grammar Weighted) (0) 0)
@@ -418,7 +415,14 @@ describe("MeTTa grammar and type-directed generators", () => {
          0)
     `);
 
-    expect(out[1]!.map(sampleValue)).toEqual(["heavy", "light"]);
+    expect(out[1]).toHaveLength(1);
+    expect(out[1]![0]).toMatch(
+      /^\(FuzzEnumeration \(DomainCount 2\) \(Enumerated 2\) \(GenerationDiscards 0\)/,
+    );
+    expect([...out[1]![0]!.matchAll(/\(FuzzSample ([^ ]+) /g)].map((match) => match[1])).toEqual([
+      "heavy",
+      "light",
+    ]);
     expect(sampleValue(out[2]![0]!)).toBe("heavy");
     expect(sampleValue(out[3]![0]!)).toBe("light");
     expect(sampleValue(out[4]![0]!)).toBe("heavy");
@@ -923,18 +927,10 @@ describe("MeTTa grammar and type-directed generators", () => {
       !(diff-both (fuzz-edge-driver (superpose (0 1 2 3 4 5))) 4)
       !(diff-replay-both (superpose (31 32 33)) 6)
       !(diff-shrink-both (superpose (41 42 43)) 6)
-      !(let $request (diff-request)
-         (unify $request
-           (DiffRequest $source $target $scope $next-id)
-           (let $driver (fuzz-exhaustive-driver)
-             (DiffPair
-               (collapse
-                 (_fuzz-generate-grammar-nonterminal
-                   $source $target $scope $next-id $driver 1))
-               (collapse
-                 (_fuzz-generate-grammar-nonterminal-reference
-                   $source $target $scope $next-id $driver 1))))
-           $request))
+      !(diff-both (fuzz-exhaustive-driver) 1)
+      !(diff-both (_fuzz-exhaustive-resume-driver (1)) 1)
+      !(diff-both (_fuzz-exhaustive-resume-driver (2 1)) 2)
+      !(diff-both (_fuzz-exhaustive-resume-driver (3)) 2)
       !(let $request (diff-request)
          (unify $request
            (DiffRequest (StaticGrammar (quote $g) $productions) $target $scope $next-id)
@@ -979,8 +975,11 @@ describe("MeTTa grammar and type-directed generators", () => {
     expectIdenticalRows(out[4], sample);
     expectIdenticalRows(out[5], sample);
     expectIdenticalRows(out[6], sample);
-    expectIdenticalRows(out[7], /^\(\(GrammarResult /);
-    expectIdenticalRows(out[8], /^\(ValidGrammarProductivity\)$/);
-    expectIdenticalRows(out[9], /^\(FuzzGenerationError UnproductiveGrammarNonterminal /);
+    expectIdenticalRows(out[7], sample);
+    expectIdenticalRows(out[8], sample);
+    expectIdenticalRows(out[9], sample);
+    expectIdenticalRows(out[10], sample);
+    expectIdenticalRows(out[11], /^\(ValidGrammarProductivity\)$/);
+    expectIdenticalRows(out[12], /^\(FuzzGenerationError UnproductiveGrammarNonterminal /);
   });
 });

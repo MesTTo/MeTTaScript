@@ -1771,10 +1771,11 @@ const decisionLeaves: GroundFn = (args) => {
 // `fuzz-generate` so user callbacks and custom generators stay ordinary MeTTa. Driver-integer
 // transitions replicate 15-drivers.metta exactly (same candidate lists, same decision atoms,
 // same error taxonomy); the engine's integer `/` truncates toward zero and `%` keeps the
-// dividend's sign, which BigInt arithmetic reproduces bit for bit. An exhaustive decision forks:
-// the operation returns one result per branch, in the same depth-first order the specification
-// machine's `superpose` produces. Suspended states round-trip as the specification machine's
-// own state atoms, so replay determinism never depends on hidden host state.
+// dividend's sign, which BigInt arithmetic reproduces bit for bit. Every driver mode is
+// deterministic, including the exhaustive cursor, which reads its planned offset (or descends
+// leftmost) and records one frame per decision. Suspended states round-trip as the
+// specification machine's own state atoms, so replay determinism never depends on hidden host
+// state.
 
 type MachineDriver =
   | { readonly mode: "Random"; readonly rng: RngState }
@@ -1785,7 +1786,12 @@ type MachineDriver =
       readonly leaves: readonly Atom[];
       readonly cursor: bigint;
     }
-  | { readonly mode: "Exhaustive"; readonly limit: bigint; readonly domain: bigint }
+  | {
+      readonly mode: "Exhaustive";
+      readonly choices: readonly bigint[];
+      readonly cursor: bigint;
+      readonly frames: readonly Atom[];
+    }
   | { readonly mode: "Bytes"; readonly bytes: readonly Atom[]; readonly cursor: bigint };
 
 type MachineFrame =
@@ -1901,16 +1907,24 @@ function decodeDriver(atom: Atom): MachineDriver | Atom {
   if (mode === "Exhaustive") {
     if (
       payload.kind !== "expr" ||
-      payload.items.length !== 3 ||
+      payload.items.length !== 4 ||
       payload.items[0]!.kind !== "sym" ||
-      payload.items[0]!.name !== "ExhaustiveState"
+      payload.items[0]!.name !== "ExhaustiveCursor" ||
+      payload.items[1]!.kind !== "expr" ||
+      payload.items[3]!.kind !== "expr"
     )
       return machineError("MalformedExhaustiveState", expr([sym("State"), payload]));
-    const limit = integralNumberValue(payload.items[1]!);
-    const domain = integralNumberValue(payload.items[2]!);
-    if (limit === undefined || domain === undefined)
+    const choices: bigint[] = [];
+    for (const item of payload.items[1]!.items) {
+      const choice = integralNumberValue(item);
+      if (choice === undefined)
+        return machineError("MalformedExhaustiveState", expr([sym("State"), payload]));
+      choices.push(choice);
+    }
+    const cursor = integralNumberValue(payload.items[2]!);
+    if (cursor === undefined || cursor < 0n)
       return machineError("MalformedExhaustiveState", expr([sym("State"), payload]));
-    return { mode: "Exhaustive", limit, domain };
+    return { mode: "Exhaustive", choices, cursor, frames: payload.items[3]!.items };
   }
   if (mode === "Bytes") {
     if (
@@ -1951,7 +1965,12 @@ function encodeDriver(driver: MachineDriver): Atom {
       return expr([
         FUZZ_DRIVER_HEAD,
         sym("Exhaustive"),
-        expr([sym("ExhaustiveState"), gint(driver.limit), gint(driver.domain)]),
+        expr([
+          sym("ExhaustiveCursor"),
+          expr(driver.choices.map((choice) => gint(choice))),
+          gint(driver.cursor),
+          expr([...driver.frames]),
+        ]),
       ]);
     case "Bytes":
       return expr([
@@ -1968,10 +1987,6 @@ type IntChoice =
       readonly value: bigint;
       readonly driver: MachineDriver;
       readonly decision: Atom;
-    }
-  | {
-      readonly tag: "fork";
-      readonly branches: readonly { value: bigint; driver: MachineDriver; decision: Atom }[];
     }
   | { readonly tag: "error"; readonly error: Atom };
 
@@ -2157,25 +2172,29 @@ function driverInt(driver: MachineDriver, lower: bigint, upper: bigint, origin: 
     }
     case "Exhaustive": {
       const span = upper - lower + 1n;
-      const required = driver.domain * span;
-      if (required > driver.limit)
+      const offset =
+        driver.cursor < BigInt(driver.choices.length) ? driver.choices[Number(driver.cursor)]! : 0n;
+      if (offset < 0n || offset >= span)
         return {
           tag: "error",
           error: machineError(
-            "ExhaustiveDomainLimitExceeded",
-            expr([sym("Limit"), gint(driver.limit)]),
-            expr([sym("Required"), gint(required)]),
+            "ExhaustiveResumeMismatch",
+            expr([sym("Offset"), gint(offset)]),
             expr([sym("Bounds"), gint(lower), gint(upper)]),
           ),
         };
-      const branches: { value: bigint; driver: MachineDriver; decision: Atom }[] = [];
-      for (let value = lower; value <= upper; value += 1n)
-        branches.push({
-          value,
-          driver: { mode: "Exhaustive", limit: driver.limit, domain: required },
-          decision: intDecisionAtom(lower, upper, origin, value),
-        });
-      return { tag: "fork", branches };
+      const value = lower + offset;
+      return {
+        tag: "one",
+        value,
+        driver: {
+          mode: "Exhaustive",
+          choices: driver.choices,
+          cursor: driver.cursor + 1n,
+          frames: [expr([sym("ExhaustiveFrame"), gint(offset), gint(span)]), ...driver.frames],
+        },
+        decision: intDecisionAtom(lower, upper, origin, value),
+      };
     }
     case "Bytes": {
       const span = upper - lower + 1n;
@@ -2481,23 +2500,8 @@ function decodeMachineState(atom: Atom): MachineState | Atom {
 }
 
 type StepResult =
-  | { readonly tag: "continue"; readonly forks?: undefined }
-  | { readonly tag: "forked"; readonly forks: MachineState[] }
+  | { readonly tag: "continue" }
   | { readonly tag: "outcome"; readonly outcome: MachineOutcome };
-
-function cloneState(state: MachineState): MachineState {
-  return {
-    source: state.source,
-    productions: state.productions,
-    frames: state.frames.map((frame) => (frame.tag === "plan" ? { ...frame } : frame)),
-    values: [...state.values],
-    trees: [...state.trees],
-    scope: [...state.scope],
-    nextId: state.nextId,
-    driver: state.driver,
-    cut: state.cut,
-  };
-}
 
 function doneOutcome(result: Atom): StepResult {
   return { tag: "outcome", outcome: { tag: "done", result } };
@@ -2573,8 +2577,7 @@ function suspend(state: MachineState, generator: Atom, size: bigint): StepResult
   };
 }
 
-// Applies one machine step in place; forks return fresh states. Mirrors the specification
-// machine rule for rule.
+// Applies one machine step in place. Mirrors the specification machine rule for rule.
 function stepMachine(state: MachineState): StepResult {
   if (state.cut !== undefined) {
     const frame = state.frames.pop();
@@ -3032,15 +3035,7 @@ function enterNonterminal(state: MachineState, target: Atom, size: bigint): Step
     return { tag: "continue" };
   };
 
-  if (choice.tag === "one") return applyChoice(state, choice);
-  const forks: MachineState[] = [];
-  for (const branch of choice.branches) {
-    const forked = cloneState(state);
-    const applied = applyChoice(forked, branch);
-    if (applied.tag === "outcome") return applied;
-    forks.push(forked);
-  }
-  return { tag: "forked", forks };
+  return applyChoice(state, choice);
 }
 
 function compileTemplatePlanCached(template: Atom): readonly Atom[] | Atom {
@@ -3078,22 +3073,11 @@ function eligibleListForMachine(
   return looked.results[0]!;
 }
 
-function runMachineToOutcomes(initial: MachineState): MachineOutcome[] {
-  const outcomes: MachineOutcome[] = [];
-  const live: MachineState[] = [initial];
-  while (live.length > 0) {
-    const state = live[live.length - 1]!;
+function runMachineToOutcome(state: MachineState): MachineOutcome {
+  for (;;) {
     const stepped = stepMachine(state);
-    if (stepped.tag === "continue") continue;
-    live.pop();
-    if (stepped.tag === "outcome") {
-      outcomes.push(stepped.outcome);
-      continue;
-    }
-    for (let index = stepped.forks.length - 1; index >= 0; index -= 1)
-      live.push(stepped.forks[index]!);
+    if (stepped.tag === "outcome") return stepped.outcome;
   }
-  return outcomes;
 }
 
 const grammarMachineOp: GroundFn = (args) => {
@@ -3165,12 +3149,6 @@ const grammarMachineOp: GroundFn = (args) => {
         tag: "ok",
         results: [outcomeAtom(entered.outcome)],
       };
-    if (entered.tag === "forked") {
-      const collected: Atom[] = [];
-      for (const fork of entered.forks)
-        for (const outcome of runMachineToOutcomes(fork)) collected.push(outcomeAtom(outcome));
-      return { tag: "ok", results: collected };
-    }
   } else if (head === MACHINE_RESUME_HEAD.name && input.items.length === 3) {
     const decoded = decodeMachineState(input.items[1]!);
     if (!("frames" in decoded)) return ok(expr([MACHINE_DONE_HEAD, decoded]));
@@ -3186,8 +3164,7 @@ const grammarMachineOp: GroundFn = (args) => {
     );
   }
 
-  const outcomes = runMachineToOutcomes(state);
-  return { tag: "ok", results: outcomes.map(outcomeAtom) };
+  return ok(outcomeAtom(runMachineToOutcome(state)));
 };
 
 function outcomeAtom(outcome: MachineOutcome): Atom {

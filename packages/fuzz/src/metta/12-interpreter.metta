@@ -340,45 +340,86 @@
              (_fuzz-generation-error MalformedFrequencyEntry
                (Entry $bad))))))))
 
+; Weights bias only the Random ticket draw; every other driver and the recorded decision work
+; in entry-index space [0, count-1]. Exhaustive enumeration therefore visits each entry once,
+; and a replayed tree is weight-independent, exactly like grammar production choice.
+(= (_fuzz-frequency-index-choice $entries $total $driver)
+   (switch $driver
+     (((FuzzDriver Random $rng)
+       (let $draw (_fuzz-draw-int $rng 1 $total)
+         (switch $draw
+           (((FuzzDraw $ticket $next-rng)
+             (let $selected (_fuzz-frequency-select $entries $ticket 0 0)
+               (switch $selected
+                 (((FrequencySelection $index $generator)
+                   (let* (($count (length $entries))
+                          ($decision (_fuzz-int-decision 0 (- $count 1) 0 $index)))
+                     (FrequencyIndexChoice
+                       $index
+                       $generator
+                       (FuzzDriver Random $next-rng)
+                       $decision)))
+                  ((FuzzGenerationError $code $details) $selected)
+                  ($bad
+                   (_fuzz-generation-error
+                     MalformedFrequencySelection
+                     (Value $bad)))))))
+            ($bad
+             (_fuzz-generation-error KernelError (OperationResult $bad)))))))
+      ($other
+       (let* (($count (length $entries))
+              ($choice (_fuzz-driver-int $driver 0 (- $count 1) 0)))
+         (switch $choice
+           (((DriverChoice $index $next-driver $decision)
+             (let $entry (index-atom $entries $index)
+               (switch $entry
+                 ((($weight $generator)
+                   (FrequencyIndexChoice
+                     $index
+                     $generator
+                     $next-driver
+                     $decision))
+                  ($bad
+                   (_fuzz-generation-error
+                     MalformedFrequencyEntry
+                     (Entry $bad)))))))
+            ((FuzzGenerationError $code $details) $choice)
+            ($bad
+             (_fuzz-generation-error
+               MalformedDriverChoice
+               (Value $bad))))))))))
+
 (= (_fuzz-generate-frequency $entries $total $driver $size)
-   (let $choice (_fuzz-driver-int $driver 1 $total 1)
+   (let $choice (_fuzz-frequency-index-choice $entries $total $driver)
      (switch $choice
-       (((DriverChoice $ticket $next-driver $decision)
-         (let $selected (_fuzz-frequency-select $entries $ticket 0 0)
-           (switch $selected
-             (((FrequencySelection $index $generator)
-               (let $child
-                     (fuzz-generate $generator $next-driver (max 0 (- $size 1)))
-                 (switch $child
-                   (((FuzzSample $value $final-driver $tree)
-                     (let $children (_fuzz-two-children $decision $tree)
-                       (FuzzSample
-                         $value
-                         $final-driver
-                         (Decision
-                           Frequency
-                           (Total $total)
-                           (Index $index)
-                           $children))))
-                    ((FuzzGenerationDiscard $reason $final-driver $tree)
-                     (let $children (_fuzz-two-children $decision $tree)
-                       (FuzzGenerationDiscard
-                         $reason
-                         $final-driver
-                         (Decision
-                           Frequency
-                           (Total $total)
-                           (Index $index)
-                           $children))))
-                    ((FuzzGenerationError $code $details) $child)
-                    ($bad
-                     (_fuzz-generation-error
-                       MalformedGenerationResult
-                       (Value $bad)))))))
-              ((FuzzGenerationError $code $details) $selected)
+       (((FrequencyIndexChoice $index $generator $next-driver $decision)
+         (let $child
+               (fuzz-generate $generator $next-driver (max 0 (- $size 1)))
+           (switch $child
+             (((FuzzSample $value $final-driver $tree)
+               (let $children (_fuzz-two-children $decision $tree)
+                 (FuzzSample
+                   $value
+                   $final-driver
+                   (Decision
+                     Frequency
+                     (Total $total)
+                     (Index $index)
+                     $children))))
+              ((FuzzGenerationDiscard $reason $final-driver $tree)
+               (let $children (_fuzz-two-children $decision $tree)
+                 (FuzzGenerationDiscard
+                   $reason
+                   $final-driver
+                   (Decision
+                     Frequency
+                     (Total $total)
+                     (Index $index)
+                     $children))))
+              ((FuzzGenerationError $code $details) $child)
               ($bad
                (_fuzz-generation-error
-                 MalformedFrequencySelection
+                 MalformedGenerationResult
                  (Value $bad)))))))
         ((FuzzGenerationError $code $details) $choice)
         ($bad
@@ -956,6 +997,70 @@
          (_fuzz-finish-replay
            $decision-tree
            (fuzz-generate $generator $valid $size)))))))
+
+; Enumerates the generator's whole decision domain at one size with the exhaustive cursor,
+; in depth-first order. Generation discards count as enumerated attempts but not as domain
+; members. Stops at $limit attempts with FuzzEnumerationTruncated; a completed walk returns
+; (FuzzEnumeration (DomainCount n) (Enumerated m) (GenerationDiscards g) (Samples ...)).
+(= (fuzz-enumerate $generator $limit $size)
+   (if (_fuzz-is-integer $limit)
+       (if (> $limit 0)
+           (_fuzz-enumerate-loop
+             (FuzzEnumerateRun $generator $size $limit () 0 0 0 ()))
+           (_fuzz-generation-error InvalidEnumerationLimit (Limit $limit)))
+       (_fuzz-expected-integer EnumerationLimit $limit)))
+
+(= (_fuzz-enumerate-loop $state)
+   (if (_fuzz-enumerate-finished $state)
+       $state
+       (_fuzz-enumerate-loop (_fuzz-enumerate-step $state))))
+
+(= (_fuzz-enumerate-finished $state)
+   (unify $state
+     (FuzzEnumerateRun $generator $size $limit $plan $enumerated $accepted $discards $samples)
+     False
+     True))
+
+(= (_fuzz-enumerate-step $state)
+   (unify $state
+     (FuzzEnumerateRun $generator $size $limit $plan $enumerated $accepted $discards $samples)
+     (if (>= $enumerated $limit)
+         (FuzzEnumerationTruncated
+           (Enumerated $enumerated)
+           (DomainCount $accepted)
+           (GenerationDiscards $discards)
+           (Samples $samples))
+         (let $driver (_fuzz-exhaustive-resume-driver $plan)
+           (let $result (fuzz-generate $generator $driver $size)
+             (switch $result
+               (((FuzzSample $value (FuzzDriver Exhaustive (ExhaustiveCursor $choices $cursor $frames)) $tree)
+                 (let $collected (_fuzz-expression-append $samples $result)
+                   (_fuzz-enumerate-advance
+                     $generator $size $limit $frames
+                     (+ $enumerated 1) (+ $accepted 1) $discards $collected)))
+                ((FuzzGenerationDiscard $reason (FuzzDriver Exhaustive (ExhaustiveCursor $choices $cursor $frames)) $tree)
+                 (_fuzz-enumerate-advance
+                   $generator $size $limit $frames
+                   (+ $enumerated 1) $accepted (+ $discards 1) $samples))
+                ((FuzzGenerationError $code $details) $result)
+                ($bad
+                 (_fuzz-generation-error MalformedExhaustiveOutcome (Value $bad))))))))
+     (_fuzz-generation-error MalformedEnumerationState (State $state))))
+
+(= (_fuzz-enumerate-advance $generator $size $limit $frames $enumerated $accepted $discards $samples)
+   (let $advanced (_fuzz-exhaustive-next-plan $frames)
+     (switch $advanced
+       (((ExhaustivePlan $plan)
+         (FuzzEnumerateRun $generator $size $limit $plan $enumerated $accepted $discards $samples))
+        (ExhaustiveComplete
+         (FuzzEnumeration
+           (DomainCount $accepted)
+           (Enumerated $enumerated)
+           (GenerationDiscards $discards)
+           (Samples $samples)))
+        ((FuzzGenerationError $code $details) $advanced)
+        ($bad
+         (_fuzz-generation-error MalformedExhaustiveAdvance (Value $bad)))))))
 
 (= (_fuzz-finish-shrink-replay $result)
    (switch $result

@@ -27,16 +27,48 @@
            (_fuzz-generation-error InvalidEdgeIndex (Index $index)))
        (_fuzz-expected-integer EdgeIndex $index)))
 
+; One exhaustive run follows one choice vector: each integer decision reads its planned
+; offset (or defaults to zero past the plan) and records an (ExhaustiveFrame offset count)
+; newest-first. Enumeration is the odometer over recorded frames, driven by
+; `_fuzz-exhaustive-next-plan`; a lone driver generates the leftmost path deterministically.
 (= (fuzz-exhaustive-driver)
-   (FuzzDriver Exhaustive (ExhaustiveState 10000 1)))
+   (FuzzDriver Exhaustive (ExhaustiveCursor () 0 ())))
 
-(= (fuzz-exhaustive-driver-limit $maximum-decisions)
-   (if (_fuzz-is-integer $maximum-decisions)
-       (if (> $maximum-decisions 0)
-           (FuzzDriver Exhaustive (ExhaustiveState $maximum-decisions 1))
-           (_fuzz-generation-error InvalidExhaustiveLimit
-             (MaximumDecisions $maximum-decisions)))
-       (_fuzz-expected-integer MaximumDecisions $maximum-decisions)))
+(= (_fuzz-exhaustive-resume-driver $choices)
+   (FuzzDriver Exhaustive (ExhaustiveCursor $choices 0 ())))
+
+; Odometer advance: increment the rightmost frame that has another branch and drop the
+; suffix; later decisions are reconstructed by default-zero descent, which is what keeps
+; enumeration exact for dependent generators. Frames arrive newest-first; the returned
+; (ExhaustivePlan offsets) is oldest-first. ExhaustiveComplete means the domain is done.
+(= (_fuzz-exhaustive-next-plan $frames-reversed)
+   (if-decons-expr
+     $frames-reversed
+     $frame
+     $earlier
+     (switch $frame
+       (((ExhaustiveFrame $offset $count)
+         (if (< (+ $offset 1) $count)
+             (let $bumped (+ $offset 1)
+               (let $plan (_fuzz-exhaustive-plan-prefix $earlier ($bumped))
+                 (ExhaustivePlan $plan)))
+             (_fuzz-exhaustive-next-plan $earlier)))
+        ($bad
+         (_fuzz-generation-error MalformedExhaustiveFrame (Frame $bad)))))
+     ExhaustiveComplete))
+
+(= (_fuzz-exhaustive-plan-prefix $frames-reversed $accumulator)
+   (if-decons-expr
+     $frames-reversed
+     $frame
+     $earlier
+     (switch $frame
+       (((ExhaustiveFrame $offset $count)
+         (let $next (cons-atom $offset $accumulator)
+           (_fuzz-exhaustive-plan-prefix $earlier $next)))
+        ($bad
+         (_fuzz-generation-error MalformedExhaustiveFrame (Frame $bad)))))
+     $accumulator))
 
 (= (_fuzz-valid-bytes $bytes)
    (if (== $bytes ())
@@ -225,30 +257,27 @@
          MalformedShrinkReplayState
          (State $bad-state))))))
 
-(= (_fuzz-inclusive-range $lower $upper)
-   (if (<= $lower $upper)
-       (let $tail (_fuzz-inclusive-range (+ $lower 1) $upper)
-         (cons-atom $lower $tail))
-       ()))
-
 (= (_fuzz-driver-int-exhaustive $state $lower $upper $origin)
    (switch $state
-     (((ExhaustiveState $limit $domain-size)
-       (let* (($choice-count (+ (- $upper $lower) 1))
-              ($required (* $domain-size $choice-count)))
-         (if (> $required $limit)
-             (_fuzz-generation-error ExhaustiveDomainLimitExceeded
-               (Limit $limit)
-               (Required $required)
-               (Bounds $lower $upper))
-             (let $values (_fuzz-inclusive-range $lower $upper)
-               (let $value (superpose $values)
-                 (DriverChoice
-                   $value
-                   (FuzzDriver
-                     Exhaustive
-                     (ExhaustiveState $limit $required))
-                   (_fuzz-int-decision $lower $upper $origin $value)))))))
+     (((ExhaustiveCursor $choices $cursor $frames)
+       (let* (($count (+ (- $upper $lower) 1))
+              ($offset
+                (if (< $cursor (length $choices))
+                    (index-atom $choices $cursor)
+                    0)))
+         (if (and (<= 0 $offset) (< $offset $count))
+             (let* (($value (+ $lower $offset))
+                    ($frame (ExhaustiveFrame $offset $count))
+                    ($next-frames (cons-atom $frame $frames)))
+               (DriverChoice
+                 $value
+                 (FuzzDriver
+                   Exhaustive
+                   (ExhaustiveCursor $choices (+ $cursor 1) $next-frames))
+                 (_fuzz-int-decision $lower $upper $origin $value)))
+             (_fuzz-generation-error ExhaustiveResumeMismatch
+               (Offset $offset)
+               (Bounds $lower $upper)))))
       ($bad-state
        (_fuzz-generation-error
          MalformedExhaustiveState

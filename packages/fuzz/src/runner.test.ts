@@ -588,4 +588,119 @@ describe("MeTTa fuzz runner", () => {
       "(Status LocallyMinimal) (Reason PostShrinkReplayMismatch) (Attempts 9) (Accepted 5)",
     );
   });
+
+  it("verifies a full decision domain exhaustively with per-tree replay", () => {
+    const result = printed(`
+      (: small-pass (-> Atom FuzzProperty))
+      (= (small-pass $value) (fuzz-pass))
+      !(fuzz-check-exhaustive
+         verified-domain
+         (gen-int 0 3)
+         small-pass
+         (fuzz-config (MaxSize 1)))
+    `)[1]![0]!;
+    expect(result).toMatch(
+      /^\(FuzzExhaustivelyVerified \(Property verified-domain\) \(DomainCount 4\) \(Enumerated 4\) \(ExhaustiveStatistics /,
+    );
+    expect(result).toContain("(Passed 4)");
+  });
+
+  it("reports the depth-first counterexample with exhaustive replay coordinates", () => {
+    const result = printed(`
+      (: no-three (-> Atom FuzzProperty))
+      (= (no-three $value) (expect-true (< $value 3) (SawThree $value)))
+      !(fuzz-check-exhaustive
+         exhaustive-counterexample
+         (gen-int 0 3)
+         no-three
+         (fuzz-config (MaxSize 1)))
+    `)[1]![0]!;
+    expect(result).toMatch(
+      /^\(FuzzFailed \(Property exhaustive-counterexample\) \(Phase Exhaustive\) \(CaseIndex 3\)/,
+    );
+    expect(result).toContain("(OriginalValue 3)");
+    expect(result).toContain("(Origin (Exhaustive (Choices (3)) (Case 3) (Size 1)))");
+    expect(result).toContain("(Status LocallyMinimal)");
+  });
+
+  it("enumerates dependent domains exactly during exhaustive checking", () => {
+    const result = printed(`
+      (= (dependent-branch False) (gen-const only))
+      (= (dependent-branch True) (gen-bool))
+      (: any-value (-> Atom FuzzProperty))
+      (= (any-value $value) (fuzz-pass))
+      !(fuzz-check-exhaustive
+         dependent-domain
+         (gen-bind (gen-bool) dependent-branch)
+         any-value
+         (fuzz-config (MaxSize 1)))
+    `)[1]![0]!;
+    expect(result).toMatch(
+      /^\(FuzzExhaustivelyVerified \(Property dependent-domain\) \(DomainCount 3\) \(Enumerated 3\)/,
+    );
+  });
+
+  it("gives up as inconclusive at the enumeration limit", () => {
+    const result = printed(`
+      (: small-pass (-> Atom FuzzProperty))
+      (= (small-pass $value) (fuzz-pass))
+      !(fuzz-check-exhaustive
+         capped-domain
+         (gen-int 0 3)
+         small-pass
+         (fuzz-config (MaxSize 1) (MaxEnumerated 2)))
+    `)[1]![0]!;
+    expect(result).toMatch(
+      /^\(FuzzGaveUp \(Property capped-domain\) EnumerationLimit \(ExhaustiveStatistics \(Enumerated 2\) \(DomainCount 2\)/,
+    );
+  });
+
+  it("treats property discards as inconclusive, never as exhaustive passes", () => {
+    const result = printed(`
+      (: discard-two (-> Atom FuzzProperty))
+      (= (discard-two $value)
+         (if (== $value 2) (fuzz-discard SkipsTwo) (fuzz-pass)))
+      !(fuzz-check-exhaustive
+         discarded-domain
+         (gen-int 0 3)
+         discard-two
+         (fuzz-config (MaxSize 1)))
+    `)[1]![0]!;
+    expect(result).toMatch(
+      /^\(FuzzGaveUp \(Property discarded-domain\) ExhaustivePropertyDiscards \(ExhaustiveStatistics \(Enumerated 4\) \(DomainCount 4\)/,
+    );
+    expect(result).toContain("(PropertyDiscards 1)");
+  });
+
+  it("reports an empty accepted domain as invalid", () => {
+    const result = printed(`
+      (= (never $x) False)
+      (: small-pass (-> Atom FuzzProperty))
+      (= (small-pass $value) (fuzz-pass))
+      !(fuzz-check-exhaustive
+         empty-domain
+         (gen-filter (gen-int 0 1) never 2)
+         small-pass
+         (fuzz-config (MaxSize 1) (MaxEnumerated 20)))
+    `)[1]![0]!;
+    expect(result).toMatch(
+      /^\(FuzzInvalid EmptyExhaustiveDomain \(Property empty-domain\) \(ExhaustiveStatistics \(Enumerated 4\) \(DomainCount 0\)/,
+    );
+    expect(result).toContain("(GenerationDiscards 4)");
+  });
+
+  it("checks coverage requirements against the exact domain", () => {
+    const result = printed(`
+      (: covered (-> Atom FuzzProperty))
+      (= (covered $value) (fuzz-cover 90 High (> $value 2) (fuzz-pass)))
+      !(fuzz-check-exhaustive
+         covered-domain
+         (gen-int 0 3)
+         covered
+         (fuzz-config (MaxSize 1)))
+    `)[1]![0]!;
+    expect(result).toMatch(
+      /^\(FuzzInsufficientCoverage \(Property covered-domain\) \(Requirement High \(MinimumPercent 90\) \(Hits 1\) \(Total 4\)\)/,
+    );
+  });
 });
