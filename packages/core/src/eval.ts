@@ -7935,10 +7935,16 @@ function* mettaEvalBodyG(
       let cur2 = cur;
       const tabling = env.tableSpace !== undefined && queryVars.length === 0;
       for (const [partAtoms, partB] of partials) {
-        // error propagation: a type-directed-evaluated arg reduced to an error and changed
+        // Error propagation applies only when evaluation changed an argument into an error. Reference
+        // identity proves a lazy argument was untouched even when it contains NaN, which intentionally
+        // compares unequal to itself under MeTTa numeric equality.
         let errFound: Atom | undefined;
         for (let i = 0; i < partAtoms.length; i++) {
-          if (isErr(partAtoms[i]!) && !atomEq(partAtoms[i]!, args[i]!)) {
+          if (
+            isErr(partAtoms[i]!) &&
+            partAtoms[i] !== args[i] &&
+            !atomEq(partAtoms[i]!, args[i]!)
+          ) {
             errFound = partAtoms[i]!;
             break;
           }
