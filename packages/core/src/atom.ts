@@ -530,10 +530,12 @@ function hasNanGround(a: Atom): boolean {
   const cached = exprHasNanCache.get(a);
   if (cached !== undefined) return cached;
   // Iterative DFS with short-circuit so a deep term cannot overflow the host stack. A cached subtree is
-  // used directly (true short-circuits, false is skipped); an uncached one has its children pushed. Only
-  // the queried root is memoised here — an intermediate node is re-derived on a future query, a caching
-  // detail, not a result change. Result is the same `NaN anywhere in the tree` test.
+  // used directly (true short-circuits, false is skipped). Every expression visited by a clean walk is
+  // memoised, not just the queried root: `atomEq`'s identity fast path asks this question of every fresh
+  // wrapper around a stable large subtree (a machine state rebuilt around a shared accumulator each
+  // step), and root-only caching re-walked that shared structure once per fresh wrapper.
   const stack: Atom[] = [a];
+  const visited: ExprAtom[] = [];
   let found = false;
   while (stack.length > 0) {
     const cur = stack.pop()!;
@@ -548,10 +550,17 @@ function hasNanGround(a: Atom): boolean {
         found = true;
         break;
       }
-      if (c === undefined) for (const x of cur.items) stack.push(x);
+      if (c === undefined) {
+        visited.push(cur);
+        for (const x of cur.items) stack.push(x);
+      }
     }
   }
-  exprHasNanCache.set(a, found);
+  if (found) {
+    exprHasNanCache.set(a, true);
+  } else {
+    for (const node of visited) exprHasNanCache.set(node, false);
+  }
   return found;
 }
 

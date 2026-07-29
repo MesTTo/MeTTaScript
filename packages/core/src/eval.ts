@@ -6700,11 +6700,63 @@ function runtimeFunctorTableWorth(
 
 type CompletedTableKey = TableKey;
 
+// Tabling admission re-checks the same immutable call arguments as an accumulator grows across
+// steps; without a cache this walk re-visits a shared large argument once per call, which turns a
+// worklist whose analyses each table-check a few calls into O(state) per call. The verdict depends
+// only on the atom, the impure-op set, and the grounded tables (mutated only through registration,
+// which bumps groundedEpoch), so it is cached by node identity like the normal-form verdict. A node
+// verified clean covers its whole subtree; a containing verdict lands on the queried root.
+interface ImpureHeadEntry {
+  readonly env: MinEnv;
+  readonly groundedEpoch: number;
+  readonly perSet: Map<ReadonlySet<string>, boolean>;
+}
+const impureHeadCache = new WeakMap<Atom, ImpureHeadEntry>();
+
+function impureHeadEntryFor(env: MinEnv, a: Atom): ImpureHeadEntry {
+  const cached = impureHeadCache.get(a);
+  if (cached !== undefined && cached.env === env && cached.groundedEpoch === env.groundedEpoch)
+    return cached;
+  const fresh: ImpureHeadEntry = { env, groundedEpoch: env.groundedEpoch, perSet: new Map() };
+  impureHeadCache.set(a, fresh);
+  return fresh;
+}
+
 function containsImpureHead(env: MinEnv, a: Atom, impureOps: ReadonlySet<string>): boolean {
   if (a.kind !== "expr" || a.items.length === 0) return false;
-  const h = a.items[0]!;
-  if (h.kind === "sym" && isTablingImpureHead(env, h.name, impureOps)) return true;
-  return a.items.some((it) => containsImpureHead(env, it, impureOps));
+  const rootEntry = impureHeadEntryFor(env, a);
+  const rootCached = rootEntry.perSet.get(impureOps);
+  if (rootCached !== undefined) return rootCached;
+  const stack: Atom[] = [a];
+  const verifiedClean: Atom[] = [];
+  let contains = false;
+  while (stack.length > 0) {
+    const cur = stack.pop()!;
+    if (cur.kind !== "expr" || cur.items.length === 0) continue;
+    const cached = impureHeadCache.get(cur);
+    if (cached !== undefined && cached.env === env && cached.groundedEpoch === env.groundedEpoch) {
+      const verdict = cached.perSet.get(impureOps);
+      if (verdict === false) continue;
+      if (verdict === true) {
+        contains = true;
+        break;
+      }
+    }
+    const h = cur.items[0]!;
+    if (h.kind === "sym" && isTablingImpureHead(env, h.name, impureOps)) {
+      impureHeadEntryFor(env, cur).perSet.set(impureOps, true);
+      contains = true;
+      break;
+    }
+    verifiedClean.push(cur);
+    for (let i = 0; i < cur.items.length; i += 1) stack.push(cur.items[i]!);
+  }
+  if (contains) {
+    rootEntry.perSet.set(impureOps, true);
+    return true;
+  }
+  for (const node of verifiedClean) impureHeadEntryFor(env, node).perSet.set(impureOps, false);
+  return false;
 }
 
 function groundTableVersionIfAdmissible(
