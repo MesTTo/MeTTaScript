@@ -2717,10 +2717,31 @@ function queryVarsOf(args: readonly Atom[]): readonly string[] {
   for (const a of args) if (!a.ground) out.push(...atomVars(a));
   return out;
 }
+// The variables of every pending frame AFTER resolving through `b`: a var `b` binds contributes its
+// resolved value's variables, an unbound one contributes itself. Computed on the raw frame atoms by
+// expanding names through the binding instead of instantiating each frame: a frame that embeds a large
+// accumulator made every metta-thread (so every constructor-subterm evaluation) pay O(state) just to
+// read variable names — the same disease fd574b8 cured for chain steps. Frame atoms and resolved values
+// hit the identity-cached atomVarsOf, and ground values contribute nothing, so the walk is O(live set).
 function scopeVars(env: MinEnv, b: Bindings, prev: Stack): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
-  for (let p = prev; p !== null; p = p.tail) collectVars(inst(env, b, p.head.atom), out, seen);
+  const visited = new Set<string>();
+  const pending: string[] = [];
+  for (let p = prev; p !== null; p = p.tail) collectVars(p.head.atom, pending, visited);
+  const memo = new Map<Atom, Atom>();
+  while (pending.length > 0) {
+    const name = pending.pop()!;
+    const value = resolveBoundVarFix(env, b, name, memo);
+    if (value === undefined || (value.kind === "var" && value.name === name)) {
+      if (!seen.has(name)) {
+        seen.add(name);
+        out.push(name);
+      }
+      continue;
+    }
+    collectVars(value, pending, visited);
+  }
   return out;
 }
 function chainLiveVars(template: Atom, name: string, value: Atom, prev: Stack): string[] {
