@@ -122,9 +122,7 @@ describe("MeTTa fuzz shrink relation", () => {
             ((Decision Const () (Value $nan) ())
              (Decision Const () (Value $nan) ()))))
       `)[1],
-    ).toEqual([
-      "((Decision Const () (Value NaN) ()))",
-    ]);
+    ).toEqual(["((Decision Const () (Value NaN) ()))"]);
   });
 
   it("appends validated custom shrink choices after built-in passes", () => {

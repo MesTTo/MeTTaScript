@@ -29,12 +29,8 @@ describe("MeTTa fuzz generators", () => {
       ["(FuzzGenerationError EmptyElementSet (Details (Values ())))"],
       ["(FuzzGenerationError InvalidFrequencyWeight (Details (Weight 0) (Generator (GenBool))))"],
       ["(FuzzGenerationError ExpectedInteger (Details (Parameter MinimumLength) (Value 0.5)))"],
-      [
-        "(FuzzGenerationError InvalidSymbolLengthBounds (Details (Minimum 0) (Maximum 2)))",
-      ],
-      [
-        "(FuzzGenerationError InvalidTokenLengthBounds (Details (Minimum 3) (Maximum 2)))",
-      ],
+      ["(FuzzGenerationError InvalidSymbolLengthBounds (Details (Minimum 0) (Maximum 2)))"],
+      ["(FuzzGenerationError InvalidTokenLengthBounds (Details (Minimum 3) (Maximum 2)))"],
       ["(FuzzGenerationError ExpectedInteger (Details (Parameter MaximumAttempts) (Value 1.5)))"],
       ["(FuzzGenerationError ExpectedInteger (Details (Parameter Size) (Value 1.5)))"],
     ]);
@@ -103,13 +99,9 @@ describe("MeTTa fuzz generators", () => {
         1)
     `)[1]!;
     expect(results).toHaveLength(2);
-    expect(results[0]).toContain(
-      "(FuzzSample -0.0 ",
-    );
+    expect(results[0]).toContain("(FuzzSample -0.0 ");
     expect(results[0]).toContain("(Decision Int (Bounds -1 0) (Origin 0) (Value -1) ())");
-    expect(results[1]).toContain(
-      "(FuzzSample 0.0 ",
-    );
+    expect(results[1]).toContain("(FuzzSample 0.0 ");
     expect(results[1]).toContain("(Decision Int (Bounds -1 0) (Origin 0) (Value 0) ())");
   });
 
@@ -145,9 +137,7 @@ describe("MeTTa fuzz generators", () => {
       )
       .join("\n");
     const results = printed(queries).slice(1);
-    expect(results).toEqual(
-      expected.map(([high, low]) => [`(Float64Bits ${high} ${low})`]),
-    );
+    expect(results).toEqual(expected.map(([high, low]) => [`(Float64Bits ${high} ${low})`]));
   });
 
   it("covers ordered finite-float boundaries before random generation", () => {
@@ -174,9 +164,7 @@ describe("MeTTa fuzz generators", () => {
       )
       .join("\n");
     const results = printed(queries).slice(1);
-    expect(results).toEqual(
-      expected.map(([high, low]) => [`(Float64Bits ${high} ${low})`]),
-    );
+    expect(results).toEqual(expected.map(([high, low]) => [`(Float64Bits ${high} ${low})`]));
   });
 
   it("replays arbitrary full-bit floats through integer decisions", () => {
@@ -371,9 +359,7 @@ describe("MeTTa fuzz generators", () => {
            1)
       `).slice(1),
     ).toEqual([
-      [
-        "(FuzzGenerationError UnsupportedCustomDriver (Details (Name RandomOnly) (Mode Edge)))",
-      ],
+      ["(FuzzGenerationError UnsupportedCustomDriver (Details (Name RandomOnly) (Mode Edge)))"],
       [
         "(FuzzGenerationError InvalidCustomCapabilities (Details (Name BadModes) (Modes (Random Replay Replay ShrinkReplay))))",
       ],
