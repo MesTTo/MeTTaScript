@@ -472,6 +472,8 @@ const WORLD_EMBEDDED_OPS: ReadonlySet<string> = new Set([
   "get-atoms",
   "bind!",
   "pragma!",
+  // Reads world.logLevel, so it must not be treated as referentially transparent across pragma! changes.
+  "log-enabled?",
   "transaction",
 ]);
 const HOST_EMBEDDED_OPS: ReadonlySet<string> = new Set(["import!"]);
