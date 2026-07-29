@@ -781,7 +781,7 @@
        (FuzzInvalid InvalidRunState (State $bad))))))
 
 (= (_fuzz-failure-signature $tag)
-   (_fuzz-atom-key Alpha (PropertyFailure $tag)))
+   (_fuzz-atom-key AlphaReplay (PropertyFailure $tag)))
 
 (= (_fuzz-failed
      $property-id
@@ -1099,6 +1099,110 @@
            (_fuzz-run-statistics $next))
          (FuzzContinue GenerationDiscard $next))))
 
+(= (_fuzz-run-edge-with-valid-key
+     $key
+     $value
+     $tree
+     $raw-index
+     $remaining
+     $seen
+     $property-id
+     $generator
+     $property
+     $quantifier
+     $config
+     $state)
+   (if (is-member $key $seen)
+       (_fuzz-run-edges
+         (+ $raw-index 1)
+         (- $remaining 1)
+         $seen
+         $property-id
+         $generator
+         $property
+         $quantifier
+         $config
+         $state)
+       (let* (($attempted
+                (_fuzz-state-attempt Edge $state))
+              ($case
+                (_fuzz-evaluate-property
+                  $property
+                  $quantifier
+                  $value
+                  (_fuzz-config-get CaseSteps $config)
+                  (_fuzz-config-get CaseDepth $config)
+                  (_fuzz-config-get
+                    EffectPolicy
+                    $config)))
+              ($handled
+                (_fuzz-handle-case
+                  $property-id
+                  $generator
+                  $property
+                  $quantifier
+                  Edge
+                  $raw-index
+                  (Edge (Index $raw-index))
+                  (_fuzz-config-get MaxSize $config)
+                  $value
+                  $tree
+                  $case
+                  $config
+                  $attempted
+                  Count)))
+         (switch $handled
+           (((FuzzContinue $status $next-state)
+             (_fuzz-run-edges
+               (+ $raw-index 1)
+               (- $remaining 1)
+               (append
+                 $seen
+                 (cons-atom $key ()))
+               $property-id
+               $generator
+               $property
+               $quantifier
+               $config
+               $next-state))
+            ($result $result))))))
+
+(= (_fuzz-run-edge-with-key
+     $key
+     $value
+     $tree
+     $raw-index
+     $remaining
+     $seen
+     $property-id
+     $generator
+     $property
+     $quantifier
+     $config
+     $state)
+   (switch $key
+     (((FuzzKernelError $code $details)
+       (FuzzInvalid
+         NonReplayableEdgeDecision
+         (Property $property-id)
+         (Phase Edge)
+         (ErrorCode $code)
+         $details))
+      ($valid
+       (_fuzz-run-edge-with-valid-key
+         $valid
+         $value
+         $tree
+         $raw-index
+         $remaining
+         $seen
+         $property-id
+         $generator
+         $property
+         $quantifier
+         $config
+         $state)))))
+
 (= (_fuzz-run-edges
      $raw-index
      $remaining
@@ -1126,61 +1230,20 @@
                (_fuzz-config-get MaxSize $config))
          (switch $generated
            (((FuzzSample $value $driver $tree)
-             (let $key (_fuzz-atom-key Exact $tree)
-               (if (is-member $key $seen)
-                   (_fuzz-run-edges
-                     (+ $raw-index 1)
-                     (- $remaining 1)
-                     $seen
-                     $property-id
-                     $generator
-                     $property
-                     $quantifier
-                     $config
-                     $state)
-                   (let* (($attempted
-                            (_fuzz-state-attempt Edge $state))
-                          ($case
-                            (_fuzz-evaluate-property
-                              $property
-                              $quantifier
-                              $value
-                              (_fuzz-config-get CaseSteps $config)
-                              (_fuzz-config-get CaseDepth $config)
-                              (_fuzz-config-get
-                                EffectPolicy
-                                $config)))
-                          ($handled
-                            (_fuzz-handle-case
-                              $property-id
-                              $generator
-                              $property
-                              $quantifier
-                              Edge
-                              $raw-index
-                              (Edge (Index $raw-index))
-                              (_fuzz-config-get MaxSize $config)
-                              $value
-                              $tree
-                              $case
-                              $config
-                              $attempted
-                              Count)))
-                     (switch $handled
-                       (((FuzzContinue $status $next-state)
-                         (_fuzz-run-edges
-                           (+ $raw-index 1)
-                           (- $remaining 1)
-                           (append
-                             $seen
-                             (cons-atom $key ()))
-                           $property-id
-                           $generator
-                           $property
-                           $quantifier
-                           $config
-                           $next-state))
-                        ($result $result)))))))
+             (let $key (_fuzz-atom-key Replay $tree)
+               (_fuzz-run-edge-with-key
+                 $key
+                 $value
+                 $tree
+                 $raw-index
+                 $remaining
+                 $seen
+                 $property-id
+                 $generator
+                 $property
+                 $quantifier
+                 $config
+                 $state)))
             ((FuzzGenerationDiscard $reason $driver $tree)
              (let* (($attempted
                       (_fuzz-state-attempt Edge $state))

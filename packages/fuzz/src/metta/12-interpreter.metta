@@ -78,6 +78,231 @@
         ($bad
          (_fuzz-generation-error MalformedBooleanChoice (Value $bad)))))))
 
+(= (_fuzz-float-range-from-value
+     $lower-index
+     $upper-index
+     $index
+     $next-driver
+     $decision
+     $value)
+   (switch $value
+     (((FuzzKernelError $code $operation $detail)
+       (_fuzz-generation-error
+         KernelError
+         (OperationResult $value)))
+      ($float
+       (let $children (cons-atom $decision ())
+         (FuzzSample
+           $float
+           $next-driver
+           (Decision
+             FloatRange
+             (Indices $lower-index $upper-index)
+             (Index $index)
+             $children)))))))
+
+(= (_fuzz-float-range-sample
+     $lower-index
+     $upper-index
+     $origin-index
+     $choice)
+   (switch $choice
+     (((DriverChoice $index $next-driver $decision)
+       (_fuzz-float-range-from-value
+         $lower-index
+         $upper-index
+         $index
+         $next-driver
+         $decision
+         (_fuzz-float64-from-index $index)))
+      ((FuzzGenerationError $code $details) $choice)
+      ($bad
+       (_fuzz-generation-error
+         MalformedFloatChoice
+         (Value $bad))))))
+
+(= (_fuzz-generate-float-range
+     $lower-index
+     $upper-index
+     $origin-index
+     $driver)
+   (switch $driver
+     (((FuzzDriver Edge $index)
+       (let* (($a
+                (_fuzz-edge-candidates
+                  $lower-index
+                  $upper-index
+                  $origin-index))
+              ($b
+                (_fuzz-edge-add
+                  -2
+                  $lower-index
+                  $upper-index
+                  $a))
+              ($c
+                (_fuzz-edge-add
+                  -4503599627370496
+                  $lower-index
+                  $upper-index
+                  $b))
+              ($d
+                (_fuzz-edge-add
+                  -4503599627370497
+                  $lower-index
+                  $upper-index
+                  $c))
+              ($e
+                (_fuzz-edge-add
+                  4503599627370495
+                  $lower-index
+                  $upper-index
+                  $d))
+              ($f
+                (_fuzz-edge-add
+                  4503599627370496
+                  $lower-index
+                  $upper-index
+                  $e))
+              ($g
+                (_fuzz-edge-add
+                  -4607182418800017409
+                  $lower-index
+                  $upper-index
+                  $f))
+              ($candidates
+                (_fuzz-edge-add
+                  4607182418800017408
+                  $lower-index
+                  $upper-index
+                  $g))
+              ($position (% $index (length $candidates)))
+              ($selected
+                (index-atom $candidates $position)))
+         (_fuzz-float-range-sample
+           $lower-index
+           $upper-index
+           $origin-index
+           (DriverChoice
+             $selected
+             (FuzzDriver Edge (+ $index 1))
+             (_fuzz-int-decision
+               $lower-index
+               $upper-index
+               $origin-index
+               $selected)))))
+      ($other
+       (_fuzz-float-range-sample
+         $lower-index
+         $upper-index
+         $origin-index
+         (_fuzz-driver-int
+           $other
+           $lower-index
+           $upper-index
+           $origin-index))))))
+
+(= (_fuzz-float-bit-edge-pairs)
+   ((0 0)
+    (2147483648 0)
+    (1072693248 0)
+    (3220176896 0)
+    (0 1)
+    (2147483648 1)
+    (2146435071 4294967295)
+    (4293918719 4294967295)
+    (2146435072 0)
+    (4293918720 0)
+    (2146959360 0)
+    (4294443008 0)
+    (2146435072 1)
+    (4293918720 1)
+    (2146959360 23)
+    (4294443008 23)
+    (1048576 0)
+    (2148532224 0)
+    (1048575 4294967295)
+    (2148532223 4294967295)))
+
+(= (_fuzz-float-bits-sample
+     $high
+     $low
+     $next-driver
+     $high-decision
+     $low-decision)
+   (let $value (_fuzz-float64-from-bits $high $low)
+     (switch $value
+       (((FuzzKernelError $code $operation $detail)
+         (_fuzz-generation-error
+           KernelError
+           (OperationResult $value)))
+        ($float
+         (FuzzSample
+           $float
+           $next-driver
+           (Decision
+             FloatBits
+             (Format IEEE754Binary64)
+             (Bits $high $low)
+             (_fuzz-two-children
+               $high-decision
+               $low-decision))))))))
+
+(= (_fuzz-generate-float-bits-edge $index)
+   (let* (($pairs (_fuzz-float-bit-edge-pairs))
+          ($position (% $index (length $pairs)))
+          ($pair (index-atom $pairs $position)))
+     (switch $pair
+       ((($high $low)
+         (_fuzz-float-bits-sample
+           $high
+           $low
+           (FuzzDriver Edge (+ $index 2))
+           (_fuzz-int-decision 0 4294967295 0 $high)
+           (_fuzz-int-decision 0 4294967295 0 $low)))
+        ($bad
+         (_fuzz-generation-error
+           MalformedFloatEdge
+           (Value $bad)))))))
+
+(= (_fuzz-generate-float-bits-from-low
+     (DriverChoice $high $after-high $high-decision)
+     $low-choice)
+   (switch $low-choice
+     (((DriverChoice $low $next-driver $low-decision)
+       (_fuzz-float-bits-sample
+         $high
+         $low
+         $next-driver
+         $high-decision
+         $low-decision))
+      ((FuzzGenerationError $code $details) $low-choice)
+      ($bad
+       (_fuzz-generation-error
+         MalformedFloatLowWordChoice
+         (Value $bad))))))
+
+(= (_fuzz-generate-float-bits $driver)
+   (switch $driver
+     (((FuzzDriver Edge $index)
+       (_fuzz-generate-float-bits-edge $index))
+      ($other
+       (let $high-choice
+             (_fuzz-driver-int $other 0 4294967295 0)
+         (switch $high-choice
+           (((DriverChoice $high $after-high $high-decision)
+             (_fuzz-generate-float-bits-from-low
+               $high-choice
+               (_fuzz-driver-int
+                 $after-high
+                 0
+                 4294967295
+                 0)))
+            ((FuzzGenerationError $code $details) $high-choice)
+            ($bad
+             (_fuzz-generation-error
+               MalformedFloatHighWordChoice
+               (Value $bad))))))))))
+
 (= (_fuzz-generate-element $values $driver)
    (let* (($count (length $values))
           ($choice (_fuzz-driver-int $driver 0 (- $count 1) 0)))
@@ -590,6 +815,14 @@
                $lower
                $upper
                $origin)))
+          ((GenFloatRange $lower-index $upper-index $origin-index)
+           (_fuzz-generate-float-range
+             $lower-index
+             $upper-index
+             $origin-index
+             $driver))
+          ((GenFloatBits)
+           (_fuzz-generate-float-bits $driver))
           ((GenElement $values)
            (_fuzz-generate-element $values $driver))
           ((GenFrequency $entries $total)
@@ -689,7 +922,7 @@
      $cursor
      $result)
    (if (== $remaining ())
-       (if (== $expected-tree $actual-tree)
+       (if (_fuzz-replay-equal $expected-tree $actual-tree)
            $result
            (_fuzz-generation-error
              ReplayMismatch

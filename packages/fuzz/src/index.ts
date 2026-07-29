@@ -19,4 +19,10 @@ export function registerFuzz(): void {
 registerFuzz();
 
 export { FUZZ_MODULE_SRC };
-export { FUZZ_ATOM_KEY_ALGORITHM, FUZZ_RNG_ALGORITHM } from "./kernel.js";
+export {
+  FUZZ_ALPHA_REPLAY_KEY_ALGORITHM,
+  FUZZ_ATOM_CODEC_VERSION,
+  FUZZ_ATOM_KEY_ALGORITHM,
+  FUZZ_REPLAY_KEY_ALGORITHM,
+  FUZZ_RNG_ALGORITHM,
+} from "./kernel.js";

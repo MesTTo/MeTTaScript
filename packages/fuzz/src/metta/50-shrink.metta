@@ -559,7 +559,7 @@
       ($bad ()))))
 
 (= (_fuzz-deduplicate-trees $trees)
-   (_fuzz-deduplicate-exact $trees))
+   (_fuzz-deduplicate-replay $trees))
 
 (= (_fuzz-built-in-root-candidates $decision)
    (let $collections

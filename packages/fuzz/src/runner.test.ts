@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   expr,
   gint,
+  gnd,
   registerBuiltinGroundedOperation,
   sym,
   type GroundFn,
@@ -37,6 +38,12 @@ registerBuiltinGroundedOperation(
   postShrinkFlakyPropertyResult,
   "Pure",
 );
+
+const externalValue: GroundFn = () => ({
+  tag: "ok",
+  results: [gnd({ g: "ext", kind: "fuzz-test", id: "opaque-fuzz-value" })],
+});
+registerBuiltinGroundedOperation("_fuzz-test-external-value", externalValue, "Pure");
 
 describe("MeTTa fuzz runner", () => {
   it("normalizes option-based configuration and rejects invalid options", () => {
@@ -226,10 +233,12 @@ describe("MeTTa fuzz runner", () => {
     expect(first).toContain("(FailureTag TooLarge)");
     expect(first).toContain("(OriginalValue ");
     expect(first).toContain("(OriginalDecision (Decision Int ");
-    expect(first).toContain('(FailureSignature "mettascript-atom-key-v1;');
+    expect(first).toContain('(FailureSignature "mettascript-alpha-replay-key-v1;');
     expect(first).toContain(
-      "(FuzzReplay (Format 1) (Origin (Random (Rng xorshift128plus-v1) (Seed 19) (Case 0) (Size 0)))",
+      "(FuzzReplay (Format 2) (Origin (Random (Rng xorshift128plus-v1) (Seed 19) (Case 0) (Size 0)))",
     );
+    expect(first).toContain("(EncodedDecisionTree (FuzzEncodedAtom 1 ");
+    expect(first).toContain("(EncodedValue (FuzzEncodedAtom 1 ");
   });
 
   it("shrinks the first generated failure and reports a replayable local minimum", () => {
@@ -261,8 +270,119 @@ describe("MeTTa fuzz runner", () => {
     expect(result).toContain(
       "(Shrink (Order mettascript-shrink-v1) (Status LocallyMinimal) (Reason None) (Attempts 9) (Accepted 5) (LocallyMinimalUnder (Order mettascript-shrink-v1)))",
     );
-    expect(result).toContain("(Replay (FuzzReplay (Format 1) (Origin (Edge (Index 1)))");
+    expect(result).toContain("(Replay (FuzzReplay (Format 2) (Origin (Edge (Index 1)))");
     expect(result).toContain("(ConcreteValue 6)");
+  });
+
+  it("keeps NaN failures stable and records their exact payload", () => {
+    const result = printed(`
+      (: fail-nan (-> Atom FuzzProperty))
+      (= (fail-nan $value)
+         (fuzz-fail SawNaN (Value $value)))
+      !(let $nan (_fuzz-float64-from-bits 2146959360 23)
+        (fuzz-check
+          nan-replay
+          (gen-const $nan)
+          fail-nan
+          (fuzz-config
+            (Runs 1)
+            (MaxShrinks 1)
+            (EdgeCases 0))))
+    `)[1]![0]!;
+
+    expect(result).toMatch(/^\(FuzzFailed \(Property nan-replay\)/);
+    expect(result).not.toContain("FuzzFlaky");
+    expect(result).toContain("(ConcreteValue NaN)");
+    expect(result).toContain("(EncodedValue (FuzzEncodedAtom 1 (Float64Bits 2146959360 23)))");
+  });
+
+  it("keeps alpha-equivalent failure tags while distinguishing NaN payloads", () => {
+    expect(
+      printed(`
+        !(let* (
+          ($first (_fuzz-float64-from-bits 2146959360 23))
+          ($second (_fuzz-float64-from-bits 2146959360 24))
+          ($first-signature
+            (_fuzz-failure-signature (Saw $x $first)))
+          ($renamed-signature
+            (_fuzz-failure-signature (Saw $renamed $first)))
+          ($second-signature
+            (_fuzz-failure-signature (Saw $x $second))))
+          (FailureSignatureIdentity
+            (== $first-signature $renamed-signature)
+            (== $first-signature $second-signature)))
+      `)[1],
+    ).toEqual(["(FailureSignatureIdentity True False)"]);
+  });
+
+  it("reports nonreplayable failures without misclassifying them as flaky", () => {
+    const results = printed(`
+      (: always-fails (-> Atom FuzzProperty))
+      (= (always-fails $value)
+         (fuzz-fail Failed (Value $value)))
+      (= (to-external $value)
+         (_fuzz-test-external-value))
+      (= (DriveCustom ExternalTree () $driver $size)
+         (let $external (_fuzz-test-external-value)
+           (FuzzSample
+             stable
+             $driver
+             (Decision Const (Opaque $external) (Value stable) ()))))
+      (: external-observation (-> Atom FuzzProperty))
+      (= (external-observation $value)
+         (fuzz-fail Failed
+           (Observed (_fuzz-test-external-value))))
+      !(fuzz-check
+        external-generator
+        (gen-const (_fuzz-test-external-value))
+        always-fails
+        (fuzz-config (Runs 1) (EdgeCases 0) (MaxShrinks 1)))
+      !(fuzz-check
+        external-value
+        (gen-map to-external (gen-const input))
+        always-fails
+        (fuzz-config (Runs 1) (EdgeCases 0) (MaxShrinks 1)))
+      !(fuzz-check
+        external-decision
+        (gen-custom ExternalTree ())
+        always-fails
+        (fuzz-config (Runs 1) (EdgeCases 0) (MaxShrinks 1)))
+      !(fuzz-check
+        external-observation
+        (gen-const input)
+        external-observation
+        (fuzz-config (Runs 1) (EdgeCases 0) (MaxShrinks 1)))
+    `).slice(1);
+
+    const stages = ["Generator", "ConcreteValue", "DecisionTree", "PropertyObservation"];
+    expect(results).toHaveLength(stages.length);
+    for (const [index, stage] of stages.entries()) {
+      const result = results[index]![0]!;
+      expect(result).toMatch(/^\(FuzzFailed /);
+      expect(result).not.toContain("FuzzFlaky");
+      expect(result).toContain(
+        `(Replay (FuzzReplayUnavailable (Stage ${stage}) (Error NonReplayableGroundedValue ExternalGrounded)))`,
+      );
+      expect(result).toContain(
+        `(Reason (ReplayUnavailable (Stage ${stage}) (Error NonReplayableGroundedValue ExternalGrounded)))`,
+      );
+    }
+  });
+
+  it("rejects a nonreplayable edge decision before deduplication", () => {
+    expect(
+      printed(`
+        (: passes (-> Atom FuzzProperty))
+        (= (passes $value) (fuzz-pass))
+        !(fuzz-check
+          external-edge
+          (gen-const (_fuzz-test-external-value))
+          passes
+          (fuzz-config (Runs 1) (EdgeCases 1)))
+      `)[1],
+    ).toEqual([
+      "(FuzzInvalid NonReplayableEdgeDecision (Property external-edge) (Phase Edge) (ErrorCode NonReplayableGroundedValue) ExternalGrounded)",
+    ]);
   });
 
   it("preserves the failure tag by default and can accept any failure", () => {

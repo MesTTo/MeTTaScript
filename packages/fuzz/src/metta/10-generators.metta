@@ -39,6 +39,40 @@
        0
        (if (> $lower 0) $lower $upper)))
 
+(= (_fuzz-default-float-origin $lower-index $upper-index)
+   (_fuzz-default-int-origin $lower-index $upper-index))
+
+(= (_fuzz-validated-float-index $parameter $value)
+   (let $indexed (_fuzz-float64-index $value)
+     (switch $indexed
+       (((Float64Index $index)
+         (if (and
+               (<= -9218868437227405312 $index)
+               (<= $index 9218868437227405311))
+             (ValidatedFloatIndex $index)
+             (_fuzz-generation-error
+               NonFiniteFloatBound
+               (Parameter $parameter)
+               (Value $value))))
+        ((FuzzKernelError InvalidFloat $operation ExpectedFloat)
+         (_fuzz-generation-error
+           ExpectedFloat
+           (Parameter $parameter)
+           (Value $value)))
+        ((FuzzKernelError InvalidFloat $operation NaNHasNoOrderedIndex)
+         (_fuzz-generation-error
+           NaNFloatBound
+           (Parameter $parameter)
+           (Value $value)))
+        ((FuzzKernelError $code $details)
+         (_fuzz-generation-error
+           KernelError
+           (OperationResult $indexed)))
+        ($bad
+         (_fuzz-generation-error
+           MalformedFloatIndex
+           (OperationResult $bad)))))))
+
 (= (gen-const $value)
    (GenConst $value))
 
@@ -75,6 +109,61 @@
 (: _fuzz-sized-int-generator (-> Number %Undefined%))
 (= (_fuzz-sized-int-generator $size)
    (gen-int (- 0 $size) $size))
+
+(= (gen-float)
+   (GenFloatRange
+     -9218868437227405312
+     9218868437227405311
+     0))
+
+(= (_fuzz-float-range-from-upper
+     $lower
+     $upper
+     $lower-index
+     $upper-result)
+   (switch $upper-result
+     (((FuzzGenerationError $code $details) $upper-result)
+      ((ValidatedFloatIndex $upper-index)
+       (if (<= $lower-index $upper-index)
+           (GenFloatRange
+             $lower-index
+             $upper-index
+             (_fuzz-default-float-origin
+               $lower-index
+               $upper-index))
+           (_fuzz-generation-error
+             InvalidFloatBounds
+             (Bounds $lower $upper))))
+      ($bad
+       (_fuzz-generation-error
+         MalformedFloatIndex
+         (OperationResult $bad))))))
+
+(= (_fuzz-float-range-from-lower
+     $lower
+     $upper
+     $lower-result)
+   (switch $lower-result
+     (((FuzzGenerationError $code $details) $lower-result)
+      ((ValidatedFloatIndex $lower-index)
+       (_fuzz-float-range-from-upper
+         $lower
+         $upper
+         $lower-index
+         (_fuzz-validated-float-index UpperBound $upper)))
+      ($bad
+       (_fuzz-generation-error
+         MalformedFloatIndex
+         (OperationResult $bad))))))
+
+(= (gen-float-range $lower $upper)
+   (_fuzz-float-range-from-lower
+     $lower
+     $upper
+     (_fuzz-validated-float-index LowerBound $lower)))
+
+(= (gen-float-bits)
+   (GenFloatBits))
 
 (= (gen-element $values)
    (if (> (length $values) 0)

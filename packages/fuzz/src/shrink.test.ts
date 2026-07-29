@@ -58,6 +58,42 @@ describe("MeTTa fuzz shrink relation", () => {
     expect(firstRight).toBeGreaterThan(firstLeft);
   });
 
+  it("shrinks float decisions through their integer trace while preserving replay identity", () => {
+    const candidates = printed(`
+      !(_fuzz-shrink-candidates
+         (Decision FloatRange (Indices -1 1) (Index 1)
+           ((Decision Int (Bounds -1 1) (Origin 0) (Value 1) ()))))
+      !(_fuzz-shrink-replay
+         (gen-float-range -0.0 0.0)
+         (Decision FloatRange (Indices -1 0) (Index -1)
+           ((Decision Int (Bounds -1 0) (Origin 0) (Value -1) ())))
+         1)
+    `).slice(1);
+
+    expect(candidates[0]![0]).toContain(
+      "(Decision FloatRange (Indices -1 1) (Index 1) ((Decision Int (Bounds -1 1) (Origin 0) (Value 0) ())))",
+    );
+    expect(candidates[0]![0]).toContain(
+      "(Decision FloatRange (Indices -1 1) (Index 1) ((Decision Int (Bounds -1 1) (Origin 0) (Value -1) ())))",
+    );
+    expect(candidates[1]![0]).toContain(
+      "(FuzzShrinkReplay -0.0 (Decision FloatRange (Indices -1 0) (Index -1)",
+    );
+  });
+
+  it("deduplicates NaN-bearing decision trees by replay payload", () => {
+    expect(
+      printed(`
+        !(let $nan (_fuzz-float64-from-bits 2146959360 23)
+          (_fuzz-deduplicate-trees
+            ((Decision Const () (Value $nan) ())
+             (Decision Const () (Value $nan) ()))))
+      `)[1],
+    ).toEqual([
+      "((Decision Const () (Value NaN) ()))",
+    ]);
+  });
+
   it("appends validated custom shrink choices after built-in passes", () => {
     expect(
       printed(`

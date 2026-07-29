@@ -75,10 +75,10 @@
         $actual-tree
         $actual-case)
        (and
-         (== $expected-value $actual-value)
+         (_fuzz-replay-equal $expected-value $actual-value)
          (and
-           (== $expected-tree $actual-tree)
-           (==
+           (_fuzz-replay-equal $expected-tree $actual-tree)
+           (_fuzz-replay-equal
              (_fuzz-case-observation $expected-case)
              (_fuzz-case-observation $actual-case)))))
       ($bad False))))
@@ -159,7 +159,7 @@
 (= (_fuzz-shrink-add-visited $tree $visited)
    (let $combined
          (append $visited (cons-atom $tree ()))
-     (_fuzz-deduplicate-exact $combined)))
+     (_fuzz-deduplicate-replay $combined)))
 
 (= (_fuzz-shrink-finish
      $status
@@ -266,7 +266,7 @@
        $attempts
        $improvements
        $visited))
-   (let $seen (_fuzz-exact-member $candidate $visited)
+   (let $seen (_fuzz-replay-member $candidate $visited)
      (_fuzz-shrink-consider-seen
        $seen
        $candidate
@@ -395,7 +395,7 @@
      $progress
      $previously-visited)
    (let $seen
-         (_fuzz-exact-member
+         (_fuzz-replay-member
            $actual-tree
            $previously-visited)
      (_fuzz-shrink-consider-actual-seen
@@ -543,13 +543,37 @@
      $decision
      $value)
    (let $generator-key
-         (_fuzz-atom-key Exact $generator)
-     (FuzzReplay
-       (Format 1)
-       (Origin $origin)
-       (GeneratorKey $generator-key)
-       (DecisionTree $decision)
-       (ConcreteValue $value))))
+         (_fuzz-atom-key Replay $generator)
+     (switch $generator-key
+       (((FuzzKernelError $code $details)
+         (FuzzReplayUnavailable
+           (Stage Generator)
+           (Error $code $details)))
+        ($key
+         (let $encoded-decision
+               (_fuzz-encode-atom $decision)
+           (switch $encoded-decision
+             (((FuzzKernelError $code $details)
+               (FuzzReplayUnavailable
+                 (Stage DecisionTree)
+                 (Error $code $details)))
+              ($decision-codec
+               (let $encoded-value
+                     (_fuzz-encode-atom $value)
+                 (switch $encoded-value
+                   (((FuzzKernelError $code $details)
+                     (FuzzReplayUnavailable
+                       (Stage ConcreteValue)
+                       (Error $code $details)))
+                    ($value-codec
+                     (FuzzReplay
+                       (Format 2)
+                       (Origin $origin)
+                       (GeneratorKey $key)
+                       (DecisionTree $decision)
+                       (EncodedDecisionTree $decision-codec)
+                       (ConcreteValue $value)
+                       (EncodedValue $value-codec)))))))))))))))
 
 (= (_fuzz-build-failure
      (FuzzFailureContext
@@ -620,11 +644,21 @@
      (SmallestAnnotations $smallest-annotations)
      (PropertyResults $smallest-results)
      (Replay
-       (_fuzz-replay-record
+       (_fuzz-failure-replay-record
          $generator
          $origin
          $smallest-decision
-         $smallest-value))
+         $smallest-value
+         (FuzzCaseResult
+           Fail
+           $smallest-tag
+           $smallest-details
+           $smallest-labels
+           $smallest-collected
+           $smallest-coverage
+           $smallest-annotations
+           (Results $smallest-results)
+           $smallest-steps)))
      (Shrink
        (Order mettascript-shrink-v1)
        (Status $status)
@@ -673,6 +707,128 @@
        (Attempts $attempts)
        (Accepted $accepted))
      (_fuzz-run-statistics $state)))
+
+(= (_fuzz-failure-replay-record
+     $generator
+     $origin
+     $decision
+     $value
+     $case)
+   (let $record
+         (_fuzz-replay-record
+           $generator
+           $origin
+           $decision
+           $value)
+     (switch $record
+       (((FuzzReplayUnavailable $stage $error) $record)
+        ($available
+         (let $encoded-observation
+               (_fuzz-encode-atom
+                 (_fuzz-case-observation $case))
+           (switch $encoded-observation
+             (((FuzzKernelError $code $details)
+              (FuzzReplayUnavailable
+                 (Stage PropertyObservation)
+                 (Error $code $details)))
+              ($encoded $record)))))))))
+
+(= (_fuzz-failure-replayability
+     $generator
+     $origin
+     $decision
+     $value
+     $case)
+   (let $record
+         (_fuzz-failure-replay-record
+           $generator
+           $origin
+           $decision
+           $value
+           $case)
+     (switch $record
+       (((FuzzReplayUnavailable $stage $error) $record)
+        ($available (FuzzReplayReady))))))
+
+(= (_fuzz-failure-target
+     (FuzzFailureContext
+       $property-id
+       $generator
+       $property
+       $quantifier
+       $phase
+       $case-index
+       $origin
+       $size
+       $value
+       $decision
+       $case
+       $config
+       $state
+       $signature))
+   (FuzzShrinkTarget $value $decision $case))
+
+(= (_fuzz-start-stability-check
+     (FuzzFailureContext
+       $property-id
+       $generator
+       $property
+       $quantifier
+       $phase
+       $case-index
+       $origin
+       $size
+       $value
+       $decision
+       $case
+       $config
+       $state
+       $signature))
+   (let $stability
+         (_fuzz-stability-check
+           PreShrink
+           $generator
+           $property
+           $quantifier
+           $value
+           $decision
+           $case
+           $size
+           $config)
+     (_fuzz-after-pre-stability
+       $stability
+       (FuzzFailureContext
+         $property-id
+         $generator
+         $property
+         $quantifier
+         $phase
+         $case-index
+         $origin
+         $size
+         $value
+         $decision
+         $case
+         $config
+         $state
+         $signature))))
+
+(= (_fuzz-start-replayability
+     (FuzzReplayUnavailable $stage $error)
+     $context)
+   (_fuzz-build-failure
+     $context
+     (_fuzz-failure-target $context)
+     (FuzzShrinkSummary
+       Disabled
+       (ReplayUnavailable $stage $error)
+       0
+       0)))
+
+(= (_fuzz-start-replayability
+     (FuzzReplayReady)
+     $context)
+   (_fuzz-start-stability-check $context))
 
 (= (_fuzz-start-failure-processing
      (FuzzFailureContext
@@ -760,34 +916,28 @@
                    MaxShrinksZero
                    0
                    0))
-               (let $stability
-                     (_fuzz-stability-check
-                       PreShrink
-                       $generator
-                       $property
-                       $quantifier
-                       $value
-                       $decision
-                       $case
-                       $size
-                       $config)
-                 (_fuzz-after-pre-stability
-                   $stability
-                   (FuzzFailureContext
-                     $property-id
-                     $generator
-                     $property
-                     $quantifier
-                     $phase
-                     $case-index
-                     $origin
-                     $size
-                     $value
-                     $decision
-                     $case
-                     $config
-                     $state
-                     $signature)))))))
+               (_fuzz-start-replayability
+                 (_fuzz-failure-replayability
+                   $generator
+                   $origin
+                   $decision
+                   $value
+                   $case)
+                 (FuzzFailureContext
+                   $property-id
+                   $generator
+                   $property
+                   $quantifier
+                   $phase
+                   $case-index
+                   $origin
+                   $size
+                   $value
+                   $decision
+                   $case
+                   $config
+                   $state
+                   $signature))))))
 
 (= (_fuzz-after-pre-stability
      (FuzzStable $first $second)

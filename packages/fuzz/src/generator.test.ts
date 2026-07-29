@@ -61,6 +61,140 @@ describe("MeTTa fuzz generators", () => {
     ]);
   });
 
+  it("validates finite float bounds by exact IEEE-754 order", () => {
+    expect(
+      printed(`
+        !(gen-float)
+        !(gen-float-range -0.0 0.0)
+        !(gen-float-range 0.0 -0.0)
+        !(gen-float-range 1 2.0)
+        !(gen-float-range
+          (_fuzz-float64-from-bits 2146959360 23)
+          2.0)
+        !(gen-float-range
+          (_fuzz-float64-from-bits 2146435072 0)
+          2.0)
+      `).slice(1),
+    ).toEqual([
+      ["(GenFloatRange -9218868437227405312 9218868437227405311 0)"],
+      ["(GenFloatRange -1 0 0)"],
+      ["(FuzzGenerationError InvalidFloatBounds (Details (Bounds 0.0 -0.0)))"],
+      ["(FuzzGenerationError ExpectedFloat (Details (Parameter LowerBound) (Value 1)))"],
+      ["(FuzzGenerationError NaNFloatBound (Details (Parameter LowerBound) (Value NaN)))"],
+      [
+        "(FuzzGenerationError NonFiniteFloatBound (Details (Parameter LowerBound) (Value Infinity)))",
+      ],
+    ]);
+  });
+
+  it("enumerates both signed zeros in their IEEE-754 order", () => {
+    const results = printed(`
+      !(fuzz-generate
+        (gen-float-range -0.0 0.0)
+        (fuzz-exhaustive-driver-limit 2)
+        1)
+    `)[1]!;
+    expect(results).toHaveLength(2);
+    expect(results[0]).toContain(
+      "(FuzzSample -0.0 ",
+    );
+    expect(results[0]).toContain("(Decision Int (Bounds -1 0) (Origin 0) (Value -1) ())");
+    expect(results[1]).toContain(
+      "(FuzzSample 0.0 ",
+    );
+    expect(results[1]).toContain("(Decision Int (Bounds -1 0) (Origin 0) (Value 0) ())");
+  });
+
+  it("covers declared IEEE-754 edge payloads for the full-bit generator", () => {
+    const expected = [
+      [0, 0],
+      [2147483648, 0],
+      [1072693248, 0],
+      [3220176896, 0],
+      [0, 1],
+      [2147483648, 1],
+      [2146435071, 4294967295],
+      [4293918719, 4294967295],
+      [2146435072, 0],
+      [4293918720, 0],
+      [2146959360, 0],
+      [4294443008, 0],
+      [2146435072, 1],
+      [4293918720, 1],
+      [2146959360, 23],
+      [4294443008, 23],
+      [1048576, 0],
+      [2148532224, 0],
+      [1048575, 4294967295],
+      [2148532223, 4294967295],
+    ];
+    const queries = expected
+      .map(
+        (_, index) => `
+          !(let (FuzzSample $value $driver $tree)
+                (fuzz-generate-edge (gen-float-bits) ${index} 1)
+            (_fuzz-float64-bits $value))`,
+      )
+      .join("\n");
+    const results = printed(queries).slice(1);
+    expect(results).toEqual(
+      expected.map(([high, low]) => [`(Float64Bits ${high} ${low})`]),
+    );
+  });
+
+  it("covers ordered finite-float boundaries before random generation", () => {
+    const expected = [
+      [0, 0],
+      [4293918719, 4294967295],
+      [2146435071, 4294967295],
+      [2147483648, 0],
+      [0, 1],
+      [2147483648, 1],
+      [2148532223, 4294967295],
+      [2148532224, 0],
+      [1048575, 4294967295],
+      [1048576, 0],
+      [3220176896, 0],
+      [1072693248, 0],
+    ];
+    const queries = expected
+      .map(
+        (_, index) => `
+          !(let (FuzzSample $value $driver $tree)
+                (fuzz-generate-edge (gen-float) ${index} 1)
+            (_fuzz-float64-bits $value))`,
+      )
+      .join("\n");
+    const results = printed(queries).slice(1);
+    expect(results).toEqual(
+      expected.map(([high, low]) => [`(Float64Bits ${high} ${low})`]),
+    );
+  });
+
+  it("replays arbitrary full-bit floats through integer decisions", () => {
+    expect(
+      printed(`
+        !(let $generated
+              (fuzz-generate-bytes
+                (gen-float-bits)
+                (127 248 0 0 0 0 0 23)
+                1)
+          (switch $generated
+            (((FuzzSample $value $driver $tree)
+              (let $replayed
+                    (fuzz-replay (gen-float-bits) $tree 1)
+                (switch $replayed
+                  (((FuzzSample $replay-value $replay-driver $replay-tree)
+                    (FloatReplay
+                      (_fuzz-replay-equal $value $replay-value)
+                      (_fuzz-replay-equal $tree $replay-tree)
+                      (_fuzz-float64-bits $replay-value)))
+                   ($bad $bad)))))
+             ($bad $bad))))
+      `)[1],
+    ).toEqual(["(FloatReplay True True (Float64Bits 2146959360 23))"]);
+  });
+
   it("enumerates the Cartesian decision domain in stable order", () => {
     const results = printed(
       "!(fuzz-generate (gen-tuple ((gen-int 0 1) (gen-bool))) (fuzz-exhaustive-driver) 2)",
@@ -213,6 +347,44 @@ describe("MeTTa fuzz generators", () => {
     `)[1];
 
     expect(result).toEqual(["(ReplayIdentity True True)"]);
+  });
+
+  it("replays signed zero and NaN payloads without using language equality", () => {
+    expect(
+      printed(`
+        !(let $negative-zero (_fuzz-float64-from-bits 2147483648 0)
+          (let $generated
+               (fuzz-generate-random (gen-const $negative-zero) 7 1)
+            (switch $generated
+              (((FuzzSample $value $driver $tree)
+                (let $replayed (fuzz-replay (gen-const $negative-zero) $tree 1)
+                  (switch $replayed
+                    (((FuzzSample $replay-value $replay-driver $replay-tree)
+                      (ReplayFloat
+                        (_fuzz-replay-equal $value $replay-value)
+                        (_fuzz-replay-equal $tree $replay-tree)
+                        (_fuzz-float64-bits $replay-value)))
+                     ($bad $bad)))))
+               ($bad $bad)))))
+        !(let $nan (_fuzz-float64-from-bits 2146959360 23)
+          (let $generated
+               (fuzz-generate-random (gen-const $nan) 7 1)
+            (switch $generated
+              (((FuzzSample $value $driver $tree)
+                (let $replayed (fuzz-replay (gen-const $nan) $tree 1)
+                  (switch $replayed
+                    (((FuzzSample $replay-value $replay-driver $replay-tree)
+                      (ReplayFloat
+                        (_fuzz-replay-equal $value $replay-value)
+                        (_fuzz-replay-equal $tree $replay-tree)
+                        (_fuzz-float64-bits $replay-value)))
+                     ($bad $bad)))))
+               ($bad $bad)))))
+      `).slice(1),
+    ).toEqual([
+      ["(ReplayFloat True True (Float64Bits 2147483648 0))"],
+      ["(ReplayFloat True True (Float64Bits 2146959360 23))"],
+    ]);
   });
 
   it("repairs missing and dependency-invalidated shrink decisions", () => {
