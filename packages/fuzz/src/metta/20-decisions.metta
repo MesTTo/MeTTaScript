@@ -2,39 +2,32 @@
 ;
 ; SPDX-License-Identifier: MIT
 
-(= (_fuzz-decision-leaves-many $children $accumulator)
-   (if (== $children ())
-       $accumulator
-       (let* ((($child $tail) (decons-atom $children))
-              ($leaves (_fuzz-decision-leaves $child)))
-         (switch $leaves
-           (((FuzzGenerationError $code $details) $leaves)
-            ($valid
-             (_fuzz-decision-leaves-many
-               $tail
-               (append $accumulator $valid))))))))
-
-(= (_fuzz-decision-leaves $decision)
-   (switch $decision
-     (((Decision Int $bounds $origin $selection ())
-       (cons-atom $decision ()))
-      ((Decision $kind $metadata $selection $children)
-       (_fuzz-decision-leaves-many $children ()))
-      ($bad
-       (_fuzz-generation-error MalformedDecisionTree (Decision $bad))))))
-
+; Decision trees flatten to their Int leaves kernel-side (one linear pass); the drivers
+; only consume the resulting leaf list.
 (= (fuzz-replay-driver $decision-tree)
-   (let $leaves (_fuzz-decision-leaves $decision-tree)
-     (switch $leaves
-       (((FuzzGenerationError $code $details) $leaves)
-        ($valid
-         (FuzzDriver Replay (ReplayState $valid 0)))))))
+   (let $leaves (_fuzz-decision-leaves-op $decision-tree)
+     (unify $leaves
+       (FuzzDecisionLeaves $flat)
+       (FuzzDriver Replay (ReplayState $flat 0))
+       (unify $leaves
+         (FuzzGenerationError $code $details)
+         $leaves
+         (unify $leaves
+           $bad
+           (_fuzz-generation-error MalformedDecisionTree (Decision $bad))
+           Empty)))))
 
 (= (_fuzz-shrink-replay-driver $decision-tree)
-   (let $leaves (_fuzz-decision-leaves $decision-tree)
-     (switch $leaves
-       (((FuzzGenerationError $code $details) $leaves)
-        ($valid
-         (FuzzDriver
-           ShrinkReplay
-           (ShrinkReplayState $valid 0)))))))
+   (let $leaves (_fuzz-decision-leaves-op $decision-tree)
+     (unify $leaves
+       (FuzzDecisionLeaves $flat)
+       (FuzzDriver
+         ShrinkReplay
+         (ShrinkReplayState $flat 0))
+       (unify $leaves
+         (FuzzGenerationError $code $details)
+         $leaves
+         (unify $leaves
+           $bad
+           (_fuzz-generation-error MalformedDecisionTree (Decision $bad))
+           Empty)))))

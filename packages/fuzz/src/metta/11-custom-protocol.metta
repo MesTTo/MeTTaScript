@@ -101,13 +101,45 @@
      $name
      $arguments
      $sample)
-   (_fuzz-wrap-sample
-     Custom
-     (CustomGenerator
-       (Name $name)
-       (Arguments $arguments))
-     ()
-     $sample))
+   (switch $sample
+     (((FuzzSample $value $next-driver $tree)
+       (let $wrapped-tree
+             (Decision
+               Custom
+               (CustomGenerator
+                 (Name $name)
+                 (Arguments $arguments))
+               ()
+               ($tree))
+         (if (== $name _fuzz-grammar)
+             (_fuzz-materialize-grammar-sample
+               $value
+               $next-driver
+               $wrapped-tree)
+             (FuzzSample
+               $value
+               $next-driver
+               $wrapped-tree))))
+      ((FuzzGenerationDiscard
+         $reason
+         $next-driver
+         $tree)
+       (FuzzGenerationDiscard
+         $reason
+         $next-driver
+         (Decision
+           Custom
+           (CustomGenerator
+             (Name $name)
+             (Arguments $arguments))
+           ()
+           ($tree))))
+      ((FuzzGenerationError $code $details)
+       $sample)
+      ($bad
+       (_fuzz-generation-error
+         MalformedGenerationResult
+         (Value $bad))))))
 
 (= (_fuzz-drive-custom-results
      $name
@@ -186,6 +218,60 @@
        $arguments
        $mode
        $results)))
+
+(= (_fuzz-drive-custom-validated
+     $name
+     $arguments
+     $driver
+     $size
+     $mode)
+   (let $original
+         (_fuzz-drive-custom
+           $name
+           $arguments
+           $driver
+           $size
+           $mode)
+     (if (== $mode Replay)
+         $original
+         (let $request
+               (_fuzz-custom-replay-tree
+                 $original
+                 $mode)
+           (switch $request
+             (((CustomReplayTree $tree)
+               (let $replayed
+                     (fuzz-replay
+                       (GenCustom $name $arguments)
+                       $tree
+                       $size)
+                 (if (_fuzz-custom-replay-equal
+                       $original
+                       $replayed)
+                     $original
+                     (_fuzz-generation-error
+                       CustomReplayMismatch
+                       (Name $name)
+                       (Mode $mode)
+                       (Original $original)
+                       (Replay $replayed)))))
+              ((CustomReplaySkip)
+               $original)
+              ((CustomReplayProtocolError
+                 $code
+                 $details)
+               (FuzzGenerationError
+                 $code
+                 $details))
+              ((FuzzKernelError $code $details)
+               (_fuzz-generation-error
+                 KernelError
+                 (OperationResult $request)))
+              ($bad-request
+               (_fuzz-generation-error
+                 MalformedCustomReplayRequest
+                 (Name $name)
+                 (Value $bad-request)))))))))
 
 ; An explicit edge hook supplies inner derivation trees. Each tree is replayed through DriveCustom before
 ; it can become a sample, so an edge hook cannot bypass the generator or invent an incompatible value.
@@ -321,7 +407,7 @@
                $index)
          (switch $edge
            (((NoCustomEdgeChoices)
-             (_fuzz-drive-custom
+             (_fuzz-drive-custom-validated
                $name
                $arguments
                $driver
@@ -329,7 +415,7 @@
                $mode))
             ($available $available)))))
       ($other
-       (_fuzz-drive-custom
+       (_fuzz-drive-custom-validated
          $name
          $arguments
          $driver

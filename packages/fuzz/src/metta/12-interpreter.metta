@@ -236,16 +236,18 @@
            KernelError
            (OperationResult $value)))
         ($float
-         (FuzzSample
-           $float
-           $next-driver
-           (Decision
-             FloatBits
-             (Format IEEE754Binary64)
-             (Bits $high $low)
-             (_fuzz-two-children
-               $high-decision
-               $low-decision))))))))
+         (let $children
+              (_fuzz-two-children
+                $high-decision
+                $low-decision)
+           (FuzzSample
+             $float
+             $next-driver
+             (Decision
+               FloatBits
+               (Format IEEE754Binary64)
+               (Bits $high $low)
+               $children))))))))
 
 (= (_fuzz-generate-float-bits-edge $index)
    (let* (($pairs (_fuzz-float-bit-edge-pairs))

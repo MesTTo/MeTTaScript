@@ -43,6 +43,33 @@ const FUZZ_OPERATIONS = [
   "_fuzz-exact-member",
   "_fuzz-replay-member",
   "_fuzz-make-variable",
+  "_fuzz-variable-marker",
+  "_fuzz-contains-variable-marker",
+  "_fuzz-materialize-grammar-sample",
+  "_fuzz-expression-append",
+  "_fuzz-expression-concat",
+  "_fuzz-grammar-summary-alternatives",
+  "_fuzz-grammar-summary-replace",
+  "_fuzz-grammar-alternatives-add",
+  "_fuzz-grammar-productions-for-target",
+  "_fuzz-grammar-template-requirements-op",
+  "_fuzz-grammar-eligible-productions-op",
+  "_fuzz-grammar-machine-op",
+  "_fuzz-grammar-dependents-of",
+  "_fuzz-index-stack",
+  "_fuzz-grammar-template-plan",
+  "_fuzz-stack-take",
+  "_fuzz-stack-push-all",
+  "_fuzz-expression-view",
+  "_fuzz-grammar-field-expressions",
+  "_fuzz-grammar-replace-fields",
+  "_fuzz-grammar-index-references",
+  "_fuzz-grammar-template-profile",
+  "_fuzz-grammar-validation-plan",
+  "_fuzz-grammar-template-reference-plan",
+  "_fuzz-atom-ground",
+  "_fuzz-custom-replay-tree",
+  "_fuzz-custom-replay-equal",
   "_fuzz-float64-bits",
   "_fuzz-float64-from-bits",
   "_fuzz-float64-index",
@@ -131,6 +158,10 @@ describe("deterministic fuzz kernel", () => {
         !(get-type _fuzz-exact-member)
         !(get-type _fuzz-replay-member)
         !(get-type _fuzz-make-variable)
+        !(get-type _fuzz-variable-marker)
+        !(get-type _fuzz-materialize-grammar-sample)
+        !(get-type _fuzz-grammar-summary-alternatives)
+        !(get-type _fuzz-grammar-summary-replace)
         !(get-type _fuzz-float64-bits)
         !(get-type _fuzz-float64-from-bits)
         !(get-type _fuzz-float64-index)
@@ -150,6 +181,10 @@ describe("deterministic fuzz kernel", () => {
       ["(-> Atom Expression Atom)"],
       ["(-> Atom Expression Atom)"],
       ["(-> Number Variable)"],
+      ["(-> Number Atom)"],
+      ["(-> Atom Atom Atom %Undefined%)"],
+      ["(-> Expression Atom Atom)"],
+      ["(-> Expression Atom Expression Atom)"],
       ["(-> Number Atom)"],
       ["(-> Number Number Number)"],
       ["(-> Number Atom)"],
@@ -224,6 +259,7 @@ describe("deterministic fuzz kernel", () => {
         !(_fuzz-exact-member a nope)
         !(_fuzz-replay-member a nope)
         !(_fuzz-make-variable -1)
+        !(_fuzz-variable-marker -1)
         !(_fuzz-float64-bits 1)
         !(_fuzz-float64-from-bits -1 0)
         !(_fuzz-float64-from-bits 0 4294967296)
@@ -242,9 +278,7 @@ describe("deterministic fuzz kernel", () => {
       ["(FuzzKernelError InvalidRngState (Operation _fuzz-draw-int) ExpectedFuzzRng)"],
       ["(FuzzKernelError InvalidRngState (Operation _fuzz-draw-int) ExpectedFuzzRng)"],
       ["(FuzzKernelError InvalidBounds (Operation _fuzz-draw-int) LowerExceedsUpper)"],
-      [
-        "(FuzzKernelError InvalidKeyMode (Operation _fuzz-atom-key) ExpectedKeyMode)",
-      ],
+      ["(FuzzKernelError InvalidKeyMode (Operation _fuzz-atom-key) ExpectedKeyMode)"],
       [
         "(FuzzKernelError InvalidDeduplicationInput (Operation _fuzz-deduplicate-exact) ExpectedExpression)",
       ],
@@ -259,6 +293,9 @@ describe("deterministic fuzz kernel", () => {
       ],
       [
         "(FuzzKernelError InvalidVariableIndex (Operation _fuzz-make-variable) ExpectedNonNegativeInteger)",
+      ],
+      [
+        "(FuzzKernelError InvalidVariableIndex (Operation _fuzz-variable-marker) ExpectedNonNegativeInteger)",
       ],
       ["(FuzzKernelError InvalidFloat (Operation _fuzz-float64-bits) ExpectedFloat)"],
       [
@@ -310,21 +347,12 @@ describe("deterministic fuzz kernel", () => {
     const secondNaN = floatFromBits(0x7ff8000000000018n);
     const left = expr([sym("tag"), variable("x"), variable("x"), firstNaN]);
     const renamed = expr([sym("tag"), variable("other"), variable("other"), firstNaN]);
-    const differentVariables = expr([
-      sym("tag"),
-      variable("left"),
-      variable("right"),
-      firstNaN,
-    ]);
+    const differentVariables = expr([sym("tag"), variable("left"), variable("right"), firstNaN]);
     const differentPayload = expr([sym("tag"), variable("x"), variable("x"), secondNaN]);
 
     expect(atomKey("AlphaReplay", left)).toBe(atomKey("AlphaReplay", renamed));
-    expect(atomKey("AlphaReplay", left)).not.toBe(
-      atomKey("AlphaReplay", differentVariables),
-    );
-    expect(atomKey("AlphaReplay", left)).not.toBe(
-      atomKey("AlphaReplay", differentPayload),
-    );
+    expect(atomKey("AlphaReplay", left)).not.toBe(atomKey("AlphaReplay", differentVariables));
+    expect(atomKey("AlphaReplay", left)).not.toBe(atomKey("AlphaReplay", differentPayload));
   });
 
   it("bit-casts every IEEE-754 payload and indexes every non-NaN value", () => {
@@ -503,7 +531,7 @@ describe("deterministic fuzz kernel", () => {
   it("rejects every malformed atom-codec payload with a stable data error", () => {
     const decode = operation("_fuzz-decode-atom");
     const cases = [
-      ["(FuzzEncodedAtom 2 (Symbol \"a\"))", "ExpectedVersion1"],
+      ['(FuzzEncodedAtom 2 (Symbol "a"))', "ExpectedVersion1"],
       ["(FuzzEncodedAtom 1 malformed)", "MalformedPayload"],
       ["(FuzzEncodedAtom 1 (Symbol 1))", "MalformedSymbol"],
       ["(FuzzEncodedAtom 1 (Variable 1))", "MalformedVariable"],
@@ -576,15 +604,7 @@ describe("deterministic fuzz kernel", () => {
     const firstNaN = floatFromBits(0x7ff8000000000017n);
     const sameNaN = floatFromBits(0x7ff8000000000017n);
     const secondNaN = floatFromBits(0x7ff8000000000018n);
-    const values = expr([
-      firstNaN,
-      sameNaN,
-      secondNaN,
-      gfloat(-0),
-      gfloat(0),
-      gint(3),
-      gfloat(3),
-    ]);
+    const values = expr([firstNaN, sameNaN, secondNaN, gfloat(-0), gfloat(0), gint(3), gfloat(3)]);
     const deduplicated = oneResult(operation("_fuzz-deduplicate-replay"), [values]);
     expect(deduplicated.kind).toBe("expr");
     if (deduplicated.kind === "expr") expect(deduplicated.items).toHaveLength(6);
@@ -606,6 +626,117 @@ describe("deterministic fuzz kernel", () => {
       }),
       { numRuns: 1_000 },
     );
+  });
+
+  it("compares custom replay values alpha-canonically and trees exactly", () => {
+    const equal = operation("_fuzz-custom-replay-equal");
+    const sample = (value: Atom, tree: Atom): Atom =>
+      expr([sym("FuzzSample"), value, expr([sym("FuzzDriver"), sym("Edge"), gint(1)]), tree]);
+
+    const original = sample(
+      expr([sym("pair"), variable("left"), variable("left")]),
+      expr([sym("Decision"), sym("Same")]),
+    );
+    const renamed = sample(
+      expr([sym("pair"), variable("right"), variable("right")]),
+      expr([sym("Decision"), sym("Same")]),
+    );
+    const differentAliasing = sample(
+      expr([sym("pair"), variable("right"), variable("other")]),
+      expr([sym("Decision"), sym("Same")]),
+    );
+    const differentTree = sample(
+      expr([sym("pair"), variable("right"), variable("right")]),
+      expr([sym("Decision"), sym("Changed")]),
+    );
+
+    expect(format(oneResult(equal, [original, renamed]))).toBe("True");
+    expect(format(oneResult(equal, [original, differentAliasing]))).toBe("False");
+    expect(format(oneResult(equal, [original, differentTree]))).toBe("False");
+  });
+
+  it("updates grammar requirement summaries as immutable indexed data", () => {
+    const alternatives = operation("_fuzz-grammar-summary-alternatives");
+    const replace = operation("_fuzz-grammar-summary-replace");
+    const target = expr([sym("NT"), sym("A")]);
+    const closed = expr([sym("GrammarRequirementAlternative"), expr([])]);
+    const open = expr([
+      sym("GrammarRequirementAlternative"),
+      expr([expr([sym("quote"), sym("Name")])]),
+    ]);
+
+    const first = oneResult(replace, [expr([]), target, expr([closed])]);
+    const second = oneResult(replace, [first, sym("Other"), expr([open])]);
+    const replaced = oneResult(replace, [second, target, expr([open])]);
+
+    expect(format(oneResult(alternatives, [first, target]))).toBe(
+      "(GrammarRequirementAlternatives ((GrammarRequirementAlternative ())))",
+    );
+    expect(format(oneResult(alternatives, [first, sym("Missing")]))).toBe(
+      "(GrammarRequirementAlternatives ())",
+    );
+    expect(format(oneResult(alternatives, [replaced, target]))).toBe(
+      "(GrammarRequirementAlternatives ((GrammarRequirementAlternative ((quote Name)))))",
+    );
+    expect(format(replaced).match(/GrammarRequirementSummaryEntry/g)).toHaveLength(2);
+    expect(format(oneResult(alternatives, [expr([sym("malformed")]), target]))).toBe(
+      "(FuzzKernelError InvalidGrammarRequirementSummary (Operation _fuzz-grammar-summary-alternatives) MalformedEntry)",
+    );
+  });
+
+  it("analyzes deep and wide templates without host recursion", () => {
+    const requirements = operation("_fuzz-grammar-template-requirements-op");
+    const closed = "(GrammarRequirementAlternatives ((GrammarRequirementAlternative ())))";
+
+    let deep: Atom = expr([sym("Use"), sym("Name")]);
+    for (let depth = 0; depth < 20_000; depth += 1) deep = expr([sym("Bind"), sym("Name"), deep]);
+    expect(format(oneResult(requirements, [deep, expr([])]))).toBe(closed);
+
+    const wide = expr([sym("tuple"), ...Array.from({ length: 20_000 }, () => sym("leaf"))]);
+    expect(format(oneResult(requirements, [wide, expr([])]))).toBe(closed);
+  });
+
+  it("builds stack-safe validation plans while preserving opaque marker payloads", () => {
+    const plan = operation("_fuzz-grammar-validation-plan");
+    const planned = oneResult(plan, [
+      expr([
+        sym("tuple"),
+        expr([sym("Literal"), expr([sym("Ref"), sym("Missing")])]),
+        expr([sym("Field"), sym("generator")]),
+        expr([
+          sym("Scoped"),
+          expr([expr([sym("Binding"), sym("Name"), gint(7)])]),
+          expr([sym("Use"), sym("Name")]),
+        ]),
+        expr([sym("Field")]),
+      ]),
+    ]);
+
+    expect(format(planned)).toBe(
+      "(GrammarValidationPlan ((GrammarValidationField (quote generator)) (GrammarValidationScopedEnter (quote ((Binding Name 7)))) (GrammarValidationScopedExit) (GrammarValidationMalformed (quote (Field)))))",
+    );
+
+    const wide = expr([sym("tuple"), ...Array.from({ length: 20_000 }, () => sym("leaf"))]);
+    expect(format(oneResult(plan, [wide]))).toBe("(GrammarValidationPlan ())");
+  });
+
+  it("extracts only semantic grammar references in source order", () => {
+    const references = operation("_fuzz-grammar-template-reference-plan");
+    const planned = oneResult(references, [
+      expr([
+        sym("tuple"),
+        expr([sym("Literal"), expr([sym("Ref"), sym("Opaque")])]),
+        expr([sym("Ref"), sym("First")]),
+        expr([
+          sym("Bind"),
+          expr([sym("Ref"), sym("OpaqueSort")]),
+          expr([sym("_FuzzGrammarRef"), sym("Second"), gint(0), gint(1)]),
+        ]),
+        expr([sym("Field"), expr([sym("gen-const"), expr([sym("Ref"), sym("Opaque")])])]),
+      ]),
+    ]);
+
+    expect(format(planned)).toBe("(GrammarReferenceTargets ((quote First) (quote Second)))");
   });
 
   it("reports grounded values that cannot be reconstructed from replay data", () => {
@@ -650,5 +781,246 @@ describe("deterministic fuzz kernel", () => {
     expect(format(oneResult(make, [gint(0)]))).toBe("$fuzz-0");
     expect(format(oneResult(make, [gint(9_007_199_254_740_993n)]))).toBe("$fuzz-9007199254740993");
     expect(atomEq(oneResult(make, [gint(17)]), oneResult(make, [gint(17)]))).toBe(true);
+  });
+
+  it("materializes generated variable markers in a complete sample", () => {
+    const marker = operation("_fuzz-variable-marker");
+    const containsMarker = operation("_fuzz-contains-variable-marker");
+    const materialize = operation("_fuzz-materialize-grammar-sample");
+    const sample = oneResult(materialize, [
+      expr([
+        sym("lambda"),
+        expr([
+          oneResult(marker, [gint(0)]),
+          expr([sym("pair"), oneResult(marker, [gint(0)]), oneResult(marker, [gint(1)])]),
+        ]),
+      ]),
+      sym("driver"),
+      sym("tree"),
+    ]);
+
+    expect(format(sample)).toBe(
+      "(FuzzSample (lambda ($fuzz-0 (pair $fuzz-0 $fuzz-1))) driver tree)",
+    );
+    expect(
+      format(
+        oneResult(materialize, [
+          gnd(
+            { g: "ext", kind: "mettascript-fuzz-variable-marker", id: "01" },
+            sym("FuzzVariableMarker"),
+          ),
+          sym("driver"),
+          sym("tree"),
+        ]),
+      ),
+    ).toBe(
+      "(FuzzKernelError InvalidVariableMarker (Operation _fuzz-materialize-grammar-sample) ExpectedCanonicalNonNegativeInteger)",
+    );
+
+    let deep: Atom = oneResult(marker, [gint(9)]);
+    for (let depth = 0; depth < 20_000; depth += 1) deep = expr([sym("next"), deep]);
+    const deepSample = oneResult(materialize, [deep, sym("driver"), sym("tree")]);
+    let cursor = (deepSample as Extract<Atom, { readonly kind: "expr" }>).items[1]!;
+    for (let depth = 0; depth < 20_000; depth += 1) {
+      expect(cursor.kind).toBe("expr");
+      cursor = (cursor as Extract<Atom, { readonly kind: "expr" }>).items[1]!;
+    }
+    expect(format(cursor)).toBe("$fuzz-9");
+    expect(format(oneResult(containsMarker, [deep]))).toBe("True");
+    expect(
+      format(
+        oneResult(containsMarker, [
+          expr([sym("safe"), gnd({ g: "ext", kind: "other-marker", id: "9" })]),
+        ]),
+      ),
+    ).toBe("False");
+  });
+});
+
+describe("grammar machine kernel operations", () => {
+  const parsed = (source: string): Atom => {
+    const atom = parse(source, standardTokenizer());
+    if (atom === undefined) throw new Error(`unparseable vector: ${source}`);
+    return atom;
+  };
+  const golden = (
+    name: (typeof FUZZ_OPERATIONS)[number],
+    args: readonly string[],
+    expected: string,
+  ): void => {
+    expect(format(oneResult(operation(name), args.map(parsed)))).toBe(expected);
+  };
+
+  it("adds requirement alternatives with dominance pruning", () => {
+    golden(
+      "_fuzz-grammar-alternatives-add",
+      ["()", "((quote A))"],
+      "(GrammarAlternativesAdd True ((GrammarRequirementAlternative ((quote A)))))",
+    );
+    golden(
+      "_fuzz-grammar-alternatives-add",
+      ["((GrammarRequirementAlternative ()))", "((quote A))"],
+      "(GrammarAlternativesAdd False ((GrammarRequirementAlternative ())))",
+    );
+    golden(
+      "_fuzz-grammar-alternatives-add",
+      ["((GrammarRequirementAlternative ((quote A) (quote B))))", "((quote A))"],
+      "(GrammarAlternativesAdd True ((GrammarRequirementAlternative ((quote A)))))",
+    );
+    golden(
+      "_fuzz-grammar-alternatives-add",
+      ["((GrammarRequirementAlternative ((quote A))))", "((quote B))"],
+      "(GrammarAlternativesAdd True ((GrammarRequirementAlternative ((quote A))) (GrammarRequirementAlternative ((quote B)))))",
+    );
+    golden(
+      "_fuzz-grammar-alternatives-add",
+      ["(broken)", "((quote A))"],
+      "(FuzzKernelError InvalidGrammarRequirementAlternatives (Operation _fuzz-grammar-alternatives-add) MalformedAlternative)",
+    );
+  });
+
+  it("analyzes template requirements in one call", () => {
+    golden(
+      "_fuzz-grammar-template-requirements-op",
+      ["(pair (Literal x) (Field (GenBool)))", "()"],
+      "(GrammarRequirementAlternatives ((GrammarRequirementAlternative ())))",
+    );
+    golden(
+      "_fuzz-grammar-template-requirements-op",
+      ["(pair (Use A) (Use B))", "()"],
+      "(GrammarRequirementAlternatives ((GrammarRequirementAlternative ((quote A) (quote B)))))",
+    );
+    golden(
+      "_fuzz-grammar-template-requirements-op",
+      ["(Bind A (pair (Use A) (Use B)))", "()"],
+      "(GrammarRequirementAlternatives ((GrammarRequirementAlternative ((quote B)))))",
+    );
+    golden(
+      "_fuzz-grammar-template-requirements-op",
+      [
+        "(_FuzzGrammarRef T 0 1)",
+        "((GrammarRequirementSummaryEntry (quote T) ((GrammarRequirementAlternative ((quote S))))))",
+      ],
+      "(GrammarRequirementAlternatives ((GrammarRequirementAlternative ((quote S)))))",
+    );
+  });
+
+  it("answers eligibility in one call", () => {
+    const productions =
+      "((GrammarProduction 0 1 (quote T) (quote (leaf))) (GrammarProduction 1 1 (quote T) (quote (Use S))) (GrammarProduction 2 1 (quote T) (quote (n (_FuzzGrammarRef T 0 1)))))";
+    golden(
+      "_fuzz-grammar-eligible-productions-op",
+      [productions, "(quote T)", "()", "0"],
+      "(EligibleGrammarProductions ((GrammarProduction 0 1 (quote T) (quote (leaf)))))",
+    );
+    golden(
+      "_fuzz-grammar-eligible-productions-op",
+      [productions, "(quote T)", "((GrammarBinding (quote S) 0))", "1"],
+      "(EligibleGrammarProductions ((GrammarProduction 0 1 (quote T) (quote (leaf))) (GrammarProduction 1 1 (quote T) (quote (Use S))) (GrammarProduction 2 1 (quote T) (quote (n (_FuzzGrammarRef T 0 1))))))",
+    );
+  });
+
+  it("runs the grammar machine to done outcomes", () => {
+    const source =
+      "(StaticGrammar (quote G) ((GrammarProduction 0 1 (quote G) (quote (pair (Literal x) (Literal y))))))";
+    golden(
+      "_fuzz-grammar-machine-op",
+      [`(GrammarMachineStart ${source} (quote G) () 0 (WithDriver (FuzzDriver Edge 0) 0))`],
+      "(GrammarMachineDone (GrammarResult (pair x y) (FuzzDriver Edge 1) 0 (Decision GrammarProduction (Target (quote G)) (ProductionIndex 0 0) ((Decision Int (Bounds 0 0) (Origin 0) (Value 0) ()) (Decision GrammarExpression (Arity 3) () ((Decision GrammarLiteral () (Value (quote pair)) ()) (Decision GrammarLiteral () (Value (quote x)) ()) (Decision GrammarLiteral () (Value (quote y)) ())))))))",
+    );
+  });
+
+  it("indexes productions by target", () => {
+    const productions =
+      "((GrammarProduction 0 1 (quote (T 0)) (quote leaf)) (GrammarProduction 1 2 (quote (T 1)) (quote (n (_FuzzGrammarRef (T 0) 0 1)))) (GrammarProduction 2 1 (quote (T 0)) (quote other)))";
+    golden(
+      "_fuzz-grammar-productions-for-target",
+      [productions, "(quote (T 0))"],
+      "(GrammarProductions ((GrammarProduction 0 1 (quote (T 0)) (quote leaf)) (GrammarProduction 2 1 (quote (T 0)) (quote other))))",
+    );
+    golden(
+      "_fuzz-grammar-productions-for-target",
+      [productions, "(quote Missing)"],
+      "(GrammarProductions ())",
+    );
+  });
+
+  it("indexes referencing productions and seeds index stacks", () => {
+    const productions =
+      "((GrammarProduction 0 1 (quote (T 0)) (quote (n (_FuzzGrammarRef (T 1) 0 1)))) (GrammarProduction 1 1 (quote (T 1)) (quote (m (_FuzzGrammarRef (T 1) 0 2) (_FuzzGrammarRef (T 0) 1 2)))) (GrammarProduction 2 1 (quote (T 1)) (quote bottom)))";
+    golden(
+      "_fuzz-grammar-dependents-of",
+      [productions, "(quote (T 1))"],
+      "(GrammarDependents (0 1))",
+    );
+    golden(
+      "_fuzz-grammar-dependents-of",
+      [productions, "(quote (T 0))"],
+      "(GrammarDependents (1))",
+    );
+    golden(
+      "_fuzz-grammar-dependents-of",
+      [productions, "(quote Missing)"],
+      "(GrammarDependents ())",
+    );
+    golden("_fuzz-index-stack", ["3"], "(FuzzStack 0 (FuzzStack 1 (FuzzStack 2 FuzzStackBottom)))");
+    golden("_fuzz-index-stack", ["0"], "FuzzStackBottom");
+  });
+
+  it("compiles templates to postorder instruction plans", () => {
+    golden(
+      "_fuzz-grammar-template-plan",
+      ["(pair (Literal x) (Field (GenBool)))"],
+      "(GrammarTemplatePlan ((GIExprEnter 3) (GILit (quote pair)) (GILit (quote x)) (GIField (GenBool)) (GIExprBuild)))",
+    );
+    golden(
+      "_fuzz-grammar-template-plan",
+      ["(lambda (Bind Name (Use Name)))"],
+      "(GrammarTemplatePlan ((GIExprEnter 2) (GILit (quote lambda)) (GIBind (quote Name) ((GIUse (quote Name)))) (GIExprBuild)))",
+    );
+    golden(
+      "_fuzz-grammar-template-plan",
+      ["(Scoped ((Binding Name 2)) (pair (Use Name) (Fresh Name)))"],
+      "(GrammarTemplatePlan ((GIScoped ((GrammarBinding (quote Name) 2)) 3 (quote ((Binding Name 2))) ((GIExprEnter 3) (GILit (quote pair)) (GIUse (quote Name)) (GIFresh (quote Name)) (GIExprBuild)))))",
+    );
+    golden(
+      "_fuzz-grammar-template-plan",
+      ["(_FuzzGrammarRef (T 4) 1 3)"],
+      "(GrammarTemplatePlan ((GIRef (quote (T 4)) 1 3)))",
+    );
+    golden(
+      "_fuzz-grammar-template-plan",
+      ["()"],
+      "(GrammarTemplatePlan ((GIExprEnter 0) (GIExprBuild)))",
+    );
+    golden("_fuzz-grammar-template-plan", ["leaf"], "(GrammarTemplatePlan ((GILit (quote leaf))))");
+
+    const template = parsed("(pair (Literal x) (Field (GenBool)))");
+    const first = oneResult(operation("_fuzz-grammar-template-plan"), [template]);
+    const second = oneResult(operation("_fuzz-grammar-template-plan"), [template]);
+    expect(second).toBe(first);
+  });
+
+  it("takes machine stack segments in forward order", () => {
+    golden(
+      "_fuzz-stack-take",
+      ["(FuzzStack c (FuzzStack b (FuzzStack a FuzzStackBottom)))", "2"],
+      "(FuzzStackTake (b c) (FuzzStack a FuzzStackBottom))",
+    );
+    golden(
+      "_fuzz-stack-take",
+      ["(FuzzStack a FuzzStackBottom)", "0"],
+      "(FuzzStackTake () (FuzzStack a FuzzStackBottom))",
+    );
+    golden(
+      "_fuzz-stack-take",
+      ["(FuzzStack a FuzzStackBottom)", "2"],
+      "(FuzzKernelError InvalidStackTake (Operation _fuzz-stack-take) StackUnderflow)",
+    );
+    golden(
+      "_fuzz-stack-push-all",
+      ["FuzzStackBottom", "(a b c)"],
+      "(FuzzStack a (FuzzStack b (FuzzStack c FuzzStackBottom)))",
+    );
   });
 });
