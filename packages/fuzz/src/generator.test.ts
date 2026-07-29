@@ -284,6 +284,15 @@ describe("MeTTa fuzz generators", () => {
 
   it("shares weighted and custom generation across drivers", () => {
     const out = printed(`
+      (= (CustomCapabilities Tagged ($tag))
+         (FuzzCustomCapabilities
+           (Modes
+             (Random
+              Edge
+              Replay
+              ShrinkReplay
+              Exhaustive
+              Bytes))))
       (= (DriveCustom Tagged ($tag) $driver $size)
          (fuzz-generate
            (gen-map add-tag (gen-int 2 2))
@@ -307,8 +316,109 @@ describe("MeTTa fuzz generators", () => {
     ]);
     expect(out[2]![0]).toMatch(/^\(FuzzSample \(tagged 2\) /);
     expect(out[3]).toEqual([
-      "(FuzzGenerationError MissingCustomGenerator (Details (Name Missing)))",
+      "(FuzzGenerationError MissingCustomCapabilities (Details (Name Missing) (Arguments ())))",
     ]);
+  });
+
+  it("validates custom capabilities and deterministic callback cardinality", () => {
+    expect(
+      printed(`
+        (= (CustomCapabilities RandomOnly ())
+           (FuzzCustomCapabilities
+             (Modes (Random Replay ShrinkReplay))))
+        (= (DriveCustom RandomOnly () $driver $size)
+           (fuzz-generate
+             (gen-const value)
+             $driver
+             $size))
+        (= (CustomCapabilities BadModes ())
+           (FuzzCustomCapabilities
+             (Modes (Random Replay Replay ShrinkReplay))))
+        (= (CustomCapabilities Ambiguous ())
+           (FuzzCustomCapabilities
+             (Modes (Random Replay ShrinkReplay))))
+        (= (CustomCapabilities Ambiguous ())
+           (FuzzCustomCapabilities
+             (Modes (Edge Replay ShrinkReplay))))
+        (= (CustomCapabilities Many ())
+           (FuzzCustomCapabilities
+             (Modes (Random Replay ShrinkReplay))))
+        (= (DriveCustom Many () $driver $size)
+           (fuzz-generate
+             (gen-const first)
+             $driver
+             $size))
+        (= (DriveCustom Many () $driver $size)
+           (fuzz-generate
+             (gen-const second)
+             $driver
+             $size))
+        !(fuzz-generate-edge
+           (gen-custom RandomOnly ())
+           0
+           1)
+        !(fuzz-generate-random
+           (gen-custom BadModes ())
+           0
+           1)
+        !(fuzz-generate-random
+           (gen-custom Ambiguous ())
+           0
+           1)
+        !(fuzz-generate-random
+           (gen-custom Many ())
+           0
+           1)
+      `).slice(1),
+    ).toEqual([
+      [
+        "(FuzzGenerationError UnsupportedCustomDriver (Details (Name RandomOnly) (Mode Edge)))",
+      ],
+      [
+        "(FuzzGenerationError InvalidCustomCapabilities (Details (Name BadModes) (Modes (Random Replay Replay ShrinkReplay))))",
+      ],
+      [
+        "(FuzzGenerationError AmbiguousCustomCapabilities (Details (Name Ambiguous) (Results ((FuzzCustomCapabilities (Modes (Random Replay ShrinkReplay))) (FuzzCustomCapabilities (Modes (Edge Replay ShrinkReplay)))))))",
+      ],
+      [
+        "(FuzzGenerationError AmbiguousCustomGenerator (Details (Name Many) (Mode Random) (Results ((FuzzSample first (FuzzDriver Random (FuzzRng xorshift128plus-v1 -1 -1 0 0)) (Decision Const () (Value first) ())) (FuzzSample second (FuzzDriver Random (FuzzRng xorshift128plus-v1 -1 -1 0 0)) (Decision Const () (Value second) ()))))))",
+      ],
+    ]);
+  });
+
+  it("replays declared custom edge choices before accepting them", () => {
+    const result = printed(`
+      (= (CustomCapabilities Seven ())
+         (FuzzCustomCapabilities
+           (Modes
+             (Random
+              Edge
+              Replay
+              ShrinkReplay
+              Exhaustive
+              Bytes))))
+      (= (DriveCustom Seven () $driver $size)
+         (fuzz-generate
+           (gen-int 0 10)
+           $driver
+           $size))
+      (= (EdgeChoices Seven () $size)
+         (CustomEdgeChoices
+           ((Decision Int
+              (Bounds 0 10)
+              (Origin 0)
+              (Value 7)
+              ()))))
+      !(fuzz-generate-edge
+         (gen-custom Seven ())
+         0
+         1)
+    `)[1]![0]!;
+
+    expect(result).toMatch(/^\(FuzzSample 7 \(FuzzDriver Edge 1\)/);
+    expect(result).toContain(
+      "(Decision Custom (CustomGenerator (Name Seven) (Arguments ())) () ((Decision Int (Bounds 0 10) (Origin 0) (Value 7) ())))",
+    );
   });
 
   it("accounts for the finite decision product before exhaustive expansion", () => {

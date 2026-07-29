@@ -515,17 +515,19 @@
 
 (= (_fuzz-valid-custom-shrink-candidates
      $results
-     $request
+     $name
+     $arguments
      $candidates)
    (if (== $results ())
        $candidates
        (let* ((($result $tail) (decons-atom $results))
               ($next
                (switch $result
-                 ((($request) $candidates)
-                  ((Decision
-                     $kind
-                     $metadata
+                 (((Decision
+                     Custom
+                     (CustomGenerator
+                       (Name $name)
+                       (Arguments $arguments))
                      $selection
                      $children)
                    (append
@@ -534,7 +536,8 @@
                   ($bad $candidates)))))
          (_fuzz-valid-custom-shrink-candidates
            $tail
-           $request
+           $name
+           $arguments
            $next))))
 
 (= (_fuzz-custom-root-candidates $decision)
@@ -546,15 +549,16 @@
           (Arguments $arguments))
         $selection
         $children)
-       (let* (($request
-                (ShrinkChoices
-                  $name
-                  $arguments
-                  $decision))
-              ($results (collapse $request)))
+       (let $results
+             (collapse
+               (ShrinkChoices
+                 $name
+                 $arguments
+                 $decision))
          (_fuzz-valid-custom-shrink-candidates
            $results
-           $request
+           $name
+           $arguments
            ())))
       ($bad ()))))
 

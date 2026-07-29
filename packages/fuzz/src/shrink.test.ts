@@ -130,9 +130,17 @@ describe("MeTTa fuzz shrink relation", () => {
   it("appends validated custom shrink choices after built-in passes", () => {
     expect(
       printed(`
+        (= (CustomCapabilities Tagged ($tag))
+           (FuzzCustomCapabilities
+             (Modes (Random Edge Replay ShrinkReplay))))
         (= (ShrinkChoices Tagged ($tag) $tree)
            (Decision Custom
              (CustomGenerator (Name Tagged) (Arguments ($tag)))
+             ()
+             ((Decision Int (Bounds 0 3) (Origin 0) (Value 0) ()))))
+        (= (ShrinkChoices Tagged ($tag) $tree)
+           (Decision Custom
+             (CustomGenerator (Name Other) (Arguments ()))
              ()
              ((Decision Int (Bounds 0 3) (Origin 0) (Value 0) ()))))
         !(_fuzz-shrink-candidates

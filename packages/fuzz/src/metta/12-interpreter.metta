@@ -774,26 +774,11 @@
                (Value $bad))))))))
 
 (= (_fuzz-generate-custom $name $arguments $driver $size)
-   (let $results
-         (collapse (DriveCustom $name $arguments $driver $size))
-     (switch $results
-       ((()
-         (_fuzz-generation-error MissingCustomGenerator (Name $name)))
-        (((DriveCustom
-            $seen-name
-            $seen-arguments
-            $seen-driver
-            $seen-size))
-         (_fuzz-generation-error MissingCustomGenerator (Name $name)))
-        ($valid
-         (let $sample (superpose $valid)
-           (_fuzz-wrap-sample
-             Custom
-             (CustomGenerator
-               (Name $name)
-               (Arguments $arguments))
-             ()
-             $sample)))))))
+   (_fuzz-generate-custom-checked
+     $name
+     $arguments
+     $driver
+     $size))
 
 (= (fuzz-generate $generator $driver $size)
    (if (_fuzz-is-integer $size)

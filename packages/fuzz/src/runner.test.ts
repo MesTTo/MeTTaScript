@@ -320,6 +320,9 @@ describe("MeTTa fuzz runner", () => {
       (: always-fails (-> Atom FuzzProperty))
       (= (always-fails $value)
          (fuzz-fail Failed (Value $value)))
+      (= (CustomCapabilities ExternalTree ())
+         (FuzzCustomCapabilities
+           (Modes (Random Replay ShrinkReplay))))
       (= (to-external $value)
          (_fuzz-test-external-value))
       (= (DriveCustom ExternalTree () $driver $size)

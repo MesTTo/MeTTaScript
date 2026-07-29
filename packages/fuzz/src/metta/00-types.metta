@@ -126,4 +126,7 @@
 (: _fuzz-wrap-sample (-> Atom Atom Atom %Undefined% %Undefined%))
 (: _fuzz-two-children (-> Atom Atom Expression))
 (: _fuzz-repeat-generator (-> Atom Number Expression))
+(: CustomCapabilities (-> Atom Expression %Undefined%))
 (: DriveCustom (-> Atom Expression Atom Number %Undefined%))
+(: EdgeChoices (-> Atom Expression Number %Undefined%))
+(: ShrinkChoices (-> Atom Expression Atom %Undefined%))
