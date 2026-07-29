@@ -68,6 +68,33 @@ describe("MeTTa fuzz shrink relation", () => {
          (Decision FloatRange (Indices -1 0) (Index -1)
            ((Decision Int (Bounds -1 0) (Origin 0) (Value -1) ())))
          1)
+      !(_fuzz-shrink-replay
+         (gen-float-range -0.0 0.0)
+         (Decision FloatRange (Indices -1 0) (Index -1)
+           ((Decision Int (Bounds -1 0) (Origin 0) (Value 0) ())))
+         1)
+      !(let $replayed
+          (_fuzz-shrink-replay
+            (gen-float-bits)
+            (Decision FloatBits (Format IEEE754Binary64)
+              (Bits 2146959360 23)
+              ((Decision Int
+                 (Bounds 0 4294967295)
+                 (Origin 0)
+                 (Value 2146959360)
+                 ())
+               (Decision Int
+                 (Bounds 0 4294967295)
+                 (Origin 0)
+                 (Value 24)
+                 ())))
+            1)
+        (switch $replayed
+          (((FuzzShrinkReplay $value $tree)
+            (FloatBitsShrinkReplay
+              (_fuzz-float64-bits $value)
+              $tree))
+           ($bad $bad))))
     `).slice(1);
 
     expect(candidates[0]![0]).toContain(
@@ -79,6 +106,12 @@ describe("MeTTa fuzz shrink relation", () => {
     expect(candidates[1]![0]).toContain(
       "(FuzzShrinkReplay -0.0 (Decision FloatRange (Indices -1 0) (Index -1)",
     );
+    expect(candidates[2]![0]).toContain(
+      "(FuzzShrinkReplay 0.0 (Decision FloatRange (Indices -1 0) (Index 0)",
+    );
+    expect(candidates[3]).toEqual([
+      "(FloatBitsShrinkReplay (Float64Bits 2146959360 24) (Decision FloatBits (Format IEEE754Binary64) (Bits 2146959360 24) ((Decision Int (Bounds 0 4294967295) (Origin 0) (Value 2146959360) ()) (Decision Int (Bounds 0 4294967295) (Origin 0) (Value 24) ()))))",
+    ]);
   });
 
   it("deduplicates NaN-bearing decision trees by replay payload", () => {

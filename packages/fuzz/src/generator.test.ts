@@ -16,6 +16,8 @@ describe("MeTTa fuzz generators", () => {
         !(gen-element ())
         !(gen-frequency ((0 (gen-bool))))
         !(gen-list (gen-bool) 0.5 2)
+        !(gen-symbol-range 0 2)
+        !(gen-syntax-token-range 3 2)
         !(gen-filter (gen-bool) is-even 1.5)
         !(gen-resize 1.5 (gen-bool))
       `),
@@ -27,6 +29,12 @@ describe("MeTTa fuzz generators", () => {
       ["(FuzzGenerationError EmptyElementSet (Details (Values ())))"],
       ["(FuzzGenerationError InvalidFrequencyWeight (Details (Weight 0) (Generator (GenBool))))"],
       ["(FuzzGenerationError ExpectedInteger (Details (Parameter MinimumLength) (Value 0.5)))"],
+      [
+        "(FuzzGenerationError InvalidSymbolLengthBounds (Details (Minimum 0) (Maximum 2)))",
+      ],
+      [
+        "(FuzzGenerationError InvalidTokenLengthBounds (Details (Minimum 3) (Maximum 2)))",
+      ],
       ["(FuzzGenerationError ExpectedInteger (Details (Parameter MaximumAttempts) (Value 1.5)))"],
       ["(FuzzGenerationError ExpectedInteger (Details (Parameter Size) (Value 1.5)))"],
     ]);
@@ -193,6 +201,72 @@ describe("MeTTa fuzz generators", () => {
              ($bad $bad))))
       `)[1],
     ).toEqual(["(FloatReplay True True (Float64Bits 2146959360 23))"]);
+  });
+
+  it("generates explicit character classes, structural strings, and parser-safe symbols", () => {
+    const out = printed(`
+      !(fuzz-generate-edge (gen-char) 0 1)
+      !(fuzz-generate-edge (gen-char-ascii) 1 1)
+      !(fuzz-generate-edge (gen-char-unicode) 1 1)
+      !(fuzz-generate-bytes
+         (gen-string
+           (gen-element (a b))
+           2
+           2)
+         (0 1 0)
+         2)
+      !(fuzz-generate-bytes
+         (gen-symbol-range 3 3)
+         (0 0 1 0)
+         3)
+      !(fuzz-generate-bytes
+         (gen-syntax-token-range 3 3)
+         (0 0 1 2)
+         3)
+    `);
+
+    expect(out[1]![0]).toMatch(/^\(FuzzSample ( |~) /);
+    expect(out[2]![0]).toContain("(FuzzSample  ");
+    expect(out[3]![0]).toContain("(FuzzSample 􏿿 ");
+    expect(out[4]![0]).toContain('(FuzzSample "ba" ');
+    expect(out[5]![0]).toMatch(/^\(FuzzSample [a-z_][A-Za-z0-9_+*/<>=!?-]{2} /);
+    expect(out[6]![0]).toMatch(/^\(FuzzSample "[^()\\";\\s]{3}" /);
+  });
+
+  it("replays and shrinks string and symbol decisions through their source generators", () => {
+    const out = printed(`
+      !(let $generated
+          (fuzz-generate-random
+            (gen-unicode-string 0 8)
+            971
+            8)
+        (switch $generated
+          (((FuzzSample $value $driver $tree)
+            (let $replayed
+                (fuzz-replay
+                  (gen-unicode-string 0 8)
+                  $tree
+                  8)
+              (switch $replayed
+                (((FuzzSample $replay-value $next $replay-tree)
+                  (TextReplay
+                    (_fuzz-replay-equal $value $replay-value)
+                    (_fuzz-replay-equal $tree $replay-tree)))
+                 ($bad $bad)))))
+           ($bad $bad))))
+      !(_fuzz-shrink-replay
+         (gen-symbol-range 1 8)
+         (Decision Map (Function _fuzz-symbol-from-parts) ()
+           ((Decision Tuple (Count 2) ()
+             ((Decision Element (Count 27) (Index 13)
+                ((Decision Int (Bounds 0 26) (Origin 0) (Value 13) ())))
+              (Decision List (Bounds 0 7) (Length 0)
+                ((Decision Int (Bounds 0 4) (Origin 0) (Value 0) ())))))))
+         8)
+    `);
+
+    expect(out[1]).toEqual(["(TextReplay True True)"]);
+    expect(out[2]![0]).toMatch(/^\(FuzzShrinkReplay [a-z_] /);
   });
 
   it("enumerates the Cartesian decision domain in stable order", () => {

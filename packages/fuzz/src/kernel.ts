@@ -44,6 +44,9 @@ const ENCODED_STRING = sym("String");
 const ENCODED_BOOLEAN = sym("Boolean");
 const ENCODED_UNIT = sym("Unit");
 const ENCODED_ERROR = sym("Error");
+const UNICODE_SCALAR_COUNT = 1_112_062n;
+const UNICODE_FIRST_GAP_INDEX = 55_296n;
+const UNICODE_SECOND_GAP_INDEX = 63_486n;
 const MIN_I32 = -0x80000000;
 const MAX_I32 = 0x7fffffff;
 const F64_SIGN_BIT = 1n << 63n;
@@ -291,7 +294,7 @@ const atomKey: GroundFn = (args) => {
     return operationError(
       "InvalidKeyMode",
       "_fuzz-atom-key",
-      "ExpectedExactAlphaReplayOrAlphaReplay",
+      "ExpectedKeyMode",
     );
   const result = structuralAtomKey(args[1]!, mode.name);
   return ok(result.ok ? gstr(result.key) : result.reason);
@@ -410,6 +413,24 @@ const float64OfIndex: GroundFn = (args) => {
   if (value === undefined)
     return operationError("InvalidFloatIndex", "_fuzz-float64-from-index", "OutOfRange");
   return ok(gfloat(value));
+};
+
+function unicodeScalarAt(index: bigint): number | undefined {
+  if (index < 0n || index >= UNICODE_SCALAR_COUNT) return undefined;
+  if (index < UNICODE_FIRST_GAP_INDEX) return Number(index);
+  if (index < UNICODE_SECOND_GAP_INDEX) return Number(index + 2_048n);
+  return Number(index + 2_050n);
+}
+
+const unicodeCharacterAt: GroundFn = (args) => {
+  if (args.length !== 1) return arityError("_fuzz-unicode-character", 1, args.length);
+  const index = integerValue(args[0]!);
+  if (index === undefined)
+    return operationError("InvalidCharacterIndex", "_fuzz-unicode-character", "ExpectedInteger");
+  const scalar = unicodeScalarAt(index);
+  if (scalar === undefined)
+    return operationError("InvalidCharacterIndex", "_fuzz-unicode-character", "OutOfRange");
+  return ok(sym(String.fromCodePoint(scalar)));
 };
 
 function replayGroundEqual(
@@ -693,6 +714,7 @@ const KERNEL_OPERATIONS = [
   ["_fuzz-float64-from-bits", float64OfBits],
   ["_fuzz-float64-index", indexOfFloat64],
   ["_fuzz-float64-from-index", float64OfIndex],
+  ["_fuzz-unicode-character", unicodeCharacterAt],
   ["_fuzz-replay-equal", replayEqual],
   ["_fuzz-encode-atom", encodeAtom],
   ["_fuzz-decode-atom", decodeAtom],

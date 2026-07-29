@@ -165,6 +165,134 @@
 (= (gen-float-bits)
    (GenFloatBits))
 
+(= (_fuzz-character-from-index $index)
+   (_fuzz-unicode-character $index))
+
+(= (_fuzz-characters $characters)
+   (stringToChars $characters))
+
+(= (gen-char)
+   (gen-map
+     _fuzz-character-from-index
+     (gen-int 32 126)))
+
+(= (gen-char-ascii)
+   (gen-map
+     _fuzz-character-from-index
+     (gen-int 0 127)))
+
+(= (gen-char-unicode)
+   (gen-map
+     _fuzz-character-from-index
+     (gen-int 0 1112061)))
+
+(= (_fuzz-characters-to-string $characters)
+   (charsToString $characters))
+
+(= (gen-string $character-generator $minimum $maximum)
+   (gen-map
+     _fuzz-characters-to-string
+     (gen-list
+       $character-generator
+       $minimum
+       $maximum)))
+
+(= (gen-ascii-string $minimum $maximum)
+   (gen-string
+     (gen-char-ascii)
+     $minimum
+     $maximum))
+
+(= (gen-unicode-string $minimum $maximum)
+   (gen-string
+     (gen-char-unicode)
+     $minimum
+     $maximum))
+
+(= (_fuzz-parser-safe-first-characters)
+   (_fuzz-characters
+     "abcdefghijklmnopqrstuvwxyz_"))
+
+(= (_fuzz-parser-safe-rest-characters)
+   (_fuzz-characters
+     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_+-*/<>=!?"))
+
+(= (_fuzz-symbol-from-parts $parts)
+   (switch $parts
+     ((($first $rest)
+       (let $characters (cons-atom $first $rest)
+         (let $name (charsToString $characters)
+           (atom_concat $name))))
+      ($bad
+       (_fuzz-generation-error
+         MalformedSymbolParts
+         (Value $bad))))))
+
+(= (gen-symbol-range $minimum $maximum)
+   (if (_fuzz-is-integer $minimum)
+       (if (_fuzz-is-integer $maximum)
+           (if (and
+                 (<= 1 $minimum)
+                 (<= $minimum $maximum))
+               (gen-map
+                 _fuzz-symbol-from-parts
+                 (gen-tuple
+                   ((gen-element
+                      (_fuzz-parser-safe-first-characters))
+                    (gen-list
+                      (gen-element
+                        (_fuzz-parser-safe-rest-characters))
+                      (- $minimum 1)
+                      (- $maximum 1)))))
+               (_fuzz-generation-error
+                 InvalidSymbolLengthBounds
+                 (Minimum $minimum)
+                 (Maximum $maximum)))
+           (_fuzz-expected-integer
+             MaximumLength
+             $maximum))
+       (_fuzz-expected-integer
+         MinimumLength
+         $minimum)))
+
+(= (_fuzz-symbol-at-size $size)
+   (gen-symbol-range 1 (max 1 $size)))
+
+(= (gen-symbol)
+   (gen-sized _fuzz-symbol-at-size))
+
+(= (_fuzz-syntax-token-characters)
+   (_fuzz-characters
+     "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$!+-*/<>=?.,:@#%^&|~`'[]{}\\"))
+
+(= (gen-syntax-token-range $minimum $maximum)
+   (if (_fuzz-is-integer $minimum)
+       (if (_fuzz-is-integer $maximum)
+           (if (and
+                 (<= 1 $minimum)
+                 (<= $minimum $maximum))
+               (gen-string
+                 (gen-element
+                   (_fuzz-syntax-token-characters))
+                 $minimum
+                 $maximum)
+               (_fuzz-generation-error
+                 InvalidTokenLengthBounds
+                 (Minimum $minimum)
+                 (Maximum $maximum)))
+           (_fuzz-expected-integer
+             MaximumLength
+             $maximum))
+       (_fuzz-expected-integer
+         MinimumLength
+         $minimum)))
+
+(= (_fuzz-syntax-token-at-size $size)
+   (gen-syntax-token-range 1 (max 1 $size)))
+
+(= (gen-syntax-token)
+   (gen-sized _fuzz-syntax-token-at-size))
+
 (= (gen-element $values)
    (if (> (length $values) 0)
        (GenElement $values)

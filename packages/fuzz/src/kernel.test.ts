@@ -47,6 +47,7 @@ const FUZZ_OPERATIONS = [
   "_fuzz-float64-from-bits",
   "_fuzz-float64-index",
   "_fuzz-float64-from-index",
+  "_fuzz-unicode-character",
   "_fuzz-replay-equal",
   "_fuzz-encode-atom",
   "_fuzz-decode-atom",
@@ -134,6 +135,7 @@ describe("deterministic fuzz kernel", () => {
         !(get-type _fuzz-float64-from-bits)
         !(get-type _fuzz-float64-index)
         !(get-type _fuzz-float64-from-index)
+        !(get-type _fuzz-unicode-character)
         !(get-type _fuzz-replay-equal)
         !(get-type _fuzz-encode-atom)
         !(get-type _fuzz-decode-atom)
@@ -152,6 +154,7 @@ describe("deterministic fuzz kernel", () => {
       ["(-> Number Number Number)"],
       ["(-> Number Atom)"],
       ["(-> Number Number)"],
+      ["(-> Number Symbol)"],
       ["(-> Atom Atom Bool)"],
       ["(-> Atom Atom)"],
       ["(-> Atom Atom)"],
@@ -228,6 +231,9 @@ describe("deterministic fuzz kernel", () => {
         !(_fuzz-float64-index (_fuzz-float64-from-bits 2146959360 1))
         !(_fuzz-float64-from-index -9218868437227405314)
         !(_fuzz-float64-from-index 9218868437227405313)
+        !(_fuzz-unicode-character nope)
+        !(_fuzz-unicode-character -1)
+        !(_fuzz-unicode-character 1112062)
         !(_fuzz-decode-atom malformed)
       `),
     ).toEqual([
@@ -237,7 +243,7 @@ describe("deterministic fuzz kernel", () => {
       ["(FuzzKernelError InvalidRngState (Operation _fuzz-draw-int) ExpectedFuzzRng)"],
       ["(FuzzKernelError InvalidBounds (Operation _fuzz-draw-int) LowerExceedsUpper)"],
       [
-        "(FuzzKernelError InvalidKeyMode (Operation _fuzz-atom-key) ExpectedExactAlphaReplayOrAlphaReplay)",
+        "(FuzzKernelError InvalidKeyMode (Operation _fuzz-atom-key) ExpectedKeyMode)",
       ],
       [
         "(FuzzKernelError InvalidDeduplicationInput (Operation _fuzz-deduplicate-exact) ExpectedExpression)",
@@ -265,6 +271,11 @@ describe("deterministic fuzz kernel", () => {
       ["(FuzzKernelError InvalidFloat (Operation _fuzz-float64-index) NaNHasNoOrderedIndex)"],
       ["(FuzzKernelError InvalidFloatIndex (Operation _fuzz-float64-from-index) OutOfRange)"],
       ["(FuzzKernelError InvalidFloatIndex (Operation _fuzz-float64-from-index) OutOfRange)"],
+      [
+        "(FuzzKernelError InvalidCharacterIndex (Operation _fuzz-unicode-character) ExpectedInteger)",
+      ],
+      ["(FuzzKernelError InvalidCharacterIndex (Operation _fuzz-unicode-character) OutOfRange)"],
+      ["(FuzzKernelError InvalidCharacterIndex (Operation _fuzz-unicode-character) OutOfRange)"],
       ["(FuzzKernelError InvalidEncodedAtom (Operation _fuzz-decode-atom) ExpectedVersion1)"],
     ]);
   });
@@ -418,6 +429,31 @@ describe("deterministic fuzz kernel", () => {
     );
   });
 
+  it("maps the compact Unicode domain to scalar values without gaps or surrogates", () => {
+    const character = operation("_fuzz-unicode-character");
+    expect(format(oneResult(character, [gint(0)]))).toBe("\u0000");
+    expect(format(oneResult(character, [gint(55_295)]))).toBe("\ud7ff");
+    expect(format(oneResult(character, [gint(55_296)]))).toBe("\ue000");
+    expect(format(oneResult(character, [gint(63_485)]))).toBe("\ufffd");
+    expect(format(oneResult(character, [gint(63_486)]))).toBe("𐀀");
+    expect(format(oneResult(character, [gint(1_112_061)]))).toBe("􏿿");
+
+    fc.assert(
+      fc.property(fc.integer({ min: 0, max: 1_112_061 }), (index) => {
+        const atom = oneResult(character, [gint(index)]);
+        expect(atom.kind).toBe("sym");
+        if (atom.kind !== "sym") return;
+        const codePoint = atom.name.codePointAt(0);
+        expect(codePoint).toBeDefined();
+        expect(codePoint).not.toBeGreaterThan(0x10ffff);
+        expect(codePoint! < 0xd800 || codePoint! > 0xdfff).toBe(true);
+        expect(codePoint).not.toBe(0xfffe);
+        expect(codePoint).not.toBe(0xffff);
+      }),
+      { numRuns: 2_000 },
+    );
+  });
+
   it("compares replay values by grounded kind and exact float payload", () => {
     const equal = operation("_fuzz-replay-equal");
     const nan = (bits: bigint): Atom => floatFromBits(bits);
@@ -462,6 +498,32 @@ describe("deterministic fuzz kernel", () => {
     expect(reparsed).toBeDefined();
     const decoded = oneResult(operation("_fuzz-decode-atom"), [reparsed!]);
     expect(format(oneResult(operation("_fuzz-replay-equal"), [original, decoded]))).toBe("True");
+  });
+
+  it("rejects every malformed atom-codec payload with a stable data error", () => {
+    const decode = operation("_fuzz-decode-atom");
+    const cases = [
+      ["(FuzzEncodedAtom 2 (Symbol \"a\"))", "ExpectedVersion1"],
+      ["(FuzzEncodedAtom 1 malformed)", "MalformedPayload"],
+      ["(FuzzEncodedAtom 1 (Symbol 1))", "MalformedSymbol"],
+      ["(FuzzEncodedAtom 1 (Variable 1))", "MalformedVariable"],
+      ["(FuzzEncodedAtom 1 (Expression nope))", "MalformedExpression"],
+      ["(FuzzEncodedAtom 1 (Integer 1.0))", "MalformedInteger"],
+      ["(FuzzEncodedAtom 1 (Float64Bits 0 -1))", "MalformedFloat64Bits"],
+      ["(FuzzEncodedAtom 1 (String symbol))", "MalformedString"],
+      ["(FuzzEncodedAtom 1 (Boolean nope))", "MalformedBoolean"],
+      ["(FuzzEncodedAtom 1 (Unit extra))", "MalformedUnit"],
+      ["(FuzzEncodedAtom 1 (Error symbol))", "MalformedError"],
+      ["(FuzzEncodedAtom 1 (Unknown))", "UnknownPayloadTag"],
+    ] as const;
+
+    for (const [source, detail] of cases) {
+      const encoded = parse(source, standardTokenizer());
+      expect(encoded).toBeDefined();
+      expect(format(oneResult(decode, [encoded!]))).toBe(
+        `(FuzzKernelError InvalidEncodedAtom (Operation _fuzz-decode-atom) ${detail})`,
+      );
+    }
   });
 
   it("round-trips arbitrary nested replay atoms through printable codec data", () => {
