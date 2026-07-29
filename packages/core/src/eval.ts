@@ -670,28 +670,134 @@ function exprRuleHeadSyms(varRules: ReadonlyArray<[Atom, Atom]>): ReadonlySet<st
 // the O(n^2) `interpret-tuple` threading below. Soundness rests on the caller's guard that no variable-headed
 // rule exists (those match any head): a term then rewrites only through a defined symbol head, or an
 // expression head whose own head symbol keys an expression-headed rule (`exprHeads`).
-function isInertData(env: MinEnv, w: World, t: Atom, exprHeads: ReadonlySet<string>): boolean {
-  switch (t.kind) {
-    case "var":
-    case "gnd":
-      return true;
-    case "sym":
-      return !isDefinedHead(env, w, t.name);
-    case "expr": {
-      const its = t.items;
-      if (its.length === 0) return true;
-      const h = its[0]!;
-      if (h.kind === "sym") {
-        if (isDefinedHead(env, w, h.name)) return false;
-      } else if (h.kind === "expr" && h.items.length > 0) {
-        const hh = h.items[0]!;
-        if (hh.kind === "sym" && exprHeads.has(hh.name)) return false;
-      }
-      for (let i = 0; i < its.length; i++)
-        if (!isInertData(env, w, its[i]!, exprHeads)) return false;
-      return true;
+//
+// A standard `(quote x)` counts as inert even though `quote` carries the prelude rule: that rule reduces to
+// NotReducible, which the whole-term path filters as no-progress, so a quote is a fixpoint of the tuple
+// threading and its payload is never entered. This matters because quote is the idiom for holding syntax as
+// data — a structure sprinkled with quotes (a grammar, a decision tree) is exactly the kind of large value
+// that must not fall into per-step threading. Guarded by `standardQuoteOnly`: a user-shadowed quote drops
+// the shortcut.
+//
+// The verdict depends on the same rule tables as isNormalForm, and the per-step re-walk of a large stable
+// accumulator is the same cost the normalFormCache removes, so it shares that cache's entry signature.
+const standardQuoteCache = new WeakMap<
+  MinEnv,
+  { selfRuleVersion: number; removedStatic: unknown; res: boolean }
+>();
+
+function standardQuoteOnly(env: MinEnv, w: World): boolean {
+  const cached = standardQuoteCache.get(env);
+  if (
+    cached !== undefined &&
+    cached.selfRuleVersion === w.selfRuleVersion &&
+    cached.removedStatic === w.removedStatic
+  )
+    return cached.res;
+  let res = false;
+  if (!w.selfRules.has("quote")) {
+    const rules = visibleStaticRulesForHead(env, w, "quote");
+    if (rules.length === 1) {
+      const [lhs, rhs] = rules[0]!;
+      res = format(lhs) === "(quote $atom)" && format(rhs) === "NotReducible";
     }
   }
+  standardQuoteCache.set(env, {
+    selfRuleVersion: w.selfRuleVersion,
+    removedStatic: w.removedStatic,
+    res,
+  });
+  return res;
+}
+
+// A head is reducibly defined when an equation or an implementation can actually rewrite it. A bare
+// type signature is not that: a sig-only head is a constructor, whose application either type-checks
+// (and then evaluates to itself, subterms aside) or is pruned/errored by the type layer. Typing
+// constructors is the normal MeTTa idiom, so treating every sig as reducible would deny inertness to
+// exactly the structures programs hold most (typed result and state records).
+function reduciblyDefinedHead(env: MinEnv, w: World, name: string): boolean {
+  return (
+    hasVisibleStaticRuleHead(env, w, name) ||
+    w.selfRules.has(name) ||
+    env.gt.has(name) ||
+    env.agt.has(name) ||
+    IMPURE_OPS.has(name)
+  );
+}
+
+// Inert verdicts also depend on the type tables (a constructor application is inert only while its
+// arguments type-check), so entries carry the space version beside the rule-table signature.
+interface InertEntry extends NormalFormEntry {
+  readonly spaceVersion: number;
+}
+const inertDataCache = new WeakMap<Atom, InertEntry>();
+
+function inertEntry(env: MinEnv, w: World, res: boolean): InertEntry {
+  return { ...normalFormEntry(env, w, res), spaceVersion: w.spaceVersion };
+}
+
+function inertEntryValid(entry: InertEntry, env: MinEnv, w: World): boolean {
+  return normalFormEntryValid(entry, env, w) && entry.spaceVersion === w.spaceVersion;
+}
+
+function isInertData(env: MinEnv, w: World, t: Atom, exprHeads: ReadonlySet<string>): boolean {
+  const quoteInert = standardQuoteOnly(env, w);
+  const stack: Atom[] = [t];
+  const verified: Atom[] = [];
+  const fail = (deciding: Atom): false => {
+    const entry = inertEntry(env, w, false);
+    if (deciding.kind === "expr") inertDataCache.set(deciding, entry);
+    if (t.kind === "expr" && t !== deciding) inertDataCache.set(t, entry);
+    return false;
+  };
+  while (stack.length > 0) {
+    const cur = stack.pop()!;
+    switch (cur.kind) {
+      case "var":
+      case "gnd":
+        break;
+      case "sym":
+        if (reduciblyDefinedHead(env, w, cur.name)) return fail(cur);
+        break;
+      case "expr": {
+        const its = cur.items;
+        if (its.length === 0) break;
+        const cached = inertDataCache.get(cur);
+        if (cached !== undefined && inertEntryValid(cached, env, w)) {
+          if (cached.res) break;
+          if (t.kind === "expr" && t !== cur) inertDataCache.set(t, cached);
+          return false;
+        }
+        const h = its[0]!;
+        if (h.kind === "sym") {
+          if (quoteInert && h.name === "quote" && its.length === 2) {
+            verified.push(cur);
+            break;
+          }
+          if (reduciblyDefinedHead(env, w, h.name)) return fail(cur);
+          const sigs = env.sigs.get(h.name);
+          if (sigs !== undefined) {
+            const args = its.slice(1);
+            if (
+              checkApplication(env, w, h.name, args, sigs) !== null ||
+              typeMismatch(env, w, h.name, args, sigs) !== undefined
+            )
+              return fail(cur);
+          }
+        } else if (h.kind === "expr" && h.items.length > 0) {
+          const hh = h.items[0]!;
+          if (hh.kind === "sym" && exprHeads.has(hh.name)) return fail(cur);
+        }
+        verified.push(cur);
+        for (let i = 0; i < its.length; i++) stack.push(its[i]!);
+        break;
+      }
+    }
+  }
+  if (verified.length > 0) {
+    const entry = inertEntry(env, w, true);
+    for (const node of verified) inertDataCache.set(node, entry);
+  }
+  return true;
 }
 
 // ---------- atom_to_stack ----------
