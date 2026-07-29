@@ -208,7 +208,11 @@ function formatLeaf(a: Atom): string {
       case "int":
         return String(v.n);
       case "float":
-        return Number.isInteger(v.n) ? v.n.toFixed(1) : String(v.n);
+        return Object.is(v.n, -0)
+          ? "-0.0"
+          : Number.isInteger(v.n)
+            ? v.n.toFixed(1)
+            : String(v.n);
       case "str":
         return JSON.stringify(v.s);
       case "bool":

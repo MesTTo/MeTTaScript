@@ -27,6 +27,15 @@ describe("parser", () => {
     expect(format(parse('"hi there"', tk())!)).toBe('"hi there"');
   });
 
+  it("preserves the sign of a grounded negative zero", () => {
+    const atom = parse("-0.0", tk())!;
+    expect(format(atom)).toBe("-0.0");
+    expect(atom.kind).toBe("gnd");
+    if (atom.kind === "gnd" && atom.value.g === "float") {
+      expect(Object.is(atom.value.n, -0)).toBe(true);
+    }
+  });
+
   it("skips comments and reads a program atom-by-atom, tracking the bang flag", () => {
     const atoms = parseAll("; a comment\n(a b)\n!(+ 1 2)", tk());
     expect(atoms.length).toBe(2);
