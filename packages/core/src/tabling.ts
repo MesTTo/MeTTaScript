@@ -241,15 +241,32 @@ export function analyzeTableWorth(env: MinEnv, pureFunctors: ReadonlySet<string>
  *  appear in a ground call, so the float check is the only one needed in P1. */
 // Iterative explicit-stack walk so a deep key term cannot overflow the host stack: a key is well-formed
 // unless some grounded leaf is a float, an order-independent check over the whole tree.
+// Purely structural (floats anywhere spoil a table key), so the verdict is cacheable by node identity
+// forever. Admission re-checks the same immutable call atoms as an accumulator grows across interpreter
+// steps; skipping already-verified shared subtrees keeps that re-check O(1) instead of O(term).
+const keyWellFormedCache = new WeakMap<Atom, boolean>();
+
 export function keyWellFormed(a: Atom): boolean {
   const stack: Atom[] = [a];
+  const verified: Atom[] = [];
   while (stack.length > 0) {
     const cur = stack.pop()!;
     if (cur.kind === "gnd") {
-      if (cur.value.g === "float") return false;
+      if (cur.value.g === "float") {
+        if (a.kind === "expr") keyWellFormedCache.set(a, false);
+        return false;
+      }
     } else if (cur.kind === "expr") {
+      const cached = keyWellFormedCache.get(cur);
+      if (cached !== undefined) {
+        if (cached) continue;
+        if (a !== cur) keyWellFormedCache.set(a, false);
+        return false;
+      }
+      verified.push(cur);
       for (const x of cur.items) stack.push(x);
     }
   }
+  for (const node of verified) keyWellFormedCache.set(node, true);
   return true;
 }

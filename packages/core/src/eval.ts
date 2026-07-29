@@ -530,8 +530,47 @@ function isDefinedHead(env: MinEnv, w: World, name: string): boolean {
 // Iterative (explicit-stack) term walk: a deep result term (e.g. the derivative of a deep product) would
 // otherwise recurse to the term's depth and overflow the host stack. Normal-form is an AND over every
 // subterm's head being an undefined symbol, so the visit order does not affect the result.
+//
+// The verdict is a pure function of the atom plus the visible rule tables: the env's static rule index,
+// signatures, and grounded tables (mutated only through registration, which bumps groundedEpoch), the
+// world's runtime rules (selfRuleVersion), and the static-removal log (append-only, so its object identity
+// changes on every removal). Atoms are immutable and `instantiate` shares unchanged subterms, so a growing
+// accumulator threaded through interpreter steps re-presents the same expression objects each step; without
+// a cache this walk re-visits that shared structure once per step and a loop that only conses onto its
+// state goes quadratic (measured 28.6s for 16k steps; the same identity-memo lineage as exprVarsCache).
+// A node verified true covers its whole subtree; a false verdict is cached on the node whose head decided
+// it and on the queried root.
+interface NormalFormEntry {
+  readonly env: MinEnv;
+  readonly selfRuleVersion: number;
+  readonly removedStatic: unknown;
+  readonly groundedEpoch: number;
+  readonly res: boolean;
+}
+const normalFormCache = new WeakMap<Atom, NormalFormEntry>();
+
+function normalFormEntry(env: MinEnv, w: World, res: boolean): NormalFormEntry {
+  return {
+    env,
+    selfRuleVersion: w.selfRuleVersion,
+    removedStatic: w.removedStatic,
+    groundedEpoch: env.groundedEpoch,
+    res,
+  };
+}
+
+function normalFormEntryValid(entry: NormalFormEntry, env: MinEnv, w: World): boolean {
+  return (
+    entry.env === env &&
+    entry.selfRuleVersion === w.selfRuleVersion &&
+    entry.removedStatic === w.removedStatic &&
+    entry.groundedEpoch === env.groundedEpoch
+  );
+}
+
 function isNormalForm(env: MinEnv, w: World, t: Atom): boolean {
   const stack: Atom[] = [t];
+  const verified: Atom[] = [];
   while (stack.length > 0) {
     const cur = stack.pop()!;
     switch (cur.kind) {
@@ -539,17 +578,36 @@ function isNormalForm(env: MinEnv, w: World, t: Atom): boolean {
       case "gnd":
         break;
       case "sym":
-        if (isDefinedHead(env, w, cur.name)) return false;
+        if (isDefinedHead(env, w, cur.name)) {
+          if (t.kind === "expr") normalFormCache.set(t, normalFormEntry(env, w, false));
+          return false;
+        }
         break;
       case "expr": {
         const its = cur.items;
         if (its.length === 0) break;
+        const cached = normalFormCache.get(cur);
+        if (cached !== undefined && normalFormEntryValid(cached, env, w)) {
+          if (cached.res) break;
+          if (t.kind === "expr" && t !== cur) normalFormCache.set(t, cached);
+          return false;
+        }
         const h = its[0]!;
-        if (h.kind !== "sym" || isDefinedHead(env, w, h.name)) return false;
+        if (h.kind !== "sym" || isDefinedHead(env, w, h.name)) {
+          const entry = normalFormEntry(env, w, false);
+          normalFormCache.set(cur, entry);
+          if (t.kind === "expr" && t !== cur) normalFormCache.set(t, entry);
+          return false;
+        }
+        verified.push(cur);
         for (let i = 1; i < its.length; i++) stack.push(its[i]!);
         break;
       }
     }
+  }
+  if (verified.length > 0) {
+    const entry = normalFormEntry(env, w, true);
+    for (const node of verified) normalFormCache.set(node, entry);
   }
   return true;
 }
@@ -763,6 +821,9 @@ export interface MinEnv {
   parEvalAsync?:
     | ((branchSrcs: string[], firstOnly: boolean) => Promise<(Atom[] | null)[]>)
     | undefined;
+  /** Bumped whenever a grounded operation is registered onto this env, so identity-keyed caches that
+   *  read `gt`/`agt` (the normal-form verdict cache) can tell a mutated table from the one they saw. */
+  groundedEpoch: number;
   /** Compiled pure deterministic functions (the int/bool functional core); undefined when disabled. */
   compiled?: CompiledFns | undefined;
   /** Set when an equation changed, so the compiler re-runs before the next query. */
@@ -1120,6 +1181,7 @@ export function emptyEnv(gt: GroundingTable): MinEnv {
     exprTypes: [],
     agt: new Map(),
     groundedEffects,
+    groundedEpoch: 0,
     asyncGroundedEffects: new Map(),
     fuzzEffectPolicy: undefined,
     mutexes: new Map(),
@@ -1165,6 +1227,7 @@ function invalidateTabling(env: MinEnv): void {
 }
 
 function invalidateGroundedRegistration(env: MinEnv): void {
+  env.groundedEpoch += 1;
   env.evaluatedAtoms = new WeakSet();
   invalidateTabling(env);
   // Compiled nodes inline the standard grounded arithmetic and comparison semantics. A host can replace
