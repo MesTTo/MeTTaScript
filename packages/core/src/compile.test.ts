@@ -343,7 +343,7 @@ describe("deterministic-core compiler", () => {
   describe("impure saturation compiler (case-over-match + add-if-absent)", () => {
     const SATURATION = `
 (= (add-atom-no-duplicate $Space $Atom)
-   (if (== (,) (collapse (once (match $Space $Atom $Atom))))
+   (if (== () (collapse (once (match $Space $Atom $Atom))))
        (add-atom $Space $Atom)
        (empty)))
 (= (expand-once)
@@ -378,7 +378,7 @@ describe("deterministic-core compiler", () => {
     it("a duplicate add prunes to nothing, identically", () => {
       compareCompiledAndInterpreted(`
 (= (add-atom-no-duplicate $Space $Atom)
-   (if (== (,) (collapse (once (match $Space $Atom $Atom))))
+   (if (== () (collapse (once (match $Space $Atom $Atom))))
        (add-atom $Space $Atom)
        (empty)))
 (= (seed) (add-atom &self (k a)))
@@ -393,7 +393,7 @@ describe("deterministic-core compiler", () => {
     it("a case whose every branch prunes yields nothing, identically", () => {
       compareCompiledAndInterpreted(`
 (= (add-atom-no-duplicate $Space $Atom)
-   (if (== (,) (collapse (once (match $Space $Atom $Atom))))
+   (if (== () (collapse (once (match $Space $Atom $Atom))))
        (add-atom $Space $Atom)
        (empty)))
 (= (grow)
@@ -411,7 +411,7 @@ describe("deterministic-core compiler", () => {
       // worlds, so the interpreter re-runs from the untouched state and the outputs agree.
       compareCompiledAndInterpreted(`
 (= (add-atom-no-duplicate $Space $Atom)
-   (if (== (,) (collapse (once (match $Space $Atom $Atom))))
+   (if (== () (collapse (once (match $Space $Atom $Atom))))
        (add-atom $Space $Atom)
        (empty)))
 (= (grow)
@@ -427,7 +427,7 @@ describe("deterministic-core compiler", () => {
     it("add-if-absent on a named space, identically", () => {
       compareCompiledAndInterpreted(`
 (= (add-atom-no-duplicate $Space $Atom)
-   (if (== (,) (collapse (once (match $Space $Atom $Atom))))
+   (if (== () (collapse (once (match $Space $Atom $Atom))))
        (add-atom $Space $Atom)
        (empty)))
 (= (put $s $a) (let $r (add-atom-no-duplicate $s $a) done))

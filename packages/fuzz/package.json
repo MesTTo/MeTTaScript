@@ -1,0 +1,54 @@
+{
+  "name": "@mettascript/fuzz",
+  "version": "2.8.0",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "generate": "node scripts/generate-module.mjs",
+    "generate:check": "node scripts/generate-module.mjs --check",
+    "prebuild": "pnpm generate:check",
+    "build": "tsup src/index.ts --format esm --dts --clean"
+  },
+  "dependencies": {
+    "@mettascript/core": "workspace:*",
+    "pure-rand": "8.4.2"
+  },
+  "author": "MesTTo",
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": true,
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "MeTTa-native property testing, shrinking, state-machine testing, and bounded verification for MeTTaScript.",
+  "keywords": [
+    "metta",
+    "hyperon",
+    "property-testing",
+    "fuzzing",
+    "model-checking"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MesTTo/MeTTaScript.git",
+    "directory": "packages/fuzz"
+  },
+  "homepage": "https://github.com/MesTTo/MeTTaScript#readme",
+  "bugs": {
+    "url": "https://github.com/MesTTo/MeTTaScript/issues"
+  }
+}

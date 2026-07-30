@@ -38,6 +38,8 @@ features:
     details: One core ESM bundle, about 23 KB gzipped. No native addon, no required WASM, no Rust. Import it in a web page, a serverless handler, or an agent loop and go.
   - title: Immutable and concurrent
     details: Keep immutable snapshots you can branch and roll back. Grounded operations do real I/O, and concurrency primitives (par, race, once, with-mutex) and transactions build on top.
+  - title: Test it with properties, not examples
+    details: A property-testing library written in MeTTa itself ships with the toolkit. State what should hold for every input and it generates cases, shrinks a failure to the smallest one that still fails, and replays it. It also enumerates small domains exhaustively, checks a real system against a model over command sequences, and searches a transition relation for a reachable state.
   - title: Validated against the reference
     details: MeTTaScript implements MeTTa, the language of OpenCog Hyperon, and matches Hyperon's Rust reference on 270/270 oracle tests and the Lean-verified LeaTTa semantics. The library you pick up in a minute and the exact reference semantics are the same engine.
 ---

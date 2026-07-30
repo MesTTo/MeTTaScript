@@ -13,4 +13,4 @@
 (= (match-single-via-once $space $pattern $outPattern)
    (once (match $space $pattern $outPattern)))
 
-!(test (collapse (match-single-via-once &self (a $x) (a $x))) (, (a b)))
+!(test (collapse (match-single-via-once &self (a $x) (a $x))) ((a b)))

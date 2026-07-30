@@ -112,8 +112,8 @@ no-barrier files. The Hyperon-valid workload is `matespacefast`.
 ## Corpus adaptation conventions
 
 - `assertEqual`/`assert*` return `()` on pass (PeTTa returns True). `assertEqualToResult`'s second argument
-  is the expected result set as an unevaluated comma tuple; collapse of one result `r` is `(, r)`.
-- Bool literals `True`/`False`; collapse is a comma tuple; floats render full IEEE.
+  is the expected result set as an unevaluated expression; collapse of one result `r` is `(r)`.
+- Bool literals use `True`/`False`; collapse is a plain expression; floats render full IEEE.
 - Math returns Float: pow/sqrt/log/min-atom/max-atom, and trunc/ceil/floor/round on float input.
 - `==` is `(-> $t $t Bool)`; Hyperon has no `!=`.
 - Keep MeTTaScript LeaTTa-correct; never bend the engine to a PeTTa-ism.

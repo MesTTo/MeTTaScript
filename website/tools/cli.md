@@ -5,7 +5,7 @@ SPDX-License-Identifier: MIT
 
 # The metta CLI
 
-`@mettascript/node` installs the `metta` command. Use it to run MeTTa files, check them, explain reductions, and render reduction GIFs.
+`@mettascript/node` installs the `metta` command. Use it to run MeTTa files, check them, explain reductions, render reduction GIFs, and run property tests.
 
 ```bash
 npm install -g @mettascript/node
@@ -74,6 +74,40 @@ The debugger takes source from `--file <p>` or `--source '<m>'`, then runs one c
 | `run`   | runs every `!` query in the loaded source                    |
 
 `--llm` prints JSON. `--max-steps N` sets the evaluation fuel. See [Debugging and traces](/tools/metta-debug) for the trace fields.
+
+## Run property tests
+
+```bash
+metta fuzz suite.metta
+metta fuzz --list suite.metta
+metta fuzz --seed 7 --runs 50 suite.metta
+metta fuzz --exhaustive suite.metta
+metta fuzz --corpus regressions suite.metta
+metta reach suite.metta [id]
+```
+
+`metta fuzz` runs every `(FuzzTest ...)` declaration a file carries and prints one line each. `metta reach` does the same for `(FuzzReachTest ...)`, optionally restricted to one id. Neither runs the file's own `!` queries: reading a suite is not a way to execute whatever else the file would have done. `import!` and `register-module!` are kept, because a property defined in an imported file would be undefined without them.
+
+| option | does |
+| ------ | ---- |
+| `--list` | prints the declarations without running them |
+| `--json` | prints the full result atoms as one JSON document on stdout |
+| `--exhaustive` | enumerates each declaration's whole domain instead of sampling |
+| `--corpus <dir>` | replays the counterexamples stored there first, and records new ones |
+| `--no-record` | reads the corpus without writing to it |
+| `--seed`, `--runs`, `--max-size`, `--max-discards`, `--max-shrinks`, `--case-steps`, `--case-depth`, `--max-enumerated` | replace that option in every declaration's `fuzz-config` |
+| `--max-depth`, `--max-states`, `--max-transitions` | replace that option in every `reach-config`, for `metta reach` |
+
+The exit code is the run's verdict, so the command works as a test gate:
+
+| code | means |
+| ---- | ----- |
+| 0 | every declaration passed, or gave a definitive answer |
+| 1 | a property failed |
+| 2 | invalid input, or corrupt stored data |
+| 3 | an incomplete run: gave up, bounded by depth, or cut off by a limit |
+
+Results go to stdout and diagnostics to stderr, so `--json` prints exactly one document however much the run has to say about its corpus. See [Property testing](/fuzz/overview) for how to write the declarations.
 
 ## Render a reduction GIF
 

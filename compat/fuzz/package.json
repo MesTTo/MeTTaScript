@@ -1,0 +1,43 @@
+{
+  "name": "@metta-ts/fuzz",
+  "version": "2.8.0",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --clean"
+  },
+  "dependencies": {
+    "@mettascript/fuzz": "workspace:*"
+  },
+  "author": "MesTTo",
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": true,
+  "module": "./dist/index.js",
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "Compatibility shim for @mettascript/fuzz.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MesTTo/MeTTaScript.git",
+    "directory": "packages/fuzz"
+  },
+  "homepage": "https://github.com/MesTTo/MeTTaScript#readme",
+  "bugs": {
+    "url": "https://github.com/MesTTo/MeTTaScript/issues"
+  }
+}

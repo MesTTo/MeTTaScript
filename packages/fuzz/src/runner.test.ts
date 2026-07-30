@@ -1,0 +1,706 @@
+// SPDX-FileCopyrightText: 2026 MesTTo
+//
+// SPDX-License-Identifier: MIT
+
+import "./index.js";
+import { describe, expect, it } from "vitest";
+import {
+  expr,
+  gint,
+  gnd,
+  registerBuiltinGroundedOperation,
+  sym,
+  type GroundFn,
+} from "@mettascript/core";
+import { printedWithFuzz as printed } from "./test-utils.js";
+
+let flakyTick = 0;
+const flakyPropertyResult: GroundFn = () => ({
+  tag: "ok",
+  results: [expr([sym("Fail"), sym("UnstableResult"), expr([sym("Tick"), gint(flakyTick++)])])],
+});
+registerBuiltinGroundedOperation("_fuzz-test-flaky-property-result", flakyPropertyResult, "Pure");
+
+let postShrinkFlakyTick = 0;
+const postShrinkFlakyPropertyResult: GroundFn = (args) => {
+  const value = args[0] ?? sym("MissingValue");
+  const tick = postShrinkFlakyTick++;
+  return {
+    tag: "ok",
+    results:
+      tick === 9
+        ? [expr([sym("Pass")])]
+        : [expr([sym("Fail"), sym("TooLarge"), expr([sym("Value"), value])])],
+  };
+};
+registerBuiltinGroundedOperation(
+  "_fuzz-test-post-shrink-flaky-property-result",
+  postShrinkFlakyPropertyResult,
+  "Pure",
+);
+
+const externalValue: GroundFn = () => ({
+  tag: "ok",
+  results: [gnd({ g: "ext", kind: "fuzz-test", id: "opaque-fuzz-value" })],
+});
+registerBuiltinGroundedOperation("_fuzz-test-external-value", externalValue, "Pure");
+
+describe("MeTTa fuzz runner", () => {
+  it("normalizes option-based configuration and rejects invalid options", () => {
+    expect(
+      printed(`
+        !(fuzz-config)
+        !(fuzz-config (Runs 0))
+        !(fuzz-config (MaxSize -1))
+        !(fuzz-config (EffectPolicy Unknown))
+        !(fuzz-config (Runs 10) (Runs 20))
+        !(fuzz-config (UnknownOption 1))
+      `).slice(1),
+    ).toEqual([
+      [
+        "(FuzzConfig (Runs 100) (Seed 0) (MaxSize 100) (MaxDiscards 1000) (MaxShrinks 1000) (MaxShrinkImprovements 1000) (CaseSteps 100000) (CaseDepth 1000) (EffectPolicy Sandboxed) (EdgeCases 16) (MaxEnumerated 1000) (FailureMode SameFailureTag))",
+      ],
+      ["(FuzzInvalid InvalidConfig (InvalidRuns (Runs 0)))"],
+      ["(FuzzInvalid InvalidConfig (InvalidMaxSize (MaxSize -1)))"],
+      ["(FuzzInvalid InvalidConfig (InvalidEffectPolicy (EffectPolicy Unknown)))"],
+      ["(FuzzInvalid InvalidConfig (DuplicateOption Runs))"],
+      ["(FuzzInvalid InvalidConfig (UnknownOption (UnknownOption 1)))"],
+    ]);
+  });
+
+  it("requires the documented Atom to FuzzProperty signature", () => {
+    expect(
+      printed(`
+        (= (unsigned $value) (fuzz-pass))
+        !(fuzz-check
+           unsigned-property
+           (gen-const value)
+           unsigned
+           (fuzz-config (Runs 1) (EdgeCases 0)))
+      `)[1],
+    ).toEqual([
+      "(FuzzInvalid MissingPropertySignature (Property unsigned) (Expected (-> Atom FuzzProperty)))",
+    ]);
+  });
+
+  it("rejects malformed configuration before running a property", () => {
+    expect(
+      printed(`
+        (: signed (-> Atom FuzzProperty))
+        (= (signed $value) (fuzz-pass))
+        !(fuzz-check malformed-config (gen-const value) signed NotAConfig)
+      `)[1],
+    ).toEqual(["(FuzzInvalid InvalidConfig (MalformedConfig NotAConfig))"]);
+  });
+
+  it("runs regressions, examples, unique edges, then random cases", () => {
+    const result = printed(`
+      (: always (-> Atom FuzzProperty))
+      (= (always $value) (classify True Seen (fuzz-pass)))
+      (FuzzRegression ordered-property 2 None)
+      (FuzzExample ordered-property 3)
+      !(fuzz-check
+         ordered-property
+         (gen-int 0 3)
+         always
+         (fuzz-config
+           (Seed 7)
+           (Runs 3)
+           (MaxSize 3)
+           (MaxDiscards 10)
+           (MaxShrinks 0)
+           (CaseSteps 10000)
+           (CaseDepth 100)
+           (EdgeCases 2)))
+    `)[1]![0]!;
+
+    expect(result).toMatch(/^\(FuzzPassed \(Property ordered-property\) \(Seed 7\)/);
+    expect(result).toContain(
+      "(Counts (Passed 7) (PropertyDiscards 0) (GenerationDiscards 0) (Regressions 1) (Examples 1) (Edges 2) (Random 3))",
+    );
+    expect(result).toContain("(Labels ((FuzzCount Seen 7)))");
+  });
+
+  it("stops at the first failing phase in replay-first order", () => {
+    const result = printed(`
+      (: fails-bad (-> Atom FuzzProperty))
+      (= (fails-bad $value)
+         (if (== $value bad)
+             (fuzz-fail BadValue (Value $value))
+             (fuzz-pass)))
+      (FuzzRegression phase-order bad None)
+      (FuzzExample phase-order bad)
+      !(fuzz-check
+         phase-order
+         (gen-const good)
+         fails-bad
+         (fuzz-config
+           (Runs 1)
+           (MaxShrinks 0)
+           (EdgeCases 1)))
+    `)[1]![0]!;
+
+    expect(result).toMatch(
+      /^\(FuzzFailed \(Property phase-order\) \(Phase Regression\) \(CaseIndex 0\)/,
+    );
+    expect(result).toContain("(OriginalValue bad)");
+    expect(result).toContain("(FailureTag BadValue)");
+  });
+
+  it("distinguishes generation exhaustion from property discards", () => {
+    const out = printed(`
+      (= (never $value) False)
+      (: discard-property (-> Atom FuzzProperty))
+      (= (discard-property $value) (fuzz-discard NotApplicable))
+      !(fuzz-check
+         generation-discard
+         (gen-filter (gen-const value) never 1)
+         discard-property
+         (fuzz-config
+           (Runs 1)
+           (MaxDiscards 1)
+           (EdgeCases 0)))
+      !(fuzz-check
+         property-discard
+         (gen-const value)
+         discard-property
+         (fuzz-config
+           (Runs 1)
+           (MaxDiscards 1)
+           (EdgeCases 0)))
+    `);
+
+    expect(out[1]![0]).toMatch(
+      /^\(FuzzGaveUp \(Property generation-discard\) GenerationDiscards .* \(GenerationDiscards 2\)/,
+    );
+    expect(out[2]![0]).toMatch(
+      /^\(FuzzGaveUp \(Property property-discard\) PropertyDiscards .* \(PropertyDiscards 2\)/,
+    );
+  });
+
+  it("surfaces invalid property results and evaluator cutoffs", () => {
+    const out = printed(`
+      (: empty-property (-> Atom FuzzProperty))
+      (= (empty-property $value) (empty))
+      (: expensive (-> Atom FuzzProperty))
+      (= (expensive $value) (collapse (match &self $x $x)))
+      !(fuzz-check
+         empty-result
+         (gen-const value)
+         empty-property
+         (fuzz-config (Runs 1) (EdgeCases 0)))
+      !(fuzz-check
+         cutoff
+         (gen-const value)
+         expensive
+         (fuzz-config
+           (Runs 1)
+           (CaseSteps 1)
+           (EdgeCases 0)))
+    `);
+
+    expect(out[1]![0]).toMatch(
+      /^\(FuzzInvalid NoPropertyResult \(Property empty-result\) \(Phase Random\)/,
+    );
+    expect(out[2]![0]).toMatch(
+      /^\(FuzzCutoff \(Property cutoff\) \(Phase Random\).* \(CutoffTag ResourceLimit\)/,
+    );
+  });
+
+  it("returns deterministic replay metadata and a stable failure signature", () => {
+    const source = `
+      (: less-than-two (-> Atom FuzzProperty))
+      (= (less-than-two $value)
+         (if (< $value 2)
+             (fuzz-pass)
+             (fuzz-fail TooLarge (Value $value))))
+      !(fuzz-check
+         deterministic-failure
+         (gen-int 2 5)
+         less-than-two
+         (fuzz-config
+           (Seed 19)
+           (Runs 1)
+           (MaxSize 4)
+           (MaxShrinks 0)
+           (EdgeCases 0)))
+    `;
+    const first = printed(source)[1]![0]!;
+    const second = printed(source)[1]![0]!;
+
+    expect(second).toBe(first);
+    expect(first).toMatch(/^\(FuzzFailed \(Property deterministic-failure\) \(Phase Random\)/);
+    expect(first).toContain("(FailureTag TooLarge)");
+    expect(first).toContain("(OriginalValue ");
+    expect(first).toContain("(OriginalDecision (Decision Int ");
+    expect(first).toContain('(FailureSignature "mettascript-alpha-replay-key-v1;');
+    expect(first).toContain(
+      "(FuzzReplay (Format 2) (Origin (Random (Rng xorshift128plus-v1) (Seed 19) (Case 0) (Size 0)))",
+    );
+    expect(first).toContain("(EncodedDecisionTree (FuzzEncodedAtom 1 ");
+    expect(first).toContain("(EncodedValue (FuzzEncodedAtom 1 ");
+  });
+
+  it("shrinks the first generated failure and reports a replayable local minimum", () => {
+    const result = printed(`
+      (: greater-than-five (-> Atom FuzzProperty))
+      (= (greater-than-five $value)
+         (if (> $value 5)
+             (fuzz-fail TooLarge (Value $value))
+             (fuzz-pass)))
+      !(fuzz-check
+         integer-minimum
+         (gen-int 0 100)
+         greater-than-five
+         (fuzz-config
+           (Runs 1)
+           (MaxSize 100)
+           (MaxShrinks 100)
+           (MaxShrinkImprovements 100)
+           (CaseSteps 10000)
+           (CaseDepth 100)
+           (EdgeCases 2)))
+    `)[1]![0]!;
+
+    expect(result).toContain("(OriginalValue 100)");
+    expect(result).toContain("(SmallestValue 6)");
+    expect(result).toContain(
+      "(SmallestDecision (Decision Int (Bounds 0 100) (Origin 0) (Value 6) ()))",
+    );
+    expect(result).toContain(
+      "(Shrink (Order mettascript-shrink-v1) (Status LocallyMinimal) (Reason None) (Attempts 9) (Accepted 5) (LocallyMinimalUnder (Order mettascript-shrink-v1)))",
+    );
+    expect(result).toContain("(Replay (FuzzReplay (Format 2) (Origin (Edge (Index 1)))");
+    expect(result).toContain("(ConcreteValue 6)");
+  });
+
+  it("keeps NaN failures stable and records their exact payload", () => {
+    const result = printed(`
+      (: fail-nan (-> Atom FuzzProperty))
+      (= (fail-nan $value)
+         (fuzz-fail SawNaN (Value $value)))
+      !(let $nan (_fuzz-float64-from-bits 2146959360 23)
+        (fuzz-check
+          nan-replay
+          (gen-const $nan)
+          fail-nan
+          (fuzz-config
+            (Runs 1)
+            (MaxShrinks 1)
+            (EdgeCases 0))))
+    `)[1]![0]!;
+
+    expect(result).toMatch(/^\(FuzzFailed \(Property nan-replay\)/);
+    expect(result).not.toContain("FuzzFlaky");
+    expect(result).toContain("(ConcreteValue NaN)");
+    expect(result).toContain("(EncodedValue (FuzzEncodedAtom 1 (Float64Bits 2146959360 23)))");
+  });
+
+  it("keeps alpha-equivalent failure tags while distinguishing NaN payloads", () => {
+    expect(
+      printed(`
+        !(let* (
+          ($first (_fuzz-float64-from-bits 2146959360 23))
+          ($second (_fuzz-float64-from-bits 2146959360 24))
+          ($first-signature
+            (_fuzz-failure-signature (Saw $x $first)))
+          ($renamed-signature
+            (_fuzz-failure-signature (Saw $renamed $first)))
+          ($second-signature
+            (_fuzz-failure-signature (Saw $x $second))))
+          (FailureSignatureIdentity
+            (== $first-signature $renamed-signature)
+            (== $first-signature $second-signature)))
+      `)[1],
+    ).toEqual(["(FailureSignatureIdentity True False)"]);
+  });
+
+  it("reports nonreplayable failures without misclassifying them as flaky", () => {
+    const results = printed(`
+      (: always-fails (-> Atom FuzzProperty))
+      (= (always-fails $value)
+         (fuzz-fail Failed (Value $value)))
+      (= (CustomCapabilities ExternalTree ())
+         (FuzzCustomCapabilities
+           (Modes (Random Replay ShrinkReplay))))
+      (= (to-external $value)
+         (_fuzz-test-external-value))
+      (= (DriveCustom ExternalTree () $driver $size)
+         (let $external (_fuzz-test-external-value)
+           (FuzzSample
+             stable
+             $driver
+             (Decision Const (Opaque $external) (Value stable) ()))))
+      (: external-observation (-> Atom FuzzProperty))
+      (= (external-observation $value)
+         (fuzz-fail Failed
+           (Observed (_fuzz-test-external-value))))
+      !(fuzz-check
+        external-generator
+        (gen-const (_fuzz-test-external-value))
+        always-fails
+        (fuzz-config (Runs 1) (EdgeCases 0) (MaxShrinks 1)))
+      !(fuzz-check
+        external-value
+        (gen-map to-external (gen-const input))
+        always-fails
+        (fuzz-config (Runs 1) (EdgeCases 0) (MaxShrinks 1)))
+      !(fuzz-check
+        external-decision
+        (gen-custom ExternalTree ())
+        always-fails
+        (fuzz-config (Runs 1) (EdgeCases 0) (MaxShrinks 1)))
+      !(fuzz-check
+        external-observation
+        (gen-const input)
+        external-observation
+        (fuzz-config (Runs 1) (EdgeCases 0) (MaxShrinks 1)))
+    `).slice(1);
+
+    const stages = ["Generator", "ConcreteValue", "DecisionTree", "PropertyObservation"];
+    expect(results).toHaveLength(stages.length);
+    for (const [index, stage] of stages.entries()) {
+      const result = results[index]![0]!;
+      expect(result).toMatch(/^\(FuzzFailed /);
+      expect(result).not.toContain("FuzzFlaky");
+      expect(result).toContain(
+        `(Replay (FuzzReplayUnavailable (Stage ${stage}) (Error NonReplayableGroundedValue ExternalGrounded)))`,
+      );
+      expect(result).toContain(
+        `(Reason (ReplayUnavailable (Stage ${stage}) (Error NonReplayableGroundedValue ExternalGrounded)))`,
+      );
+    }
+  });
+
+  it("rejects a nonreplayable edge decision before deduplication", () => {
+    expect(
+      printed(`
+        (: passes (-> Atom FuzzProperty))
+        (= (passes $value) (fuzz-pass))
+        !(fuzz-check
+          external-edge
+          (gen-const (_fuzz-test-external-value))
+          passes
+          (fuzz-config (Runs 1) (EdgeCases 1)))
+      `)[1],
+    ).toEqual([
+      "(FuzzInvalid NonReplayableEdgeDecision (Property external-edge) (Phase Edge) (ErrorCode NonReplayableGroundedValue) ExternalGrounded)",
+    ]);
+  });
+
+  it("preserves the failure tag by default and can accept any failure", () => {
+    const out = printed(`
+      (: two-failures (-> Atom FuzzProperty))
+      (= (two-failures $value)
+         (if (> $value 50)
+             (fuzz-fail Large (Value $value))
+             (if (> $value 0)
+                 (fuzz-fail Small (Value $value))
+                 (fuzz-pass))))
+      !(fuzz-check
+         same-tag
+         (gen-int 0 100)
+         two-failures
+         (fuzz-config
+           (Runs 1)
+           (MaxSize 100)
+           (MaxShrinks 100)
+           (MaxShrinkImprovements 100)
+           (FailureMode SameFailureTag)
+           (EdgeCases 2)))
+      !(fuzz-check
+         any-tag
+         (gen-int 0 100)
+         two-failures
+         (fuzz-config
+           (Runs 1)
+           (MaxSize 100)
+           (MaxShrinks 100)
+           (MaxShrinkImprovements 100)
+           (FailureMode AnyFailure)
+           (EdgeCases 2)))
+    `);
+
+    expect(out[1]![0]).toContain("(OriginalFailureTag Large)");
+    expect(out[1]![0]).toContain("(FailureTag Large)");
+    expect(out[1]![0]).toContain("(SmallestValue 51)");
+    expect(out[2]![0]).toContain("(OriginalFailureTag Large)");
+    expect(out[2]![0]).toContain("(FailureTag Small)");
+    expect(out[2]![0]).toContain("(SmallestValue 1)");
+  });
+
+  it("counts property evaluations and accepted improvements separately", () => {
+    const out = printed(`
+      (: greater-than-five (-> Atom FuzzProperty))
+      (= (greater-than-five $value)
+         (if (> $value 5)
+             (fuzz-fail TooLarge (Value $value))
+             (fuzz-pass)))
+      !(fuzz-check
+         one-attempt
+         (gen-int 0 100)
+         greater-than-five
+         (fuzz-config
+           (Runs 1)
+           (MaxSize 100)
+           (MaxShrinks 1)
+           (MaxShrinkImprovements 100)
+           (EdgeCases 2)))
+      !(fuzz-check
+         one-improvement
+         (gen-int 0 100)
+         greater-than-five
+         (fuzz-config
+           (Runs 1)
+           (MaxSize 100)
+           (MaxShrinks 100)
+           (MaxShrinkImprovements 1)
+           (EdgeCases 2)))
+    `);
+
+    expect(out[1]![0]).toContain("(SmallestValue 100)");
+    expect(out[1]![0]).toContain(
+      "(Status MaxShrinksReached) (Reason None) (Attempts 1) (Accepted 0)",
+    );
+    expect(out[2]![0]).toContain("(SmallestValue 50)");
+    expect(out[2]![0]).toContain(
+      "(Status MaxShrinkImprovementsReached) (Reason None) (Attempts 2) (Accepted 1)",
+    );
+  });
+
+  it("does not replay external effects without a reset adapter", () => {
+    const result = printed(`
+      (: external-property (-> Atom FuzzProperty))
+      (= (external-property $value)
+         (fuzz-fail ExternalFailure (Value $value)))
+      !(fuzz-check
+         external
+         (gen-int 0 10)
+         external-property
+         (fuzz-config
+           (Runs 1)
+           (MaxShrinks 100)
+           (EffectPolicy ExternalEffects)
+           (EdgeCases 1)))
+    `)[1]![0]!;
+
+    expect(result).toContain(
+      "(Status Disabled) (Reason ExternalEffectsWithoutReset) (Attempts 0) (Accepted 0)",
+    );
+    expect(result).toContain("(NotShrunk (Reason ExternalEffectsWithoutReset))");
+    expect(result).not.toContain("SmallestFoundUnder");
+    expect(result).toContain("(OriginalValue 0)");
+    expect(result).toContain("(SmallestValue 0)");
+  });
+
+  it("retains failing-case labels, collected values, coverage, and notes", () => {
+    const result = printed(`
+      (: reported-failure (-> Atom FuzzProperty))
+      (= (reported-failure $value)
+         (if (> $value 5)
+             (counterexample
+               (Input $value)
+               (collect
+                 $value
+                 (classify
+                   True
+                   FailureCase
+                   (cover
+                     10
+                     True
+                     FailureCovered
+                     (fuzz-fail TooLarge (Value $value))))))
+             (fuzz-pass)))
+      !(fuzz-check
+         reported-failure
+         (gen-int 0 100)
+         reported-failure
+         (fuzz-config
+           (Runs 1)
+           (MaxSize 100)
+           (MaxShrinks 100)
+           (MaxShrinkImprovements 100)
+           (EdgeCases 2)))
+    `)[1]![0]!;
+
+    expect(result).toContain("(OriginalLabels (Labels (FailureCase)))");
+    expect(result).toContain("(OriginalCollected (Collected (100)))");
+    expect(result).toContain(
+      "(OriginalCoverage (Coverage ((CoverageObservation 10 FailureCovered True))))",
+    );
+    expect(result).toContain("(OriginalAnnotations (Annotations ((Input 100))))");
+    expect(result).toContain("(SmallestLabels (Labels (FailureCase)))");
+    expect(result).toContain("(SmallestCollected (Collected (6)))");
+    expect(result).toContain(
+      "(SmallestCoverage (Coverage ((CoverageObservation 10 FailureCovered True))))",
+    );
+    expect(result).toContain("(SmallestAnnotations (Annotations ((Input 6))))");
+  });
+
+  it("reports pre-shrink result-bag instability as flaky", () => {
+    flakyTick = 0;
+    const result = printed(`
+      (: unstable-property (-> Atom FuzzProperty))
+      (= (unstable-property $value)
+         (_fuzz-test-flaky-property-result))
+      !(fuzz-check
+         unstable
+         (gen-int 1 1)
+         unstable-property
+         (fuzz-config
+           (Runs 1)
+           (MaxShrinks 10)
+           (EdgeCases 1)))
+    `)[1]![0]!;
+
+    expect(result).toMatch(/^\(FuzzFlaky \(Property unstable\) \(Phase Edge\) \(CaseIndex 0\)/);
+    expect(result).toContain("(Stage PreShrink)");
+    expect(result).toContain("(ExpectedCase (FuzzCaseObservation Fail UnstableResult");
+    expect(result).toContain("(Reason PreShrinkReplayMismatch)");
+  });
+
+  it("checks the minimized failure twice before claiming local minimality", () => {
+    postShrinkFlakyTick = 0;
+    const result = printed(`
+      (: post-shrink-unstable (-> Atom FuzzProperty))
+      (= (post-shrink-unstable $value)
+         (if (> $value 5)
+             (_fuzz-test-post-shrink-flaky-property-result $value)
+             (fuzz-pass)))
+      !(fuzz-check
+         post-shrink-unstable
+         (gen-int 0 100)
+         post-shrink-unstable
+         (fuzz-config
+           (Runs 1)
+           (MaxSize 100)
+           (MaxShrinks 100)
+           (MaxShrinkImprovements 100)
+           (EdgeCases 2)))
+    `)[1]![0]!;
+
+    expect(result).toMatch(
+      /^\(FuzzFlaky \(Property post-shrink-unstable\) \(Phase Edge\) \(CaseIndex 1\)/,
+    );
+    expect(result).toContain("(Stage PostShrink)");
+    expect(result).toContain("(ExpectedValue 6)");
+    expect(result).toContain(
+      "(Status LocallyMinimal) (Reason PostShrinkReplayMismatch) (Attempts 9) (Accepted 5)",
+    );
+  });
+
+  it("verifies a full decision domain exhaustively with per-tree replay", () => {
+    const result = printed(`
+      (: small-pass (-> Atom FuzzProperty))
+      (= (small-pass $value) (fuzz-pass))
+      !(fuzz-check-exhaustive
+         verified-domain
+         (gen-int 0 3)
+         small-pass
+         (fuzz-config (MaxSize 1)))
+    `)[1]![0]!;
+    expect(result).toMatch(
+      /^\(FuzzExhaustivelyVerified \(Property verified-domain\) \(DomainCount 4\) \(Enumerated 4\) \(ExhaustiveStatistics /,
+    );
+    expect(result).toContain("(Passed 4)");
+  });
+
+  it("reports the depth-first counterexample with exhaustive replay coordinates", () => {
+    const result = printed(`
+      (: no-three (-> Atom FuzzProperty))
+      (= (no-three $value) (expect-true (< $value 3) (SawThree $value)))
+      !(fuzz-check-exhaustive
+         exhaustive-counterexample
+         (gen-int 0 3)
+         no-three
+         (fuzz-config (MaxSize 1)))
+    `)[1]![0]!;
+    expect(result).toMatch(
+      /^\(FuzzFailed \(Property exhaustive-counterexample\) \(Phase Exhaustive\) \(CaseIndex 3\)/,
+    );
+    expect(result).toContain("(OriginalValue 3)");
+    expect(result).toContain("(Origin (Exhaustive (Choices (3)) (Case 3) (Size 1)))");
+    expect(result).toContain("(Status LocallyMinimal)");
+  });
+
+  it("enumerates dependent domains exactly during exhaustive checking", () => {
+    const result = printed(`
+      (= (dependent-branch False) (gen-const only))
+      (= (dependent-branch True) (gen-bool))
+      (: any-value (-> Atom FuzzProperty))
+      (= (any-value $value) (fuzz-pass))
+      !(fuzz-check-exhaustive
+         dependent-domain
+         (gen-bind (gen-bool) dependent-branch)
+         any-value
+         (fuzz-config (MaxSize 1)))
+    `)[1]![0]!;
+    expect(result).toMatch(
+      /^\(FuzzExhaustivelyVerified \(Property dependent-domain\) \(DomainCount 3\) \(Enumerated 3\)/,
+    );
+  });
+
+  it("gives up as inconclusive at the enumeration limit", () => {
+    const result = printed(`
+      (: small-pass (-> Atom FuzzProperty))
+      (= (small-pass $value) (fuzz-pass))
+      !(fuzz-check-exhaustive
+         capped-domain
+         (gen-int 0 3)
+         small-pass
+         (fuzz-config (MaxSize 1) (MaxEnumerated 2)))
+    `)[1]![0]!;
+    expect(result).toMatch(
+      /^\(FuzzGaveUp \(Property capped-domain\) EnumerationLimit \(ExhaustiveStatistics \(Enumerated 2\) \(DomainCount 2\)/,
+    );
+  });
+
+  it("treats property discards as inconclusive, never as exhaustive passes", () => {
+    const result = printed(`
+      (: discard-two (-> Atom FuzzProperty))
+      (= (discard-two $value)
+         (if (== $value 2) (fuzz-discard SkipsTwo) (fuzz-pass)))
+      !(fuzz-check-exhaustive
+         discarded-domain
+         (gen-int 0 3)
+         discard-two
+         (fuzz-config (MaxSize 1)))
+    `)[1]![0]!;
+    expect(result).toMatch(
+      /^\(FuzzGaveUp \(Property discarded-domain\) ExhaustivePropertyDiscards \(ExhaustiveStatistics \(Enumerated 4\) \(DomainCount 4\)/,
+    );
+    expect(result).toContain("(PropertyDiscards 1)");
+  });
+
+  it("reports an empty accepted domain as invalid", () => {
+    const result = printed(`
+      (= (never $x) False)
+      (: small-pass (-> Atom FuzzProperty))
+      (= (small-pass $value) (fuzz-pass))
+      !(fuzz-check-exhaustive
+         empty-domain
+         (gen-filter (gen-int 0 1) never 2)
+         small-pass
+         (fuzz-config (MaxSize 1) (MaxEnumerated 20)))
+    `)[1]![0]!;
+    expect(result).toMatch(
+      /^\(FuzzInvalid EmptyExhaustiveDomain \(Property empty-domain\) \(ExhaustiveStatistics \(Enumerated 4\) \(DomainCount 0\)/,
+    );
+    expect(result).toContain("(GenerationDiscards 4)");
+  });
+
+  it("checks coverage requirements against the exact domain", () => {
+    const result = printed(`
+      (: covered (-> Atom FuzzProperty))
+      (= (covered $value) (fuzz-cover 90 High (> $value 2) (fuzz-pass)))
+      !(fuzz-check-exhaustive
+         covered-domain
+         (gen-int 0 3)
+         covered
+         (fuzz-config (MaxSize 1)))
+    `)[1]![0]!;
+    expect(result).toMatch(
+      /^\(FuzzInsufficientCoverage \(Property covered-domain\) \(Requirement High \(MinimumPercent 90\) \(Hits 1\) \(Total 4\)\)/,
+    );
+  });
+});

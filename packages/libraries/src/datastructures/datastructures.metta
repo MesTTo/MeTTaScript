@@ -38,6 +38,6 @@
     (@return "The add-atom result when newly inserted, or no result when the key already exists"))
   (= (add-unique-or-fail $space $expression)
      (let $st (s (repr $expression))
-       (if (== (,) (collapse (once (match $space $st True))))
+       (if (== () (collapse (once (match $space $st True))))
            (add-atom $space $st)
            (empty))))

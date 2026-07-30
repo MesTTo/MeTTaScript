@@ -13,4 +13,4 @@
 
 !(add-atom &self (my test))
 !(remove-atom &self (my test))
-!(test (collapse (match &self (my test) (my test))) (,))
+!(test (collapse (match &self (my test) (my test))) ())

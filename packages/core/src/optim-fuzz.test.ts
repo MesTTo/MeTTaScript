@@ -45,9 +45,7 @@ function runAgg(src: string, on: boolean): string[][] {
 }
 
 function tuplePayloadLength(a: Atom): number {
-  if (a.kind !== "expr") return 0;
-  const head = a.items[0];
-  return head?.kind === "sym" && head.name === "," ? a.items.length - 1 : a.items.length;
+  return a.kind === "expr" ? a.items.length : 0;
 }
 
 /** Compiled vs interpreted, with `St` threaded across the whole program so side effects accumulate. Returns

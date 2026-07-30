@@ -20,4 +20,4 @@
        "(f 42)")
 
 !(test (collapse (get-atoms &self))
-       (,))
+       ())

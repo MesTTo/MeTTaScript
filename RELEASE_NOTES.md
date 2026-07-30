@@ -1,3 +1,107 @@
+# MeTTaScript 2.8.0
+
+A property-testing library written in MeTTa, `collapse` matching current Hyperon, and interpreter work that
+makes deep tail recursion finish instead of overflowing.
+
+## Property testing: `@mettascript/fuzz`
+
+State a property that should hold for every input, and the library generates inputs, finds a counterexample,
+and shrinks it to the smallest one that still fails:
+
+```metta
+!(import! &self fuzz)
+
+(: reverse-involution (-> Atom FuzzProperty))
+(= (reverse-involution $xs) (expect-atom-equal (reverse (reverse $xs)) $xs))
+
+!(fuzz-check reverse-involution (gen-list (gen-int -100 100) 0 40) reverse-involution
+   (fuzz-config (Runs 200)))
+```
+
+The policy is MeTTa. Generation, shrinking, the run loop, the state machines, and the search are rewrite
+rules in `packages/fuzz/src/metta`, and TypeScript supplies only what a representation needs: a random
+source, a structural key over atoms, and a versioned atom codec.
+
+What the library covers:
+
+- Generators as data, from scalars and text through `gen-tuple`, `gen-list`, `gen-map`, `gen-bind`,
+  `gen-filter`, `gen-recursive`, and `gen-custom`. Because a generator is an atom rather than a function,
+  the same declaration can be replayed from a seed, shrunk, or enumerated.
+- Grammar and type-directed generation, so a generated term is a sentence of a declared language or a
+  well-typed term rather than a random tree.
+- Shrinking under a named order, `mettascript-shrink-v1`, so the smallest form is stable across runs rather
+  than a function of the seed. The result says whether it reached a local minimum, or stopped early and why.
+- Exhaustive checking with a choice-vector cursor. `FuzzExhaustivelyVerified` carries the domain count and
+  means the whole domain passed. A domain that does not fit the bound is reported as an incomplete run,
+  never as verified.
+- Model-based state machines: describe the system as a model you trust and the real thing you do not, and a
+  divergence shrinks to the shortest command sequence that separates them.
+- Bounded reachability, breadth first, over a transition relation that may return several next states. A
+  reported witness is replayed from the initial state before it is trusted, and the four answers stay
+  distinct: a witness, exhaustion of a finite model, nothing found at or below `MaxDepth`, and a cutoff.
+- Expectation combinators that carry a tag and details, so a failure says what was wrong rather than
+  returning `False`.
+
+Every run is a function of its seed. The random source, the shrink order, the replay keys, and the
+enumeration order are all named and versioned, so a reported failure reproduces.
+
+## Running suites from the command line
+
+Declare tests as data and let the CLI find them:
+
+```bash
+metta fuzz suite.metta                       # run every (FuzzTest ...) declaration
+metta fuzz --exhaustive suite.metta          # enumerate each domain instead
+metta fuzz --corpus regressions suite.metta  # replay stored counterexamples, record new ones
+metta reach suite.metta                      # run every (FuzzReachTest ...) declaration
+```
+
+Exit codes make the command a test gate: 0 for a pass or a definitive answer, 1 for a property failure, 2
+for invalid input or corrupt stored data, 3 for an incomplete run. Results go to stdout and diagnostics to
+stderr, so `--json` prints exactly one document.
+
+Reading a suite runs its declarations, not its `!` queries, so discovery cannot become a way to execute
+whatever else a file would have done. `import!` and `register-module!` are kept, because a property defined
+in an imported file would be undefined without them.
+
+`--corpus <dir>` keeps found counterexamples as text so a later run replays them before generating anything
+new, one file per case named for the digest of its contents. Commit the directory and the failure travels
+with the code that caused it. Values are stored through the versioned codec rather than printed, so a
+counterexample of `NaN` or `-0.0` comes back exactly, and a corpus file that cannot be read stops the run
+instead of quietly dropping a known failure.
+
+## `collapse` returns a plain expression
+
+`collapse` now matches current Hyperon and returns a plain expression of its ordered results. Zero
+results produce `()`, one result produces `(value)`, and multiple results produce `(first second ...)`.
+The comma symbol is ordinary data when passed to `superpose`.
+
+Programs that compared an empty collapse with `(,)` must compare it with `()`. Programs that first bound
+the collapsed expression and then removed its leading comma with `cdr-atom` should use the bound expression
+directly. The existing `superpose (cdr-atom (collapse ...))` computed-tuple idiom is unchanged because
+`superpose` evaluates that well-typed argument before splitting it.
+
+## Deep recursion finishes instead of overflowing
+
+Tail calls now carry a fuel budget through the interpreter's trampoline and through the compiled impure
+driver, and a chain continues past bound variables rather than stopping at the first one. Native evaluation
+nesting is capped, with open atoms exempt because an unbound-variable self-expansion mints fresh variables
+at constant logical depth and would otherwise branch until memory ran out. Programs that used to report
+`StackOverflow` on a deep but flat recursion now complete; a run that genuinely cannot terminate is cut by
+fuel and says so.
+
+Tabling learned to stop paying for itself where it does not help. `Error` payloads no longer count as
+recursive calls when deciding whether a call is worth tabling, which is what had made the prelude's own
+`let*` rule look doubly recursive and got the busiest control construct in the language memoized with keys
+that could never hit. On a 400-step accumulator loop that cost 6.53s and 1479MB; it is now 2.53s and 227MB,
+with the curve linear and matching the tabling-disabled baseline. A table whose memo goes unread is also
+revoked now, per functor, after 256 stored entries with no read. Refusing a memo can only cost time and
+never change a result, and the byte-identical differential against untabled evaluation is unchanged.
+
+Smaller engine fixes: negative zero survives formatting, a NaN argument propagates errors lazily like any
+other, state handles pass to grounded operations opaquely, and impure-head and NaN scans are cached over
+shared subtrees.
+
 # MeTTaScript 2.7.0
 
 Leveled logging you can leave in the code, and two interpreter forms that now carry the types they always

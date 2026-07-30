@@ -24,6 +24,8 @@ usage:
   metta check <file.metta> [options]   statically analyze a program (--json, --undefined-symbols)
   metta debug (--file <p> | --source '<m>') <why|eval|run> [--llm]   debug the engine
   metta graph <file.metta> [-o out.gif] [--view blocks|graph|side-by-side]   render a reduction GIF
+  metta fuzz <file.metta> [--exhaustive] [--json]   run declared (FuzzTest ...) properties
+  metta reach <file.metta> [id]         run declared (FuzzReachTest ...) searches
   metta --version | --help
 
 Run "metta run --help" style is not needed; each subcommand prints its own usage on a missing argument.
@@ -62,6 +64,13 @@ async function main(): Promise<void> {
     case "graph": {
       const { runGraphMain } = await import("./graph-main");
       await runGraphMain(rest);
+      return;
+    }
+    case "fuzz":
+    case "reach": {
+      const { runFuzzMain } = await import("./fuzz-main");
+      const code = runFuzzMain(rest, first);
+      if (code !== 0) process.exit(code);
       return;
     }
     default: {

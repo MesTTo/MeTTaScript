@@ -43,7 +43,7 @@ describe("async evaluation (generator dual-driver)", () => {
       (
         await runProgramAsync("!(collapse (fetch-double (superpose (1 2 3))))", ops)
       )[0]!.results.map(format),
-    ).toEqual(["(, 2 4 6)"]);
+    ).toEqual(["(2 4 6)"]);
   });
 
   it("a pure program gives the same result via the async runner", async () => {

@@ -53,9 +53,8 @@ function runCorpusCase(file, expected, limitMs) {
 function bagPayload(out, name) {
   const results = out.at(-1)?.results ?? [];
   const bag = results.length === 1 ? results[0] : undefined;
-  if (bag?.kind !== "expr" || bag.items[0]?.kind !== "sym" || bag.items[0].name !== ",")
-    throw new Error(`${name}: expected one collapsed result bag`);
-  return bag.items.slice(1);
+  if (bag?.kind !== "expr") throw new Error(`${name}: expected one collapsed result expression`);
+  return bag.items;
 }
 
 function runBagCountCase(name, src, expectedCount, limitMs) {
@@ -174,17 +173,17 @@ const staticSpace =
   facts(SIZE, (i) => `(edge ${i} ${i + 1})`) +
   `!(collapse (match &self (edge ${mid} $y) $y))\n` +
   `!(collapse (match &self (edge $x ${mid}) $x))`;
-runCase("static arg-index", staticSpace, [`(, ${mid - 1})`], 8_000);
+runCase("static arg-index", staticSpace, [`(${mid - 1})`], 8_000);
 
 const nestedStaticSpace =
   facts(SIZE, (i) => `(nested-static (${i === mid ? "M" : "W"} ${i}))`) +
   `!(collapse (match &self (nested-static (M $x)) $x))`;
-runCase("static nested-head-index", nestedStaticSpace, [`(, ${mid})`], 8_000);
+runCase("static nested-head-index", nestedStaticSpace, [`(${mid})`], 8_000);
 
 const runtimeSpace =
   facts(SIZE, (i) => `!(add-atom &self (rt ${i} ${i + 1}))`) +
   `!(collapse (match &self (rt ${mid} $y) $y))`;
-runCase("runtime arg-index", runtimeSpace, [`(, ${mid + 1})`], 12_000);
+runCase("runtime arg-index", runtimeSpace, [`(${mid + 1})`], 12_000);
 
 // The result is consumed, so this measures nested-head candidate selection rather than dead-result removal.
 const nestedRuntimeSpace =
@@ -201,7 +200,7 @@ const namedSpace =
   `!(bind! &s (new-space))\n` +
   facts(SIZE, (i) => `!(add-atom &s (seen ${i}))`) +
   `!(collapse (match &s (seen ${mid}) ok))`;
-runCase("named exact-space", namedSpace, ["(, ok)"], 12_000);
+runCase("named exact-space", namedSpace, ["(ok)"], 12_000);
 
 const tri = Math.min(180, Math.max(60, Math.floor(SIZE / 200)));
 const triangles =
@@ -212,8 +211,8 @@ runCase("conjunctive count", triangles, [String(tri * 3)], 8_000);
 const staticRemoval =
   facts(SIZE, (i) => `(gone ${i} ${i + 1})`) +
   `!(remove-atom &self (gone ${mid} ${mid + 1}))\n` +
-  `!(test (collapse (match &self (gone ${mid} $y) $y)) (,))\n` +
-  `!(test (collapse (match &self (gone ${mid - 1} $y) $y)) (, ${mid}))`;
+  `!(test (collapse (match &self (gone ${mid} $y) $y)) ())\n` +
+  `!(test (collapse (match &self (gone ${mid - 1} $y) $y)) (${mid}))`;
 runCase("static removal-index", staticRemoval, ["()"], 8_000);
 
 const runtimeRemoval =
@@ -222,7 +221,7 @@ const runtimeRemoval =
   `!(remove-atom &self (= (dyn) old))\n` +
   `!(test (dyn) (dyn))\n` +
   `!(collapse (match &self (keep ${mid} $y) $y))`;
-runCase("runtime removal-index", runtimeRemoval, [`(, ${mid + 1})`], 15_000);
+runCase("runtime removal-index", runtimeRemoval, [`(${mid + 1})`], 15_000);
 
 // List-op scaling: `size-atom`, `map-atom`, `filter-atom`, `foldl-atom` over an N-element literal list must stay O(N).
 // Before the grounded `size-atom` short-circuit and grounded `map-atom`/`filter-atom`/`foldl-atom`, these were

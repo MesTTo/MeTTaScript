@@ -17,9 +17,9 @@
 
 ; `(superpose (E1 E2 E3))` evaluates its tuple as a CROSS-PRODUCT of the elements' results (Hyperon
 ; semantics, verified against the LeaTTa binary), so a tuple element that yields NOTHING, here the
-; `(bar $1)` match, since no `bar` atom exists, makes the whole product empty. `collapse` represents the
-; empty result bag as `(,)`. PeTTa instead unions the three matches.
+; `(bar $1)` match, since no `bar` atom exists, makes the whole product empty. PeTTa instead unions the
+; three matches.
 !(test (space (msort (collapse (superpose ((match &self (foo $1) (foo $1))
                                            (match &self (foo $1 $2) (foo $1 $2))
                                            (match &self (bar $1) (bar $1)))))) (answer))
-       (space (,) 42))
+       (space () 42))

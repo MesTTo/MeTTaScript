@@ -19,5 +19,5 @@
                       (remove-atom &self (friend $2 $3))))))
 
 !(test (collapse (match &self (transitive $1 $2 $3) (transitive $1 $2 $3)))
-       (, (transitive tim tom tam) (transitive sim som sam)))
+       ((transitive tim tom tam) (transitive sim som sam)))
        

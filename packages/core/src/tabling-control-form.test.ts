@@ -11,8 +11,16 @@
 // not regress that optimization.
 
 import { describe, expect, it } from "vitest";
+import { gfloat } from "./atom.js";
+import { registerBuiltinGroundedOperation } from "./grounded-extensions.js";
 import { format } from "./parser";
 import { runProgram } from "./runner";
+
+registerBuiltinGroundedOperation(
+  "_test-control-form-nan",
+  () => ({ tag: "ok", results: [gfloat(Number.NaN)] }),
+  "Pure",
+);
 
 const run = (src: string, tabling: boolean): string[] =>
   runProgram(src, 100_000, new Map(), { tabling }).at(-1)!.results.map(format);
@@ -52,5 +60,30 @@ describe("compiled/tabled result normalization", () => {
     const src = `!(if-error (Error foo bar) (let $y value (result $y)) fallback)`;
     expect(run(src, false)).toEqual(["(result value)"]);
     expect(run(src, true)).toEqual(["(result value)"]);
+  });
+
+  it("binds a grounded NaN through let* identically with and without tabling", () => {
+    expect(run("!(_test-control-form-nan)", false)).toEqual(["NaN"]);
+    expect(run("!(let $value (_test-control-form-nan) (result $value))", false)).toEqual([
+      "(result NaN)",
+    ]);
+    const lazyError = `
+      !(let $nan (_test-control-form-nan)
+         (unify value value
+           success
+           (Error unused $nan)))
+    `;
+    expect(run(lazyError, false)).toEqual(["success"]);
+    expect(run(lazyError, true)).toEqual(["success"]);
+    const src = `
+      (: bind-nan (-> Atom %Undefined%))
+      (= (bind-nan $value)
+         (let* (($constant value))
+           (result $value $constant)))
+      !(let $nan (_test-control-form-nan)
+         (bind-nan $nan))
+    `;
+    expect(run(src, false)).toEqual(["(result NaN value)"]);
+    expect(run(src, true)).toEqual(["(result NaN value)"]);
   });
 });

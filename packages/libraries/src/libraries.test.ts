@@ -132,10 +132,10 @@ describe("combinatorics library", () => {
       !(choose2l (a b c))
       !(collapse (chooseK (a b c) 2))
     `);
-    expect(out[1]).toEqual(["(, 0 1 2 3)"]);
-    expect(out[2]).toEqual(["(,)"]); // empty range
-    expect(out[3]).toEqual(["(, (a b) (a c) (b c))"]);
-    expect(out[4]).toEqual(["(, (a b) (a c) (b c))"]);
+    expect(out[1]).toEqual(["(0 1 2 3)"]);
+    expect(out[2]).toEqual(["()"]); // empty range
+    expect(out[3]).toEqual(["((a b) (a c) (b c))"]);
+    expect(out[4]).toEqual(["((a b) (a c) (b c))"]);
   });
 
   it("chooseKl covers k=0, k, and over-k; takeK truncates", () => {
@@ -152,7 +152,7 @@ describe("combinatorics library", () => {
     expect(out[1]).toEqual(["(())"]); // one subset: the empty one
     expect(out[2]).toEqual(["((a b) (a c) (b c))"]);
     expect(out[3]).toEqual(["((a b c))"]);
-    expect(out[4]).toEqual(["(,)"]); // no 4-subset of a 3-list
+    expect(out[4]).toEqual(["()"]); // no 4-subset of a 3-list
     expect(out[5]).toEqual(["(a b)"]);
     expect(out[6]).toEqual(["(a b c)"]); // fewer than k
     expect(out[7]).toEqual(["()"]);
@@ -210,7 +210,7 @@ describe("datastructures library", () => {
     `);
     expect(out[1]).toEqual(["()"]); // first insert succeeds
     expect(out[2]).toEqual([]); // duplicate is pruned
-    expect(out[3]).toEqual(['(, (s "(a b)"))']); // exactly one copy stored
+    expect(out[3]).toEqual(['((s "(a b)"))']); // exactly one copy stored
   });
 });
 
@@ -225,8 +225,8 @@ describe("spaces library", () => {
       !(collapse (match &sto $t $t))
       !(collapse (match &sfrom $f $f))
     `);
-    expect(out[5]).toEqual(["(, (edge a b) (edge b c))"]); // edges moved to the target
-    expect(out[6]).toEqual(["(, (other z))"]); // non-matching atom stays in the source
+    expect(out[5]).toEqual(["((edge a b) (edge b c))"]); // edges moved to the target
+    expect(out[6]).toEqual(["((other z))"]); // non-matching atom stays in the source
   });
 
   it("removes every atom from a space", () => {
@@ -237,7 +237,7 @@ describe("spaces library", () => {
       !(remove-all-atoms &sr)
       !(collapse (match &sr $x $x))
     `);
-    expect(out[4]).toEqual(["(,)"]); // the space is empty
+    expect(out[4]).toEqual(["()"]); // the space is empty
   });
 });
 

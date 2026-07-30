@@ -540,14 +540,6 @@ const msSubtract = (lhs: readonly Atom[], rhs: readonly Atom[]): Atom[] => {
   }
   return out;
 };
-const resultItems = (xs: readonly Atom[]): Atom[] =>
-  xs.length > 0 && xs[0]!.kind === "sym" && xs[0]!.name === "," ? xs.slice(1) : [...xs];
-const isResultBag = (xs: readonly Atom[]): boolean =>
-  xs.length > 0 && xs[0]!.kind === "sym" && xs[0]!.name === ",";
-const unionItems = (lhs: readonly Atom[], rhs: readonly Atom[]): Atom[] =>
-  isResultBag(lhs) && isResultBag(rhs)
-    ? [sym(","), ...lhs.slice(1), ...rhs.slice(1)]
-    : [...lhs, ...rhs];
 const removeFirstBy = (
   eq: (a: Atom, b: Atom) => boolean,
   a: Atom,
@@ -598,7 +590,7 @@ const assertEqOp =
     const a0 = args[0];
     const e0 = args[1];
     if (a0?.kind !== "expr" || e0?.kind !== "expr") return ierr("expected two expressions");
-    const okEq = bagEqBy(eq, resultItems(a0.items), resultItems(e0.items));
+    const okEq = bagEqBy(eq, a0.items, e0.items);
     if (okEq) return ok(emptyExpr);
     const msg = args.length === 4 ? args[3]! : sym("results-are-not-equal");
     return ok(expr([sym("Error"), args[2]!, msg]));
@@ -1205,7 +1197,7 @@ const stdEntries: Array<[string, GroundFn]> = [
     (args) => {
       const e = exprArgs(args);
       return e && e.length === 2
-        ? ok(expr(unionItems(e[0]!, e[1]!)))
+        ? ok(expr([...e[0]!, ...e[1]!]))
         : ierr("union-atom expects two expressions");
     },
   ],
@@ -1231,7 +1223,7 @@ const stdEntries: Array<[string, GroundFn]> = [
     "superpose",
     (args) => {
       const e = exprArgs(args);
-      if (e && e.length === 1) return ok(...resultItems(e[0]!));
+      if (e && e.length === 1) return ok(...e[0]!);
       // Hyperon 0.2.10's exact error atom: the message is a bare (space-containing) symbol, printed
       // unquoted, and the erring call is reconstructed with the reduced argument.
       return ok(superposeArgError("superpose", args));
@@ -1241,7 +1233,7 @@ const stdEntries: Array<[string, GroundFn]> = [
     "hyperpose",
     (args) => {
       const e = exprArgs(args);
-      if (e && e.length === 1) return ok(...resultItems(e[0]!));
+      if (e && e.length === 1) return ok(...e[0]!);
       return ok(superposeArgError("hyperpose", args));
     },
   ],
@@ -1250,13 +1242,10 @@ const stdEntries: Array<[string, GroundFn]> = [
     (args) => {
       const e = exprArgs(args);
       if (!e || e.length !== 1) return ierr("collapse-extract expects one expression");
-      // LeaTTa represents a collapsed bag as a comma tuple `(, r1 r2 ...)`. `resultItems` strips the comma
-      // when a bag is spread back through `superpose`.
+      // Hyperon returns a plain expression `(r1 r2 ...)`, with `()` for zero results. Each collapse-bind
+      // entry is an `(atom bindings)` pair; take the atom and preserve order and multiplicity.
       return ok(
-        expr([
-          sym(","),
-          ...e[0]!.map((p) => (p.kind === "expr" && p.items.length > 0 ? p.items[0]! : p)),
-        ]),
+        expr(e[0]!.map((p) => (p.kind === "expr" && p.items.length > 0 ? p.items[0]! : p))),
       );
     },
   ],

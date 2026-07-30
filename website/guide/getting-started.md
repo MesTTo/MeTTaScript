@@ -111,4 +111,4 @@ See the **[typed eDSL](/edsl/overview)** for builders, the tagged template, and 
 
 ## Where to next
 
-You now have MeTTa running. To learn the language, start with **[Main concepts](/learn/evaluation/main-concepts)**. To go deeper on the TypeScript side, see **[Running MeTTa in TypeScript](/typescript/running-metta)**.
+You now have MeTTa running. To learn the language, start with **[Main concepts](/learn/evaluation/main-concepts)**. To go deeper on the TypeScript side, see **[Running MeTTa in TypeScript](/typescript/running-metta)**. To test what you write against every input rather than a few examples, see **[Property testing](/fuzz/overview)**.

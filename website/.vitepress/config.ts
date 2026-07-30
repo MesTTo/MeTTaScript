@@ -165,6 +165,11 @@ export default defineConfig({
         items: [{ text: "Overview", link: "/edsl/overview" }],
       },
       {
+        text: "Property testing",
+        collapsed: false,
+        items: [{ text: "Overview", link: "/fuzz/overview" }],
+      },
+      {
         text: "Tools",
         collapsed: false,
         items: [
@@ -192,6 +197,7 @@ export default defineConfig({
           { text: "@mettascript/hyperon", link: "/reference/hyperon" },
           { text: "@mettascript/edsl", link: "/reference/edsl" },
           { text: "@mettascript/node and browser", link: "/reference/node-browser" },
+          { text: "@mettascript/fuzz", link: "/reference/fuzz" },
           { text: "@mettascript/grapher", link: "/reference/grapher" },
           { text: "@mettascript/py", link: "/reference/py" },
           { text: "@mettascript/prolog", link: "/reference/prolog" },

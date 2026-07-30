@@ -3,7 +3,7 @@
 ;
 ; SPDX-License-Identifier: MIT
 ;
-; Adapted from PeTTa examples/he_assert.metta for MeTTa-TS (LeaTTa) conventions.
+; Adapted from PeTTa examples/he_assert.metta for MeTTa-TS (Hyperon) conventions.
 
 ; In Hyperon an `assert*` returns the unit atom `()` on success (PeTTa returns True), so the expected
 ; value of the wrapping `test` is `()`. A failing assert returns an `(Error ...)`, which the test catches.
@@ -12,7 +12,7 @@
 !(test (assertAlphaEqual (quote (+ $x $y)) (quote (+ $a $b))) ())
 
 ; assertEqualToResult's second argument is the expected result set, not a bare value, and it
-; is not evaluated. Collapse of a single result `r` is the comma tuple `(, r)`.
-!(test (assertEqualToResult (+ 1 2) (, 3)) ())
+; is not evaluated. Collapse of a single result `r` is the expression `(r)`.
+!(test (assertEqualToResult (+ 1 2) (3)) ())
 (= (adder) ($x))
-!(test (assertAlphaEqualToResult (adder) (, ($y))) ())
+!(test (assertAlphaEqualToResult (adder) (($y))) ())

@@ -25,7 +25,7 @@ describe("adaptive local-linear tabling", () => {
       !(collapse (path a $z))
     `;
 
-    expect(results(src)).toEqual(["(, b c d)"]);
+    expect(results(src)).toEqual(["(b c d)"]);
   });
 
   it("keeps non-cyclic calls as exact ordered bags", () => {
@@ -36,7 +36,7 @@ describe("adaptive local-linear tabling", () => {
       !(collapse (choice $x))
     `;
 
-    expect(results(src)).toEqual(["(, A A B)"]);
+    expect(results(src)).toEqual(["(A A B)"]);
   });
 
   it("returns TableResourceLimit when an active table cannot fit the shared budget", () => {
@@ -57,7 +57,7 @@ describe("adaptive local-linear tabling", () => {
     const [pairs] = mettaEval(env, 100_000, initSt(), [], query);
 
     expect(pairs.map((pair) => format(pair[0]))).toEqual([
-      "(, (Error (path a $z) TableResourceLimit))",
+      "((Error (path a $z) TableResourceLimit))",
     ]);
   });
 });

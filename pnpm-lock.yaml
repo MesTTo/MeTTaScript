@@ -84,6 +84,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/edsl
 
+  compat/fuzz:
+    dependencies:
+      '@mettascript/fuzz':
+        specifier: workspace:*
+        version: link:../../packages/fuzz
+
   compat/grapher:
     dependencies:
       '@mettascript/grapher':
@@ -131,6 +137,9 @@ importers:
       '@mettascript/edsl':
         specifier: workspace:*
         version: link:../packages/edsl
+      '@mettascript/fuzz':
+        specifier: workspace:*
+        version: link:../packages/fuzz
       '@mettascript/grapher':
         specifier: workspace:*
         version: link:../packages/grapher
@@ -180,6 +189,9 @@ importers:
       '@mettascript/core':
         specifier: workspace:*
         version: link:../core
+      '@mettascript/fuzz':
+        specifier: workspace:*
+        version: link:../fuzz
       '@mettascript/libraries':
         specifier: workspace:*
         version: link:../libraries
@@ -224,6 +236,15 @@ importers:
         specifier: workspace:*
         version: link:../hyperon
 
+  packages/fuzz:
+    dependencies:
+      '@mettascript/core':
+        specifier: workspace:*
+        version: link:../core
+      pure-rand:
+        specifier: 8.4.2
+        version: 8.4.2
+
   packages/grapher:
     dependencies:
       '@mettascript/hyperon':
@@ -242,6 +263,9 @@ importers:
       '@mettascript/core':
         specifier: workspace:*
         version: link:../core
+      '@mettascript/fuzz':
+        specifier: workspace:*
+        version: link:../fuzz
       '@mettascript/libraries':
         specifier: workspace:*
         version: link:../libraries
@@ -260,6 +284,9 @@ importers:
       '@mettascript/debug':
         specifier: workspace:*
         version: link:../debug
+      '@mettascript/fuzz':
+        specifier: workspace:*
+        version: link:../fuzz
       '@mettascript/libraries':
         specifier: workspace:*
         version: link:../libraries
@@ -2245,6 +2272,9 @@ packages:
 
   pure-rand@6.1.0:
     resolution: {integrity: sha512-bVWawvoZoBYpp6yIoQtQXHZjmz35RSVHnUOTefl8Vcjr8snTPY1wnpSPMWekcFwbxI6gtmT7rSYPFvz71ldiOA==}
+
+  pure-rand@8.4.2:
+    resolution: {integrity: sha512-vvuOGgcuPJAirlHvuQw1TrOiw7ptaIXXmIbNuiNOY6lNGJJH49PQ1Kj4nd783nPdQhQdicgOjVI2yI/9BD6/Ng==}
 
   pyodide@314.0.2:
     resolution: {integrity: sha512-rXkXOriXhzRkEV/coVGELjz4da77oNQEOu8hOf8dtBHEKOzqoIAmSJGeKuPl4wbLDv9EDibfKOchnC73CVX4DQ==}
@@ -4372,6 +4402,8 @@ snapshots:
   punycode@2.3.1: {}
 
   pure-rand@6.1.0: {}
+
+  pure-rand@8.4.2: {}
 
   pyodide@314.0.2:
     dependencies:

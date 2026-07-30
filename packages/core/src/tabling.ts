@@ -28,6 +28,7 @@ export const IMPURE_OPS: ReadonlySet<string> = new Set([
   "bind!",
   "import!",
   "transaction",
+  "_fuzz-eval-case",
   "context-space",
   "par",
   "race",
@@ -153,18 +154,54 @@ function callHeads(a: Atom, out: Set<string>): void {
   for (const it of a.items) callHeads(it, out);
 }
 
-/** How many calls in `a` target any functor in `targets`. */
-export function functorCallCount(a: Atom, targets: ReadonlySet<string>): number {
+/** Occurrences of `targets` in positions a rule body can actually evaluate.
+ *
+ *  `inertArgument(head, index)` reports a position that can never become a redex, so an occurrence
+ *  there is a mention rather than a call. Over-counting only risks tabling something, which is the
+ *  prior behaviour; under-counting loses a table that pays, so the predicate stays deliberately
+ *  narrow. */
+export function functorCallCount(
+  a: Atom,
+  targets: ReadonlySet<string>,
+  inertArgument?: (head: string, index: number) => boolean,
+): number {
   if (a.kind !== "expr" || a.items.length === 0) return 0;
-  let n = a.items[0]!.kind === "sym" && targets.has((a.items[0] as { name: string }).name) ? 1 : 0;
-  for (const it of a.items) n += functorCallCount(it, targets);
+  const head = a.items[0]!;
+  let n = head.kind === "sym" && targets.has((head as { name: string }).name) ? 1 : 0;
+  const inert =
+    inertArgument !== undefined && head.kind === "sym"
+      ? (index: number) => inertArgument((head as { name: string }).name, index)
+      : undefined;
+  for (let i = 0; i < a.items.length; i++) {
+    if (i > 0 && inert?.(i - 1) === true) continue;
+    n += functorCallCount(a.items[i]!, targets, inertArgument);
+  }
   return n;
+}
+
+/** Argument positions a rule body can never evaluate.
+ *
+ *  Only `Error`'s payload qualifies. `Error` is the standard error constructor: its parameters are
+ *  declared `Atom`, it has no equation, and no evaluator instruction hands an `Error` argument back
+ *  for evaluation, so `(Error (f $x) reason)` mentions `f` as diagnostic data. That mention used to
+ *  make the prelude's own `let*` look doubly recursive — `(Error (let* $pairs $template)
+ *  bad-let-star)` is its second occurrence — which admitted `let*` to automatic tabling. Since
+ *  `let*` carries whole templates and accumulators, its keys were the largest in the system and
+ *  could never hit: a 200-iteration accumulator loop spent 3.5 million key tokens on it and ran
+ *  quadratically.
+ *
+ *  Control constructs are deliberately excluded even when a parameter is declared unevaluated: `let`
+ *  rewrites to `unify`, and `unify` returns the chosen branch for the caller to evaluate, so those
+ *  positions do become redexes. */
+export function inertArgumentPositions(env: MinEnv): (head: string, index: number) => boolean {
+  return (head) => head === "Error" && !env.ruleIndex.has("Error");
 }
 
 /** Pure functors worth automatic tabling. A recursive SCC is worth tabling when some rule body branches
  *  into that same SCC at least twice. This keeps fib/proof-search overlap tabled while avoiding unbounded
  *  caches for single-tail recursion such as factorial or trial division. */
 export function analyzeTableWorth(env: MinEnv, pureFunctors: ReadonlySet<string>): Set<string> {
+  const inert = inertArgumentPositions(env);
   const deps = new Map<string, Set<string>>();
   const bodies = new Map<string, Atom[]>();
   for (const [k, eqs] of env.ruleIndex) {
@@ -227,7 +264,7 @@ export function analyzeTableWorth(env: MinEnv, pureFunctors: ReadonlySet<string>
       });
     if (!recursive) continue;
     const branchesInsideComponent = component.some((f) =>
-      (bodies.get(f) ?? []).some((rhs) => functorCallCount(rhs, componentSet) >= 2),
+      (bodies.get(f) ?? []).some((rhs) => functorCallCount(rhs, componentSet, inert) >= 2),
     );
     if (!branchesInsideComponent) continue;
     for (const f of component) if (pureFunctors.has(f)) worth.add(f);
@@ -240,15 +277,32 @@ export function analyzeTableWorth(env: MinEnv, pureFunctors: ReadonlySet<string>
  *  appear in a ground call, so the float check is the only one needed in P1. */
 // Iterative explicit-stack walk so a deep key term cannot overflow the host stack: a key is well-formed
 // unless some grounded leaf is a float, an order-independent check over the whole tree.
+// Purely structural (floats anywhere spoil a table key), so the verdict is cacheable by node identity
+// forever. Admission re-checks the same immutable call atoms as an accumulator grows across interpreter
+// steps; skipping already-verified shared subtrees keeps that re-check O(1) instead of O(term).
+const keyWellFormedCache = new WeakMap<Atom, boolean>();
+
 export function keyWellFormed(a: Atom): boolean {
   const stack: Atom[] = [a];
+  const verified: Atom[] = [];
   while (stack.length > 0) {
     const cur = stack.pop()!;
     if (cur.kind === "gnd") {
-      if (cur.value.g === "float") return false;
+      if (cur.value.g === "float") {
+        if (a.kind === "expr") keyWellFormedCache.set(a, false);
+        return false;
+      }
     } else if (cur.kind === "expr") {
+      const cached = keyWellFormedCache.get(cur);
+      if (cached !== undefined) {
+        if (cached) continue;
+        if (a !== cur) keyWellFormedCache.set(a, false);
+        return false;
+      }
+      verified.push(cur);
       for (const x of cur.items) stack.push(x);
     }
   }
+  for (const node of verified) keyWellFormedCache.set(node, true);
   return true;
 }

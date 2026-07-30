@@ -52,7 +52,7 @@ export const PETTA_STDLIB_SRC = `
 
   ; ---- foldall: fold an aggregator over ALL nondeterministic results of a generator ----
   ; The generator is Atom-typed so it reaches foldall unevaluated; collapse then runs it and collects the
-  ; results into Hyperon's comma tuple. fold-over walks the payload, not the comma marker. The aggregator
+  ; results into Hyperon's plain result expression. fold-over walks that expression. The aggregator
   ; stays Atom-typed (a symbol or a lambda); the accumulator is evaluated so each application reduces.
   (: foldall (-> Atom Atom Atom %Undefined%))
   (: fold-over (-> Atom %Undefined% Atom %Undefined%))
@@ -62,8 +62,8 @@ export const PETTA_STDLIB_SRC = `
          (let* (($h (car-atom $t)) ($r (cdr-atom $t)))
            (fold-over $agg ($agg $acc $h) $r))))
   (= (foldall $agg $gen $init)
-     (let* (($rs (collapse $gen)) ($payload (cdr-atom $rs)))
-       (fold-over $agg $init $payload)))
+     (let $rs (collapse $gen)
+       (fold-over $agg $init $rs)))
 
   ; ---- cons (PeTTa alias of cons-atom) ----
   (= (cons $h $t) (cons-atom $h $t))
@@ -90,8 +90,8 @@ export const PETTA_STDLIB_SRC = `
          (let* (($h (car-atom $rs)) ($r (cdr-atom $rs)) ($ok ($check $h)))
            (if $ok (all-true $check $r) False))))
   (= (forall $gen $check)
-     (let* (($rs (collapse $gen)) ($payload (cdr-atom $rs)))
-       (all-true $check $payload)))
+     (let $rs (collapse $gen)
+       (all-true $check $rs)))
 
   ; ---- foldl: fold a function over a list, init as the seed; applies ($f elem acc), left to right ----
   (: foldl (-> Atom %Undefined% %Undefined% %Undefined%))

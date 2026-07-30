@@ -12,8 +12,7 @@
        (TupleConcat ($K) (range (+ $K 1) $N))
        ()))
 
-; PeTTa's TupleConcat relies on a nested superpose treating an empty branch as identity, so the recursion
-; accumulates 1..9. In Hyperon semantics a tuple element that is itself empty (the base case's
-; (superpose ()) ) makes the whole cross-product empty, and that emptiness propagates back up. `collapse`
-; represents that empty result bag as `(,)`.
-!(test (range 1 10) (,))
+; PeTTa's TupleConcat treats an empty branch as identity, so the recursion accumulates 1..9.
+; MeTTaScript evaluates a well-typed computed `superpose` argument before splitting it. The empty base
+; case therefore empties the cross-product and propagates back through this program.
+!(test (range 1 10) ())

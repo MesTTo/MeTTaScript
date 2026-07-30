@@ -16,4 +16,4 @@
                       answertoeverything)))
 
 !(test (collapse (progme))
-       (, answertoeverything 42 (42 42) (42 42 42)))
+       (answertoeverything 42 (42 42) (42 42 42)))

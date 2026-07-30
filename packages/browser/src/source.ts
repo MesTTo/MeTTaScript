@@ -6,6 +6,7 @@
 // from an in-memory VFS, async forms run through the core async driver, and browser hyperpose uses Web Workers
 // when the host exposes them.
 import "@mettascript/libraries";
+import "@mettascript/fuzz";
 import {
   DEFAULT_FUEL,
   evalSequential,

@@ -16,6 +16,26 @@ const lastResults = (rs: ReturnType<typeof runSource>): string[] =>
   rs.at(-1)?.results.map(format) ?? [];
 
 describe("Node source runners", () => {
+  it("auto-registers the deterministic fuzz module", () => {
+    const rs = runSource(`
+      !(import! &self fuzz)
+      !(_fuzz-rng-init 42)
+    `);
+    expect(lastResults(rs)).toEqual(["(FuzzRng xorshift128plus-v1 -1 -43 42 0)"]);
+  });
+
+  it("runs a whole property test through the module, not only its kernel", () => {
+    // Registering the grounded operations is not the same as the MeTTa module being usable, so this
+    // checks the thing a user actually calls.
+    const rs = runSource(`
+      !(import! &self fuzz)
+      (: always (-> Atom FuzzProperty))
+      (= (always $value) (fuzz-pass))
+      !(fuzz-check smoke (gen-int 0 9) always (fuzz-config (Runs 3) (EdgeCases 0)))
+    `);
+    expect(lastResults(rs)[0]).toContain("(FuzzPassed (Property smoke) (Seed 0)");
+  });
+
   it("runs a source string with in-memory imports", () => {
     const imports = new Map<string, Atom[]>([
       [

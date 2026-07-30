@@ -320,3 +320,54 @@ describe("runtime-rule tabling (fibadd)", () => {
     );
   });
 });
+
+// A table is a pure memo, so refusing one can only cost time and never change a result. That is what
+// lets admission watch the OUTCOME rather than trust the static call-graph guess: a functor that
+// stores entry after entry and never reads one back is pure overhead, whatever the analysis thought.
+describe("measured table utility", () => {
+  const space = () => new TableSpace();
+  const keyFor = (ts: TableSpace, call: string) =>
+    ts.key("ground", parseAll(call, standardTokenizer())[0]!.atom, 0);
+
+  it("keeps admitting a functor whose memo is read back", () => {
+    const ts = space();
+    for (let i = 0; i < 1000; i++) {
+      const key = keyFor(ts, `(f ${i})`);
+      ts.rememberCompleted(key, 0, [sym("answer")]);
+      expect(ts.getCompleted(key)).toBeDefined();
+    }
+
+    expect(ts.admitsFunctor("f")).toBe(true);
+    const utility = ts.functorUtilityOf("f");
+    expect(utility?.inserts).toBe(1000);
+    expect(utility?.hits).toBe(1000);
+  });
+
+  it("revokes a functor that stores entries and never reads one", () => {
+    const ts = space();
+    // Every call is distinct, so no entry can ever be read back — the accumulator-loop shape.
+    for (let i = 0; i < 300; i++) ts.rememberCompleted(keyFor(ts, `(g ${i})`), 0, [sym("answer")]);
+
+    expect(ts.admitsFunctor("g")).toBe(false);
+    expect(ts.functorUtilityOf("g")?.hits).toBe(0);
+    // Revocation is per functor: an unrelated one is untouched.
+    expect(ts.admitsFunctor("f")).toBe(true);
+  });
+
+  it("does not revoke before the warm-up threshold", () => {
+    const ts = space();
+    for (let i = 0; i < 32; i++) ts.rememberCompleted(keyFor(ts, `(h ${i})`), 0, [sym("answer")]);
+
+    expect(ts.admitsFunctor("h")).toBe(true);
+  });
+
+  it("a single read keeps a functor admitted for the rest of the run", () => {
+    const ts = space();
+    const read = keyFor(ts, "(i 0)");
+    ts.rememberCompleted(read, 0, [sym("answer")]);
+    expect(ts.getCompleted(read)).toBeDefined();
+    for (let i = 1; i < 400; i++) ts.rememberCompleted(keyFor(ts, `(i ${i})`), 0, [sym("answer")]);
+
+    expect(ts.admitsFunctor("i")).toBe(true);
+  });
+});

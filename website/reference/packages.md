@@ -9,7 +9,7 @@ MeTTaScript is a small set of packages under the `@mettascript` scope. Install o
 what you need; everything builds on the core. For the full API of each, see the
 detailed reference: [core](/reference/core), [hyperon](/reference/hyperon),
 [edsl](/reference/edsl), [node and browser](/reference/node-browser),
-[grapher](/reference/grapher), [py](/reference/py),
+[fuzz](/reference/fuzz), [grapher](/reference/grapher), [py](/reference/py),
 [prolog](/reference/prolog), [libraries](/reference/libraries),
 [debug](/reference/debug), and [das-client and das-gateway](/reference/das).
 
@@ -23,6 +23,7 @@ detailed reference: [core](/reference/core), [hyperon](/reference/hyperon),
 | [`@mettascript/libraries`](https://github.com/MesTTo/MeTTaScript/tree/main/packages/libraries)     | The PeTTa standard libraries as importable modules (`vector`, `roman`, `nars`, `pln`, and more), loaded automatically by node, hyperon, and browser. |
 | [`@mettascript/py`](https://github.com/MesTTo/MeTTaScript/tree/main/packages/py)                   | Python interop: PeTTa's `py-call` and Hyperon's `py-atom`, over pythonia in Node or Pyodide in the browser. Opt-in and async.                        |
 | [`@mettascript/prolog`](https://github.com/MesTTo/MeTTaScript/tree/main/packages/prolog)           | Prolog interop: PeTTa-compatible predicate calls, `prolog-call`, and `import_prolog_function` over SWI-Prolog or SWI-WASM.                           |
+| [`@mettascript/fuzz`](https://github.com/MesTTo/MeTTaScript/tree/main/packages/fuzz)               | Property testing written in MeTTa: generators, shrinking, exhaustive checking, model-based state machines, and bounded reachability.            |
 | [`@mettascript/grapher`](https://github.com/MesTTo/MeTTaScript/tree/main/packages/grapher)         | MeTTaGrapher: a visual editor plus browser and headless Node reduction-GIF rendering over the same core trace.                                       |
 | [`@mettascript/debug`](https://github.com/MesTTo/MeTTaScript/tree/main/packages/debug)             | The debugger engine behind `metta debug`: the execution-trace bus, `explainCall`/`why`, and trace summaries. Depends only on the core.               |
 | [`@mettascript/das-client`](https://github.com/MesTTo/MeTTaScript/tree/main/packages/das-client)   | Client for SingularityNET's Distributed AtomSpace.                                                                                                   |

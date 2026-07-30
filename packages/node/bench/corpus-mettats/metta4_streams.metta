@@ -21,10 +21,10 @@
          (add-atom &s2 (num $x)))
 
 !(test (collapse (get-atoms &s1))
-       (, (num 1) (num 2) (num 3) (num 4)))
+       ((num 1) (num 2) (num 3) (num 4)))
 
 !(test (collapse (get-atoms &s2))
-       (, (num 1)))
+       ((num 1)))
 
 (= (gen) 1)
 (= (gen) 2)

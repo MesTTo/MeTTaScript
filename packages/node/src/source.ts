@@ -5,6 +5,7 @@
 // In-memory Node source runners. Unlike the package root, this file never imports node:fs; embedders that
 // already resolved imports can use it without adding file-backed capabilities to the process.
 import "@mettascript/libraries";
+import "@mettascript/fuzz";
 import {
   DEFAULT_FUEL,
   evalSequential,

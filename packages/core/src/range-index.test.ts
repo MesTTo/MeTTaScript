@@ -235,7 +235,7 @@ describe("experimental.rangeIndex handles unordered numeric atoms", () => {
     // The query's lower bound is >= 0, and -0 >= 0 holds, so the row must appear on both paths.
     const facts = [edgeFact(1n, gfloat(-0)), edgeFact(2n, gint(3n)), edgeFact(3n, gint(-2n))];
     expect(evalStaticFacts(facts, true)).toEqual(evalStaticFacts(facts, false));
-    expect(evalStaticFacts(facts, true)).toContain("(Row 1 0.0)"); // the formatter prints -0 as 0.0
+    expect(evalStaticFacts(facts, true)).toContain("(Row 1 -0.0)");
   });
 });
 
