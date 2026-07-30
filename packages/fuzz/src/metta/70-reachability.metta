@@ -14,6 +14,11 @@
 ; outgoing edges and each branch's index is recorded, so a witness names exactly one branch.
 ; Breadth-first order makes the first witness shortest in transition count.
 ;
+; `MaxDepth` bounds the depth of every state the search considers, so a reported witness is never
+; longer than `MaxDepth` commands. The boundary level is still enumerated, because a state with no
+; command at all ends the model while a state with commands continues past the bound, and that is what
+; separates exhaustion from a depth answer; no transition runs there, so no deeper state is built.
+;
 ; The outcomes are kept apart on purpose. `FuzzReachable` carries a witness that was replayed from
 ; the initial model before being reported. `FuzzUnreachableWithinDepth` says only that no target
 ; occurred at or below the depth actually completed. `FuzzReachabilityExhausted` is reported only
@@ -218,6 +223,13 @@
      False
      True))
 
+; MaxDepth bounds the depth of every state the search considers, so a witness is never longer than
+; MaxDepth commands and a depth answer means exactly "every state at or below MaxDepth was generated
+; and judged against the target". Zero is the unlimited policy, as with the other bounds.
+(= (_fuzz-reach-at-depth-limit $depth $values)
+   (let $limit (_fuzz-reach-config-get MaxDepth $values)
+     (and (> $limit 0) (>= $depth $limit))))
+
 ; A step either advances the level or expands the first node of the current level. Advancing with an
 ; empty next level is exhaustion; refusing to advance past MaxDepth is the depth answer, not a
 ; cutoff, because every level at or below it was searched completely.
@@ -227,14 +239,13 @@
      (if (== $frontier ())
          (if (== $next ())
              (ReachRun $spec () () $visited $counts $depth $values (ReachExhausted $depth))
-             (let $limit (_fuzz-reach-config-get MaxDepth $values)
-               (if (and (> $limit 0) (>= $depth $limit))
+             (if (_fuzz-reach-at-depth-limit $depth $values)
+                 (ReachRun
+                   $spec () () $visited $counts $depth $values
+                   (ReachUnreachableWithinDepth $depth))
+                 (let $level (reverse $next)
                    (ReachRun
-                     $spec () () $visited $counts $depth $values
-                     (ReachUnreachableWithinDepth $depth))
-                   (let $level (reverse $next)
-                     (ReachRun
-                       $spec $level () $visited $counts (+ $depth 1) $values Searching)))))
+                     $spec $level () $visited $counts (+ $depth 1) $values Searching))))
          (let ($node $rest) (decons-atom $frontier)
            (_fuzz-reach-expand
              (ReachRun $spec $rest $next $visited $counts $depth $values Searching)
@@ -261,7 +272,9 @@
                (let $items (_fuzz-reach-command-items $commands)
                  (switch $items
                    (((ReachFinite $listed)
-                     (_fuzz-reach-commands-loop (ReachCommands $run $node $listed 0)))
+                     (if (_fuzz-reach-at-depth-limit $depth $values)
+                         (_fuzz-reach-note-beyond-depth $run $listed)
+                         (_fuzz-reach-commands-loop (ReachCommands $run $node $listed 0))))
                     ((ReachIncomplete $reason)
                      (_fuzz-reach-cutoff $run (IncompleteCommandEnumeration $reason)))
                     ((ReachMalformed $value)
@@ -273,6 +286,21 @@
          (_fuzz-reach-cutoff $run (MalformedReachSpec (Value $spec))))
        $run)
      $run))
+
+; At the boundary the enumerator still runs, because whether a state has any command at all is what
+; separates a model that ended from one that continues past the bound, and that distinction is the
+; difference between exhaustion and a depth answer. No transition runs there, so no state deeper than
+; MaxDepth is ever built, keyed, or judged. A state that does have commands leaves a marker in the
+; next level: the level is not empty, which is all the loop needs to know, and since the loop refuses
+; to advance into a level past the bound the marker is never expanded or reported.
+(= (_fuzz-reach-note-beyond-depth $run $listed)
+   (if (== $listed ())
+       $run
+       (unify $run
+         (ReachRun $spec $frontier $next $visited $counts $depth $values Searching)
+         (let $marked (cons-atom ReachBeyondDepth $next)
+           (ReachRun $spec $frontier $marked $visited $counts $depth $values Searching))
+         $run)))
 
 (= (_fuzz-reach-commands-loop $state)
    (if (_fuzz-reach-commands-finished $state)

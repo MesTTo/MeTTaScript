@@ -99,6 +99,65 @@ describe("MeTTa bounded reachability", () => {
     expect(out.at(-1)![0]).toContain("(Reason (MaxTransitionsReached (MaxTransitions 1)))");
   });
 
+  it("never reports a witness longer than MaxDepth", () => {
+    const out = printed(`
+      ${COUNTER}
+      !(fuzz-reachable Counter (Count 0)
+         counter-enumerate counter-transition counter-target
+         (reach-config (MaxDepth 2)))
+      !(fuzz-reachable Counter (Count 0)
+         counter-enumerate counter-transition counter-target
+         (reach-config (MaxDepth 1)))
+    `);
+
+    // (Count 3) sits at depth 2, so depth 2 finds it and depth 1 must not: the state one level past
+    // the bound is never built, let alone judged against the target.
+    expect(out.at(-2)![0]).toMatch(/^\(FuzzReachable \(Property Counter\) \(Depth 2\)/);
+    expect(out.at(-1)![0]).toMatch(
+      /^\(FuzzUnreachableWithinDepth \(Property Counter\) \(Depth 1\)/,
+    );
+  });
+
+  it("still exhausts a model that ends exactly at MaxDepth", () => {
+    const out = printed(`
+      ${COUNTER}
+      (= (unreachable-target (Count $n)) (== $n 99))
+      !(fuzz-reachable Counter (Count 0)
+         counter-enumerate counter-transition unreachable-target
+         (reach-config (MaxDepth 3)))
+      !(fuzz-reachable Counter (Count 0)
+         counter-enumerate counter-transition unreachable-target
+         (reach-config (MaxDepth 2)))
+    `);
+
+    // The deepest state, (Count 5), is found at depth 3 and has no commands, so at MaxDepth 3 the
+    // boundary level is enumerated, nothing continues past it, and the answer is exhaustion rather
+    // than a weaker depth answer. At MaxDepth 2 the boundary states do have commands, so the model
+    // demonstrably continues and the answer is bounded.
+    expect(out.at(-2)![0]).toMatch(
+      /^\(FuzzReachabilityExhausted \(Property Counter\) \(States 6\)/,
+    );
+    expect(out.at(-1)![0]).toMatch(
+      /^\(FuzzUnreachableWithinDepth \(Property Counter\) \(Depth 2\)/,
+    );
+  });
+
+  it("counts no transition for the boundary level it refuses to cross", () => {
+    const out = printed(`
+      (= (endless-enumerate $state) (FiniteCommands up))
+      (= (endless-transition (Count $n) up) (Count (+ $n 1)))
+      (= (never-target (Count $n)) (== $n 99))
+      !(fuzz-reachable Endless (Count 0)
+         endless-enumerate endless-transition never-target
+         (reach-config (MaxDepth 3)))
+    `);
+
+    // Four states are visited, (Count 0) through (Count 3), and three transitions produced them. The
+    // boundary state (Count 3) is enumerated but never stepped, so no fourth transition is charged
+    // and no (Count 4) is created.
+    expect(out.at(-1)![0]).toContain("(ReachStatistics (States 4) (Transitions 3) (Depth 3))");
+  });
+
   it("never turns an incomplete command enumeration into exhaustion", () => {
     const result = printed(`
       ${COUNTER}

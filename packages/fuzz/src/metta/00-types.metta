@@ -347,6 +347,8 @@
 (: _fuzz-reach-nth (-> Atom Number %Undefined%))
 (: _fuzz-reach-cutoff (-> Atom Atom %Undefined%))
 (: _fuzz-reach-searching (-> Atom Bool))
+(: _fuzz-reach-at-depth-limit (-> Number Atom Bool))
+(: _fuzz-reach-note-beyond-depth (-> Atom Atom %Undefined%))
 (: _fuzz-reach-expand (-> Atom Atom %Undefined%))
 (: _fuzz-reach-apply (-> Atom Atom Atom Number %Undefined%))
 (: _fuzz-reach-visit (-> Atom Atom Atom Number Number Atom %Undefined%))
