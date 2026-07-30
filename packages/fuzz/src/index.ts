@@ -20,6 +20,22 @@ registerFuzz();
 
 export { FUZZ_MODULE_SRC };
 export {
+  decodeFuzzOutcome,
+  exitCodeForOutcome,
+  exitCodeForOutcomes,
+  renderOutcomeLine,
+  FUZZ_EXIT_OK,
+  FUZZ_EXIT_PROPERTY_FAILURE,
+  FUZZ_EXIT_INVALID,
+  FUZZ_EXIT_INCOMPLETE,
+  type FuzzOutcome,
+  type FuzzExitCode,
+  type FuzzCounts,
+  type FuzzStatistics,
+  type ReachCounts,
+  type ReachStep,
+} from "./decode.js";
+export {
   FUZZ_ALPHA_REPLAY_KEY_ALGORITHM,
   FUZZ_ATOM_CODEC_VERSION,
   FUZZ_ATOM_KEY_ALGORITHM,
