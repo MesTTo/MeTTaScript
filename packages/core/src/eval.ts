@@ -6786,7 +6786,13 @@ function groundTableVersionIfAdmissible(
   op: string,
   call: Atom,
 ): TableVersion | undefined {
-  if (env.tableSpace === undefined || !call.ground || !keyWellFormed(call)) return undefined;
+  if (
+    env.tableSpace === undefined ||
+    !call.ground ||
+    !keyWellFormed(call) ||
+    !env.tableSpace.admitsFunctor(op)
+  )
+    return undefined;
   const runtimeRulesVisible = world.selfRules.size > 0 || world.selfVarRules.length > 0;
   const runtimeVersion = runtimeRulesVisible ? world.selfRuleVersion : 0;
   if (runtimeRulesVisible) {
@@ -8384,7 +8390,12 @@ function* mettaEvalBodyG(
             continue;
           }
         }
-        if (env.tableSpace !== undefined && !wApp.ground && keyWellFormed(wApp)) {
+        if (
+          env.tableSpace !== undefined &&
+          !wApp.ground &&
+          keyWellFormed(wApp) &&
+          env.tableSpace.admitsFunctor(op)
+        ) {
           const runtimeRulesVisible =
             cur2.world.selfRules.size > 0 || cur2.world.selfVarRules.length > 0;
           modedRuntimeVersion = runtimeRulesVisible ? cur2.world.selfRuleVersion : 0;

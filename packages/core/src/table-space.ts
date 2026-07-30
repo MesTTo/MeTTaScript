@@ -10,6 +10,9 @@ const token = (tag: number, payload = 0): number => (tag << 28) | payload | 0;
 export interface TableKey {
   readonly tokens: readonly number[];
   readonly generation: number;
+  /** Head functor of the tabled call, so utility is attributed per functor. A chain of keys
+   *  remembered together can span several functors, which is why the key carries its own. */
+  readonly functor?: string | undefined;
 }
 
 export interface VariantAtomKey {
@@ -166,6 +169,9 @@ const DEFAULT_TABLE_BUDGET: TableBudget = {
   maxInternerLeaves: 250_000,
 };
 
+/** Entries a functor may store with no read before its memo is revoked. */
+const UTILITY_REVOKE_AFTER = 256;
+
 const DOMAIN_GROUND = -1;
 const DOMAIN_MODED = -2;
 const DOMAIN_GROUND_DISTINCT = -3;
@@ -194,6 +200,9 @@ export class TableSpace {
   private activeCount = 0;
   private activeAnswers = 0;
   private activeCells = 0;
+  /** Measured utility per functor: how many entries it stored, and how many were ever read back.
+   *  A memo that never hits is pure overhead, so admission revokes it (see `admitsFunctor`). */
+  private readonly functorUtility = new Map<string, { inserts: number; hits: number }>();
 
   constructor(private readonly budget: TableBudget = DEFAULT_TABLE_BUDGET) {}
 
@@ -215,9 +224,11 @@ export class TableSpace {
               ? DOMAIN_GROUND_SPACE_READ_DISTINCT
               : DOMAIN_MODED;
     const versionTokens = typeof version === "number" ? [version] : version;
+    const head = call.kind === "expr" ? call.items[0] : undefined;
     return {
       tokens: [domain, this.generation, ...versionTokens, ...encoded.tokens],
       generation: this.generation,
+      functor: head?.kind === "sym" ? head.name : undefined,
       varNames: encoded.varNames,
       canonicalMap: encoded.canonicalMap,
     };
@@ -231,8 +242,31 @@ export class TableSpace {
     if (!this.isCurrentKey(key)) return undefined;
     const entry = this.completed.get(key.tokens);
     if (entry === undefined) return undefined;
+    if (key.functor !== undefined) {
+      const utility = this.functorUtility.get(key.functor);
+      if (utility !== undefined) utility.hits += 1;
+    }
     this.touch(entry);
     return entry;
+  }
+
+  /** Whether this functor's memo has earned its keep. A table is a pure memo, so refusing one can
+   *  only cost time, never change a result; that is what makes measured revocation safe. The static
+   *  profitability analysis (`analyzeTableWorth`) can only guess from the call graph, and a wrong
+   *  guess is expensive: a functor that threads an accumulator stores one large key per iteration
+   *  and hits none of them. So admission also watches the outcome, and once a functor has stored
+   *  `UTILITY_REVOKE_AFTER` entries without a single read it stops being tabled for the rest of the
+   *  run. The threshold sits far above any plausible warm-up (a memo that pays starts hitting
+   *  within a few dozen entries) and far below the millions of tokens a runaway table burns. */
+  admitsFunctor(functor: string): boolean {
+    const utility = this.functorUtility.get(functor);
+    return utility === undefined || utility.hits > 0 || utility.inserts < UTILITY_REVOKE_AFTER;
+  }
+
+  /** Measured per-functor table utility, for tests and diagnostics. */
+  functorUtilityOf(functor: string): { inserts: number; hits: number } | undefined {
+    const utility = this.functorUtility.get(functor);
+    return utility === undefined ? undefined : { ...utility };
   }
 
   rememberCompleted(
@@ -246,6 +280,11 @@ export class TableSpace {
     if (approxCells > this.budget.maxEntryCells) {
       this.maybeResetInterner();
       return;
+    }
+    if (key.functor !== undefined) {
+      const utility = this.functorUtility.get(key.functor);
+      if (utility === undefined) this.functorUtility.set(key.functor, { inserts: 1, hits: 0 });
+      else utility.inserts += 1;
     }
     const old = this.completed.get(key.tokens);
     if (old !== undefined) this.remove(old);
