@@ -177,6 +177,10 @@ export interface CompiledImpureOps {
    *  holders enter it before invoking another user equation. */
   readonly evaluationDepth?: EvaluationDepth;
   readonly maxStackDepth?: number;
+  /** Remaining evaluator fuel at the compiled boundary. Bounds the imperative tail-call driver: each
+   *  tail transfer debits one unit, mirroring the interpreter's per-transfer cost, so a runaway impure
+   *  tail cycle cuts with the same StackOverflow atom instead of spinning. */
+  readonly fuel?: number | undefined;
   readonly addAtom: (env: MinEnv, st: St, space: Atom, atom: Atom) => St | undefined;
   /** Solutions of a `(match space pattern template)` under the current world: the instantiated
    *  template plus that solution's bindings, in the interpreter's own candidate order, and the
@@ -201,6 +205,20 @@ export interface CompiledImpureOps {
   ) => { readonly added: boolean; readonly state: St } | undefined;
 }
 type ImpEval = { readonly value: Atom; readonly st: St } | typeof BAIL;
+/** A tail call another (or the same) imperative holder should continue. Produced only by a call in
+ *  tail position; the holder-entry driver loops on it, so a tail-recursive impure chain (`build`,
+ *  a saturation walk) runs iteratively instead of growing the host stack one `run` frame per step. */
+interface ImpTail {
+  readonly tail: true;
+  readonly op: string;
+  readonly holder: ImperativeHolder;
+  readonly vals: readonly Atom[];
+  readonly st: St;
+}
+type ImpStep = ImpEval | ImpTail;
+function isImpTail(r: ImpStep): r is ImpTail {
+  return r !== BAIL && (r as ImpTail).tail === true;
+}
 type ImpEmit = (value: Atom, st: St) => St | typeof BAIL;
 type ImpForEach = (
   slots: readonly Atom[],
@@ -215,6 +233,9 @@ interface ImperativeHolder {
   clauseCount: number;
   run: (partAtoms: readonly Atom[], st: St, ops: CompiledImpureOps, discard?: boolean) => ImpEval;
   runForEach?: ImpForEach;
+  /** The compiled body, exposed so the tail-call driver can continue a chain without re-entering
+   *  `run` (which would rebuild the loop and recurse). */
+  body?: ImpCompiled;
 }
 // A compiled nondeterministic let*-chain functor (the backward-chainer class); see the section
 // header above compileNondet. `run` returns every solution in clause-major depth-first order, or
@@ -4002,7 +4023,7 @@ type ImpNode = (
   st: St,
   ops: CompiledImpureOps,
   discard?: boolean,
-) => ImpEval;
+) => ImpStep;
 type ImperativeFns = Map<string, ImperativeHolder>;
 
 const IMP_GROUNDED = new Set(["==", "!=", "<", ">", "<=", ">=", "+", "-", "*", "%"]);
@@ -4044,6 +4065,29 @@ function impConst(atom: Atom): ImpCompiled {
   return { node: (_slots, st) => ({ value: atom, st }), directEffect: false, callees: new Set() };
 }
 
+// Fuel backstop when a compiled boundary supplied no budget: large enough for any legitimate
+// chain the counter limits admit, small enough that a runaway cycle still cuts.
+const IMP_TAIL_FUEL_BACKSTOP = 100_000_000;
+
+/** Drive a node result to a final value, looping tail-call transfers iteratively. One transfer costs
+ *  one unit of fuel (the interpreter's per-transfer debit); exhaustion throws the depth overflow the
+ *  compiled boundary turns into `(Error <call> StackOverflow)` with effects kept, as the interpreter's
+ *  fuel cut does. */
+function impDrive(first: ImpStep, ops: CompiledImpureOps, discard: boolean | undefined): ImpEval {
+  let r = first;
+  let budget = ops.fuel ?? IMP_TAIL_FUEL_BACKSTOP;
+  while (isImpTail(r)) {
+    if (budget <= 0) throw new EvaluationDepthOverflow(expr([sym(r.op), ...r.vals]), r.st);
+    budget -= 1;
+    const h = r.holder;
+    const body = h.body;
+    if (body === undefined || r.vals.length !== h.arity || r.vals.some((a) => !a.ground))
+      return BAIL;
+    r = body.node(r.vals, addCounter(r.st, 1), ops, discard);
+  }
+  return r;
+}
+
 function impForEach(
   part: ImpCompiled,
   slots: readonly Atom[],
@@ -4053,7 +4097,7 @@ function impForEach(
   emit: ImpEmit,
 ): St | typeof BAIL {
   if (part.forEach !== undefined) return part.forEach(slots, st, ops, discard, emit);
-  const r = part.node(slots, st, ops, discard);
+  const r = impDrive(part.node(slots, st, ops, discard), ops, discard);
   if (r === BAIL) return BAIL;
   return r.value === EMPTY_VALUE ? r.st : emit(r.value, r.st);
 }
@@ -4067,7 +4111,7 @@ function impAssembleExpr(parts: readonly ImpCompiled[]): ImpCompiled {
       let cur = st;
       for (const part of parts) {
         const r = part.node(slots, cur, ops);
-        if (r === BAIL) return BAIL;
+        if (r === BAIL || isImpTail(r)) return BAIL; // parts are never tail positions
         out.push(r.value);
         cur = r.st;
       }
@@ -4090,7 +4134,7 @@ function impEvalArgs(
   let empty = false;
   for (const part of parts) {
     const r = part.node(slots, cur, ops);
-    if (r === BAIL) return BAIL;
+    if (r === BAIL || isImpTail(r)) return BAIL; // arguments are never tail positions
     if (r.value === EMPTY_VALUE) empty = true;
     vals.push(r.value);
     cur = r.st;
@@ -4210,9 +4254,9 @@ function compileImpAddIfAbsent(
       const addIfAbsent = ops.addIfAbsent;
       if (addIfAbsent === undefined) return BAIL;
       const s = space.node(slots, st, ops);
-      if (s === BAIL) return BAIL;
+      if (s === BAIL || isImpTail(s)) return BAIL;
       const a = atom.node(slots, s.st, ops);
-      if (a === BAIL) return BAIL;
+      if (a === BAIL || isImpTail(a)) return BAIL;
       const r = addIfAbsent(env, a.st, s.value, a.value);
       if (r === undefined) return BAIL;
       return { value: r.added ? emptyExpr : EMPTY_VALUE, st: r.state };
@@ -4239,7 +4283,7 @@ function compileImpIf(
   return {
     node: (slots, st, ops, discard) => {
       const c = cond.node(slots, st, ops); // the condition is needed, never discarded
-      if (c === BAIL) return BAIL;
+      if (c === BAIL || isImpTail(c)) return BAIL;
       if (c.value === EMPTY_VALUE) return { value: EMPTY_VALUE, st: c.st };
       const stIf = addCounter(c.st, 2);
       if (c.value.kind !== "gnd" || c.value.value.g !== "bool") return BAIL;
@@ -4247,7 +4291,7 @@ function compileImpIf(
     },
     forEach: (slots, st, ops, discard, emit) => {
       const c = cond.node(slots, st, ops); // the condition is needed, never discarded
-      if (c === BAIL) return BAIL;
+      if (c === BAIL || isImpTail(c)) return BAIL;
       if (c.value === EMPTY_VALUE) return c.st;
       const stIf = addCounter(c.st, 2);
       if (c.value.kind !== "gnd" || c.value.value.g !== "bool") return BAIL;
@@ -4278,7 +4322,7 @@ function compileImpLet(
   return {
     node: (slots, st, ops, discard) => {
       const v = value.node(slots, st, ops); // the bound value is read by the body, never discarded
-      if (v === BAIL) return BAIL;
+      if (v === BAIL || isImpTail(v)) return BAIL;
       // An Empty value has no results, so the let yields nothing: skip the body.
       if (v.value === EMPTY_VALUE) return { value: EMPTY_VALUE, st: v.st };
       const local = slots.slice();
@@ -4332,7 +4376,7 @@ function compileImpLetStar(
       let cur = addCounter(st, 1);
       for (const binding of bindings) {
         const v = binding.value.node(local, cur, ops); // each bound value is read later, never discarded
-        if (v === BAIL) return BAIL;
+        if (v === BAIL || isImpTail(v)) return BAIL;
         // An Empty value has no results, so the whole let* yields nothing.
         if (v.value === EMPTY_VALUE) return { value: EMPTY_VALUE, st: v.st };
         local[binding.slot] = v.value;
@@ -4376,9 +4420,9 @@ function compileImpAddAtom(
   return {
     node: (slots, st, ops) => {
       const s = space.node(slots, st, ops);
-      if (s === BAIL) return BAIL;
+      if (s === BAIL || isImpTail(s)) return BAIL;
       const a = atom.node(slots, s.st, ops);
-      if (a === BAIL) return BAIL;
+      if (a === BAIL || isImpTail(a)) return BAIL;
       const st2 = ops.addAtom(env, a.st, s.value, a.value);
       return st2 === undefined ? BAIL : { value: emptyExpr, st: st2 };
     },
@@ -4489,20 +4533,27 @@ function compileImpCaseMatch(
       const matchSolutions = ops.matchSolutions;
       if (matchSolutions === undefined) return BAIL;
       const s = space.node(slots, st, ops);
-      if (s === BAIL) return BAIL;
+      if (s === BAIL || isImpTail(s)) return BAIL;
       const p = pattern.node(slots, s.st, ops);
-      if (p === BAIL) return BAIL;
+      if (p === BAIL || isImpTail(p)) return BAIL;
       const t = template.node(slots, p.st, ops);
-      if (t === BAIL) return BAIL;
+      if (t === BAIL || isImpTail(t)) return BAIL;
       const m = matchSolutions(env, t.st, s.value, p.value, t.value);
       if (m === undefined) return BAIL;
       let cur = addCounter(t.st, m.counterDelta);
       const local = slots.slice();
       let survived: Atom | undefined;
       const pairs = scrut.firstOnly ? m.pairs.slice(0, 1) : m.pairs;
-      for (const [value] of pairs) {
-        local[slot] = value;
-        const r = body.node(local, cur, ops, discard);
+      for (let i = 0; i < pairs.length; i++) {
+        local[slot] = pairs[i]![0];
+        let r = body.node(local, cur, ops, discard);
+        // A tail transfer from the last solution with no earlier survivor IS the case's result
+        // (Empty included), so it may defer to the caller's driver. Any other position must know
+        // the branch's value (Empty-pruning, the single-survivor check), so drive it here.
+        if (isImpTail(r)) {
+          if (i === pairs.length - 1 && survived === undefined) return r;
+          r = impDrive(r, ops, discard);
+        }
         if (r === BAIL) return BAIL;
         cur = r.st;
         if (r.value !== EMPTY_VALUE) {
@@ -4516,11 +4567,11 @@ function compileImpCaseMatch(
       const matchSolutions = ops.matchSolutions;
       if (matchSolutions === undefined) return BAIL;
       const s = space.node(slots, st, ops);
-      if (s === BAIL) return BAIL;
+      if (s === BAIL || isImpTail(s)) return BAIL;
       const p = pattern.node(slots, s.st, ops);
-      if (p === BAIL) return BAIL;
+      if (p === BAIL || isImpTail(p)) return BAIL;
       const t = template.node(slots, p.st, ops);
-      if (t === BAIL) return BAIL;
+      if (t === BAIL || isImpTail(t)) return BAIL;
       const m = matchSolutions(env, t.st, s.value, p.value, t.value);
       if (m === undefined) return BAIL;
       let cur = addCounter(t.st, m.counterDelta);
@@ -4579,12 +4630,20 @@ function compileImpCall(
       if (r === BAIL) return BAIL;
       // An Empty argument makes the call empty without invoking it (args already ran for effects).
       if (r.empty) return { value: EMPTY_VALUE, st: r.st };
+      // A tail call transfers instead of invoking: the holder-entry driver continues the chain, so
+      // deep tail recursion (`build`, a saturation walk) is iterative on the heap, PeTTa's LCO.
+      if (tail) return { tail: true, op, holder: h, vals: r.vals, st: r.st };
       return runNested(ops, r.vals, r.st, () => h.run(r.vals, r.st, ops, discard));
     },
     forEach: (slots, st, ops, discard, emit) => {
       const r = impEvalArgs(parts, slots, st, ops); // call args are needed, never discarded
       if (r === BAIL) return BAIL;
       if (r.empty) return r.st;
+      if (tail) {
+        const v = impDrive({ tail: true, op, holder: h, vals: r.vals, st: r.st }, ops, discard);
+        if (v === BAIL) return BAIL;
+        return v.value === EMPTY_VALUE ? v.st : emit(v.value, v.st);
+      }
       if (h.runForEach !== undefined)
         return runNested(ops, r.vals, r.st, () => h.runForEach!(r.vals, r.st, ops, discard, emit));
       const v = runNested(ops, r.vals, r.st, () => h.run(r.vals, r.st, ops, discard));
@@ -4615,7 +4674,7 @@ function compileImpTuple(
       let empty = false;
       for (const part of compiled) {
         const r = part.node(slots, cur, ops, true);
-        if (r === BAIL) return BAIL;
+        if (r === BAIL || isImpTail(r)) return BAIL; // tuple items are never tail positions
         if (r.value === EMPTY_VALUE) empty = true;
         cur = r.st;
       }
@@ -4626,7 +4685,7 @@ function compileImpTuple(
     let empty = false;
     for (const part of compiled) {
       const r = part.node(slots, cur, ops);
-      if (r === BAIL) return BAIL;
+      if (r === BAIL || isImpTail(r)) return BAIL; // tuple items are never tail positions
       if (r.value === EMPTY_VALUE) empty = true;
       out.push(r.value);
       cur = r.st;
@@ -4640,7 +4699,7 @@ function compileImpTuple(
     node,
     forEach: (slots, st, ops, discard, emit) => {
       const r = node(slots, st, ops, discard);
-      if (r === BAIL) return BAIL;
+      if (r === BAIL || isImpTail(r)) return BAIL;
       return r.value === EMPTY_VALUE ? r.st : emit(r.value, r.st);
     },
     ...impMeta(compiled),
@@ -4743,17 +4802,19 @@ function compileImperative(env: MinEnv, compiled: CompiledFns): void {
 
     for (const [f, body] of bodies) {
       const arity = cand.get(f)!.params.length;
+      holders.get(f)!.body = body;
       holders.get(f)!.run = (partAtoms, st, ops, discard) => {
         if (partAtoms.length !== arity || partAtoms.some((a) => !a.ground)) return BAIL;
-        // A self-call recurses natively (compileImpCall -> h.run -> body.node), so deep recursion grows the
-        // host stack exactly as the interpreter's does. A native stack overflow must PROPAGATE to the
-        // top-level `mettaEval` catch, which turns it into `(Error <query> StackOverflow)` — byte-identical
-        // to the interpreter overflowing on the same call. Returning BAIL on a RangeError instead would fall
-        // back to the interpreter, which re-reduces one level and re-enters the compiled function for the
-        // rest, overflowing again: O(depth^2) bail+overflow that lets a StackOverflow escape. So catch only a
-        // thrown BAIL sentinel and let everything else (RangeError included) unwind.
+        // Tail calls come back as transfer sentinels and loop here (impDrive), so a deep tail-recursive
+        // chain runs iteratively and a runaway one cuts on fuel with `(Error <call> StackOverflow)`,
+        // matching the interpreter's flat tail semantics. Non-tail recursion still grows the host stack;
+        // a native overflow must PROPAGATE to the top-level `mettaEval` catch, which turns it into the
+        // same error — returning BAIL on a RangeError instead would fall back to the interpreter, which
+        // re-reduces one level and re-enters the compiled function for the rest, overflowing again:
+        // O(depth^2) bail+overflow that lets a StackOverflow escape. So catch only a thrown BAIL
+        // sentinel and let everything else (RangeError included) unwind.
         try {
-          return body.node(partAtoms, addCounter(st, 1), ops, discard);
+          return impDrive(body.node(partAtoms, addCounter(st, 1), ops, discard), ops, discard);
         } catch (e) {
           if (e === BAIL) return BAIL;
           throw e;
@@ -4901,7 +4962,7 @@ export function runCompiled(
   const runtimeOps =
     ops === undefined || depth === undefined
       ? ops
-      : { ...ops, evaluationDepth: depth, maxStackDepth: st.world.maxStackDepth };
+      : { ...ops, evaluationDepth: depth, maxStackDepth: st.world.maxStackDepth, fuel };
   const overflowResult = (error: EvaluationDepthOverflow, counterDelta = 0): CompiledRunResult => {
     const overflowState = error.state as St | undefined;
     return {

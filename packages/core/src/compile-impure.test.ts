@@ -87,23 +87,38 @@ describe("compiled impure body (matespace VM de-risk)", () => {
     expect(c.out[4]).toEqual(["((M Z) (W Z) (C Z))"]);
   });
 
-  // The regression guard for the matespace/scale OOM. A self-call recurses natively, so a deep impure
-  // recursion overflows the host stack exactly as the interpreter does, producing the identical
-  // `(Error <call> StackOverflow)` and rolling back every partial add-atom. The compiled path must NOT
-  // trampoline this to completion: doing so built 1,000,000 atoms on scale.metta and ran the suite out of
-  // memory, and diverged from the interpreter, which stops at the same native limit. At depth 200000 both
-  // overflow well within the worker stack, so the test is fast (the overflow is cheap) — if the compiled
-  // path ever ran unbounded again, this would build atoms until it timed out or ran out of memory.
+  // The regression guard for the matespace/scale OOM, inverted to the flat-tail semantics: Hyperon
+  // completes this shape (verified live on hyperon 0.2.10, `(build 300)` returns done plus every item)
+  // and PeTTa completes it flat via last-call optimization, so both modes must COMPLETE it with O(1)
+  // evaluation frames — the compiled VM through its tail-call driver, the interpreter through the
+  // trampoline's chain transfers. At depth 100000 a regression back to one native or heap frame per
+  // step either crashes the worker or times out, so completion here IS the memory guard.
   const deep = `
     (= (build $n) (if (== $n 0) done (let $x (add-atom &self (item $n)) (build (- $n 1)))))
-    !(build 200000)
+    !(build 100000)
     !(collapse (match &self (item $k) $k))`;
-  it("deep impure recursion overflows identically to the interpreter (no unbounded loop)", () => {
+  it("deep impure tail recursion completes identically in both modes (flat, no native overflow)", () => {
     const compiled = run(deep, true);
     expect(compiled).toEqual(run(deep, false));
-    // It overflowed rather than completing, and the partial build rolled back to an empty space.
-    expect(compiled.out[0]![0]).toContain("StackOverflow");
-    expect(compiled.out[1]).toEqual(["()"]);
+    expect(compiled.out[0]).toEqual(["done"]);
+    expect(compiled.out[1]![0]).toMatch(/^\(100000 99999 /);
+  }, 60_000);
+
+  // A runaway impure tail cycle must cut on fuel with the standard StackOverflow atom in both modes
+  // (never hang, never overflow natively). Effects up to the cut persist, as Hyperon's error model
+  // keeps prior add-atoms; the two modes debit fuel at different per-step rates, so only the cut
+  // itself is asserted, not the partial space.
+  const spin = `
+    (= (spin $n) (let $x (add-atom &self (tick $n)) (spin (+ $n 1))))
+    !(spin 0)`;
+  it("a runaway impure tail cycle cuts on fuel with a StackOverflow error in both modes", () => {
+    for (const compiled of [true, false]) {
+      const env = compiled ? compiledEnvWith(spin) : envWith(spin);
+      const [pairs] = mettaEval(env, 50_000, initSt(), [], bangAtoms(spin)[0]!);
+      expect(pairs.map((p) => format(p[0])).join(" "), `compiled=${compiled}`).toContain(
+        "StackOverflow",
+      );
+    }
   });
 
   // A doubly-recursive impure function whose body returns a TUPLE of two recursive calls, matespacefast's
