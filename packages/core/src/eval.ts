@@ -111,6 +111,7 @@ import {
   analyzePurity as analyzePurityRef,
   analyzeTableWorth,
   functorCallCount,
+  inertArgumentPositions,
   IMPURE_OPS,
   isTablingImpureHead,
   keyWellFormed,
@@ -6711,7 +6712,7 @@ function runtimeFunctorTableWorth(
   if (cached !== undefined) return cached;
   const targets = new Set([op]);
   const directBranching = [...(env.ruleIndex.get(op) ?? []), ...(w.selfRules.get(op) ?? [])].some(
-    ([, rhs]) => functorCallCount(rhs, targets) >= 2,
+    ([, rhs]) => functorCallCount(rhs, targets, inertArgumentPositions(env)) >= 2,
   );
   const worth = staticWorth || directBranching;
   runtimeTableWorthCache.set(ck, worth);
