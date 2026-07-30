@@ -141,64 +141,39 @@
          MalformedGenerationResult
          (Value $bad))))))
 
+; Every driver mode is deterministic (the exhaustive cursor included), so DriveCustom must
+; produce exactly one result in every mode.
 (= (_fuzz-drive-custom-results
      $name
      $arguments
      $mode
      $results)
-   (if (== $mode Exhaustive)
-       (switch $results
-         ((()
+   (switch $results
+     ((()
+       (_fuzz-generation-error
+         MissingCustomGenerator
+         (Name $name)))
+      (($sample)
+       (switch $sample
+         (((DriveCustom
+             $seen-name
+             $seen-arguments
+             $seen-driver
+             $seen-size)
            (_fuzz-generation-error
              MissingCustomGenerator
              (Name $name)))
-          (($single)
-           (switch $single
-             (((DriveCustom
-                 $seen-name
-                 $seen-arguments
-                 $seen-driver
-                 $seen-size)
-               (_fuzz-generation-error
-                 MissingCustomGenerator
-                 (Name $name)))
-              ($sample
-               (_fuzz-custom-wrap
-                 $name
-                 $arguments
-                 $sample)))))
-          ($valid
-           (let $sample (superpose $valid)
-             (_fuzz-custom-wrap
-               $name
-               $arguments
-               $sample)))))
-       (switch $results
-         ((()
-           (_fuzz-generation-error
-             MissingCustomGenerator
-             (Name $name)))
-          (($sample)
-           (switch $sample
-             (((DriveCustom
-                 $seen-name
-                 $seen-arguments
-                 $seen-driver
-                 $seen-size)
-               (_fuzz-generation-error
-                 MissingCustomGenerator
-                 (Name $name)))
-              ($value
-               (_fuzz-custom-wrap
-                 $name
-                 $arguments
-                 $value)))))
-          ($many
-           (_fuzz-generation-error
-             AmbiguousCustomGenerator
-             (Name $name)
-             (Mode $mode)
-             (Results $many)))))))
+          ($value
+           (_fuzz-custom-wrap
+             $name
+             $arguments
+             $value)))))
+      ($many
+       (_fuzz-generation-error
+         AmbiguousCustomGenerator
+         (Name $name)
+         (Mode $mode)
+         (Results $many))))))
 
 (= (_fuzz-drive-custom
      $name
