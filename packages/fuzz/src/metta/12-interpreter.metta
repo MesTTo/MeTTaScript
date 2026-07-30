@@ -7,15 +7,30 @@
 ; and the single result is extracted purely by unification: `collapse` would re-evaluate the
 ; collected results and grounded list operations resolve their arguments, either of which
 ; dereferences a live value such as a state handle.
+; Flat accumulator, not recurse-then-cons: a relation may return hundreds of results and each
+; recursive-then-cons step would cost an evaluator frame.
 (= (_fuzz-pair-values $pairs)
-   (if (== $pairs ())
-       ()
-       (let ($head $tail) (decons-atom $pairs)
-         (let $rest (_fuzz-pair-values $tail)
-           (unify $head
-             ($value $bindings)
-             (cons-atom $value $rest)
-             (cons-atom $head $rest))))))
+   (_fuzz-pair-values-loop (FuzzPairValuesFold $pairs ())))
+
+(= (_fuzz-pair-values-loop $state)
+   (if (_fuzz-pair-values-finished $state)
+       $state
+       (_fuzz-pair-values-loop (_fuzz-pair-values-step $state))))
+
+(= (_fuzz-pair-values-finished $state)
+   (unify $state (FuzzPairValuesFold $pairs $reversed) False True))
+
+(= (_fuzz-pair-values-step $state)
+   (unify $state
+     (FuzzPairValuesFold $pairs $reversed)
+     (if (== $pairs ())
+         (reverse $reversed)
+         (let ($head $tail) (decons-atom $pairs)
+           (let $value
+                (unify $head ($result $bindings) $result $head)
+             (let $next (cons-atom $value $reversed)
+               (FuzzPairValuesFold $tail $next)))))
+     $state))
 
 (= (_fuzz-call-results-bind $pairs $context)
    (unify $pairs

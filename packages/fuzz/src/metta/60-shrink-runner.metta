@@ -172,13 +172,29 @@
      (abs-math (- $value $origin))
      0))
 
+; Flat accumulator: a decision tree carries one leaf per drawn decision, so a large machine run
+; would nest an evaluator frame per leaf under recurse-then-cons.
 (= (_fuzz-leaf-distances $leaves)
-   (if (== $leaves ())
-       ()
-       (let ($head $tail) (decons-atom $leaves)
-         (let $distance (_fuzz-leaf-distance $head)
-           (let $rest (_fuzz-leaf-distances $tail)
-             (cons-atom $distance $rest))))))
+   (_fuzz-leaf-distances-loop (FuzzLeafDistanceFold $leaves ())))
+
+(= (_fuzz-leaf-distances-loop $state)
+   (if (_fuzz-leaf-distances-finished $state)
+       $state
+       (_fuzz-leaf-distances-loop (_fuzz-leaf-distances-step $state))))
+
+(= (_fuzz-leaf-distances-finished $state)
+   (unify $state (FuzzLeafDistanceFold $leaves $reversed) False True))
+
+(= (_fuzz-leaf-distances-step $state)
+   (unify $state
+     (FuzzLeafDistanceFold $leaves $reversed)
+     (if (== $leaves ())
+         (reverse $reversed)
+         (let ($head $tail) (decons-atom $leaves)
+           (let $distance (_fuzz-leaf-distance $head)
+             (let $next (cons-atom $distance $reversed)
+               (FuzzLeafDistanceFold $tail $next)))))
+     $state))
 
 (= (_fuzz-distances-less $first $second)
    (if (== $first ())
