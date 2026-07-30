@@ -2132,6 +2132,16 @@ function spaceName(w: World, a: Atom): string | undefined {
   const r = resolveTok(w, a);
   return r.kind === "sym" ? r.name : undefined;
 }
+// Comparison ops with Hyperon's value semantics for state atoms: `(== (new-state 1) (new-state 1))`
+// is True there, so these (and only these) grounded ops receive state-resolved arguments.
+const stateValueCompareOps: ReadonlySet<string> = new Set([
+  "==",
+  "_assert-results-are-equal",
+  "_assert-results-are-equal-msg",
+  "_assert-results-are-alpha-equal",
+  "_assert-results-are-alpha-equal-msg",
+]);
+
 function resolveStates(w: World, a: Atom): Atom {
   if (w.store.size === 0) return a; // no state cells: identity, skip the tree clone (hot path)
   if (a.kind === "expr") {
@@ -2381,9 +2391,20 @@ function* evalOpG(env: MinEnv, st: St, prev: Stack, x: Atom, b: Bindings): Gen<[
     x2.kind === "expr" &&
     !(pettaOpNames.has(op) && hasRuleFor(env, st.world, st.counter, x2));
   if (useGrounded) {
+    // Grounded arguments keep `(State n)` handles intact: Hyperon passes state atoms opaquely
+    // through structure, so `(cons-atom $handle ())` must yield the handle, not its content.
+    // Equality is the exception — Hyperon's state atoms compare by their current value, so the
+    // world-blind comparison ops get state-resolved arguments. Space reads and match patterns
+    // still resolve states (the live-state-in-space feature); `get-state`/`change-state!`
+    // dereference explicitly as special forms.
+    const resolveForOp = stateValueCompareOps.has(op!) && st.world.store.size !== 0;
     let args = x2.items
       .slice(1)
-      .map((a) => resolveStates(st.world, subTokens(st.world, a, env.intern)));
+      .map((a) =>
+        resolveForOp
+          ? resolveStates(st.world, subTokens(st.world, a, env.intern))
+          : subTokens(st.world, a, env.intern),
+      );
     if (op === "repr" && args.length === 1)
       args = [partialApplicationView(env, st.world, args[0]!)];
     const r = yield* callGroundedG(env, x2, op!, args);
@@ -2405,9 +2426,7 @@ function* evalOpG(env: MinEnv, st: St, prev: Stack, x: Atom, b: Bindings): Gen<[
     if (head.kind === "gnd" && head.exec !== undefined) {
       if (fuzzSandboxDenies(env, "Host"))
         return [[finItem(prev, fuzzEffectDeniedAtom(x2, "Host", "<grounded-exec>"), b)], st];
-      const args = x2.items
-        .slice(1)
-        .map((a) => resolveStates(st.world, subTokens(st.world, a, env.intern)));
+      const args = x2.items.slice(1).map((a) => subTokens(st.world, a, env.intern));
       try {
         const results = head.exec(args);
         if (results instanceof Promise) {
