@@ -84,6 +84,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/edsl
 
+  compat/fuzz:
+    dependencies:
+      '@mettascript/fuzz':
+        specifier: workspace:*
+        version: link:../../packages/fuzz
+
   compat/grapher:
     dependencies:
       '@mettascript/grapher':

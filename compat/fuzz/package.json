@@ -1,10 +1,9 @@
 {
-  "name": "@mettascript/fuzz",
+  "name": "@metta-ts/fuzz",
   "version": "2.7.0",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
-  "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
@@ -17,31 +16,21 @@
     "dist"
   ],
   "scripts": {
-    "generate": "node scripts/generate-module.mjs",
-    "generate:check": "node scripts/generate-module.mjs --check",
-    "prebuild": "pnpm generate:check",
     "build": "tsup src/index.ts --format esm --dts --clean"
   },
   "dependencies": {
-    "@mettascript/core": "workspace:*",
-    "pure-rand": "8.4.2"
+    "@mettascript/fuzz": "workspace:*"
   },
   "author": "MesTTo",
   "engines": {
     "node": ">=20"
   },
   "sideEffects": true,
+  "module": "./dist/index.js",
   "publishConfig": {
     "access": "public"
   },
-  "description": "MeTTa-native property testing, shrinking, state-machine testing, and bounded verification for MeTTaScript.",
-  "keywords": [
-    "metta",
-    "hyperon",
-    "property-testing",
-    "fuzzing",
-    "model-checking"
-  ],
+  "description": "Compatibility shim for @mettascript/fuzz.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/MesTTo/MeTTaScript.git",
