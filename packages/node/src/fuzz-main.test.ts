@@ -8,7 +8,15 @@
 
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -145,10 +153,15 @@ describe("metta fuzz", () => {
   });
 
   it("reports a file with no declarations rather than saying nothing", () => {
-    const run = metta(["fuzz", fixture({ "p.metta": "!(+ 1 2)\n" })]);
+    const file = fixture({ "p.metta": "!(+ 1 2)\n" });
+    const run = metta(["fuzz", file]);
 
-    expect(run.out).toContain("no (FuzzTest ...) declarations");
+    // A diagnostic, so it goes to stderr and leaves stdout to the results.
+    expect(run.err).toContain("no (FuzzTest ...) declarations");
+    expect(run.out).toBe("");
     expect(run.code).toBe(0);
+    // Under --json an empty run is still a document a caller can parse.
+    expect(JSON.parse(metta(["fuzz", "--json", file]).out)).toEqual([]);
   });
 
   it("resolves the imports a suite file declares", () => {
@@ -237,7 +250,135 @@ describe("metta reach", () => {
     expect(metta(["reach", "--list", file]).out).toContain("(FuzzReachCase climb (Count 0)");
     expect(metta(["reach", "--list", file]).code).toBe(0);
     expect(metta(["reach", file, "nope"]).code).toBe(2);
-    expect(metta(["reach", file, "nope"]).out).toContain("no declaration named nope");
+    expect(metta(["reach", file, "nope"]).err).toContain("no declaration named nope");
+  });
+});
+
+// The corpus is the counterexamples a run already found. A property that only fails on the boundary of
+// its domain is the case worth pinning: an edge-case pass finds it once, and a later random-only run
+// would miss it if the corpus did not replay it first.
+const BOUNDARY = `
+(: under-limit (-> Atom FuzzProperty))
+(= (under-limit $n) (expect-true (< $n 1000000) (Saw $n)))
+`;
+const FINDS = `${BOUNDARY}
+(FuzzTest boundary (gen-int 0 1000000) under-limit (fuzz-config (Seed 1) (Runs 2) (EdgeCases 3)))
+`;
+const MISSES = `${BOUNDARY}
+(FuzzTest boundary (gen-int 0 1000000) under-limit (fuzz-config (Seed 7) (Runs 3) (EdgeCases 0)))
+`;
+
+describe("metta fuzz --corpus", () => {
+  it("records a counterexample and replays it in a run that would otherwise miss it", () => {
+    const finds = fixture({ "p.metta": FINDS });
+    const corpus = join(dirname(finds), "corpus");
+    const misses = fixture({ "p.metta": MISSES });
+
+    // Without a corpus, the random-only declaration passes: one value in a million is not found.
+    const clean = metta(["fuzz", misses]);
+    expect(clean.out).toContain("ok       boundary");
+    expect(clean.code).toBe(0);
+
+    // The edge-case declaration finds the boundary and records it.
+    const found = metta(["fuzz", "--corpus", corpus, finds]);
+    expect(found.out).toContain("FAILED   boundary ExpectedTrue 1000000");
+    expect(found.err).toContain("1 recorded");
+    expect(found.code).toBe(1);
+
+    // Now the same property fails in the run that could not find it on its own.
+    const replayed = metta(["fuzz", "--corpus", corpus, misses]);
+    expect(replayed.out).toContain("FAILED   boundary ExpectedTrue 1000000");
+    expect(replayed.err).toContain("1 replayed");
+    expect(replayed.code).toBe(1);
+  });
+
+  it("stores a counterexample once, however many times it is recorded", () => {
+    const file = fixture({ "p.metta": FINDS });
+    const corpus = join(dirname(file), "corpus");
+
+    metta(["fuzz", "--corpus", corpus, file]);
+    const entries = readdirSync(corpus);
+    const again = metta(["fuzz", "--corpus", corpus, file]);
+
+    // Content-addressed names: the second recording writes the name that is already there.
+    expect(entries).toHaveLength(1);
+    expect(readdirSync(corpus)).toEqual(entries);
+    expect(again.err).toContain("1 replayed, 0 recorded");
+    // The entry names its property and carries the value through the versioned codec.
+    expect(entries[0]).toMatch(/^boundary-[0-9a-f]{16}\.metta$/);
+    const text = readFileSync(join(corpus, entries[0]!), "utf8");
+    expect(text).toContain("(FuzzCorpusEntry 1 boundary (FuzzEncodedAtom 1 (Integer 1000000)))");
+    expect(text).toContain("; Commit this file");
+  });
+
+  it("reads a corpus without writing to it when asked", () => {
+    const file = fixture({ "p.metta": FINDS });
+    const corpus = join(dirname(file), "corpus");
+    const run = metta(["fuzz", "--corpus", corpus, "--no-record", file]);
+
+    expect(run.out).toContain("FAILED   boundary");
+    expect(run.err).toContain("0 replayed, 1 not recorded (--no-record)");
+    expect(existsSync(corpus)).toBe(false);
+    expect(run.code).toBe(1);
+  });
+
+  it("keeps --json output parseable with a corpus in play", () => {
+    const file = fixture({ "p.metta": FINDS });
+    const corpus = join(dirname(file), "corpus");
+    const run = metta(["fuzz", "--corpus", corpus, "--json", file]);
+
+    // The corpus summary is a diagnostic, so stdout stays exactly one document.
+    expect(JSON.parse(run.out)).toHaveLength(1);
+    expect(run.err).toContain("recorded");
+  });
+
+  it("refuses malformed persisted data instead of ignoring it", () => {
+    const file = fixture({ "p.metta": FINDS });
+    const corpus = join(dirname(file), "corpus");
+    mkdirSync(corpus, { recursive: true });
+
+    const cases: readonly [string, string][] = [
+      ["wrong-shape", "(NotAnEntry 1 boundary 5)"],
+      ["wrong-version", "(FuzzCorpusEntry 2 boundary (FuzzEncodedAtom 1 (Integer 5)))"],
+      ["bad-payload", "(FuzzCorpusEntry 1 boundary (FuzzEncodedAtom 1 (Nonsense 5)))"],
+      ["a-query", '!(println! "ran")'],
+      ["unparseable", "(FuzzCorpusEntry 1 boundary"],
+      ["empty", "; only a comment\n"],
+    ];
+    for (const [name, content] of cases) {
+      const entry = join(corpus, `${name}.metta`);
+      writeFileSync(entry, content);
+      const run = metta(["fuzz", "--corpus", corpus, file]);
+      expect(run.code, name).toBe(2);
+      expect(run.err, name).toContain(entry);
+      // A corrupt corpus stops the run rather than quietly dropping a known failure.
+      expect(run.out, name).toBe("");
+      rmSync(entry);
+    }
+  });
+
+  it("round-trips values that have no source syntax", () => {
+    // A float is stored as its two 32-bit words, so a counterexample of NaN survives exactly. Written
+    // as a corpus entry by hand and replayed: `(< nan 1000000)` is False, so the property fails on it.
+    const file = fixture({ "p.metta": MISSES });
+    const corpus = join(dirname(file), "corpus");
+    mkdirSync(corpus, { recursive: true });
+    writeFileSync(
+      join(corpus, "nan.metta"),
+      "(FuzzCorpusEntry 1 boundary (FuzzEncodedAtom 1 (Float64Bits 2146959360 0)))\n",
+    );
+    const run = metta(["fuzz", "--corpus", corpus, "--json", file]);
+
+    expect(run.code).toBe(1);
+    const [result] = JSON.parse(run.out) as { result: string }[];
+    expect(result!.result).toContain("(Phase Regression)");
+    expect(result!.result).toContain("(SmallestValue NaN)");
+    expect(result!.result).toContain(
+      "(EncodedValue (FuzzEncodedAtom 1 (Float64Bits 2146959360 0)))",
+    );
+    // A stored entry carries no decision tree, so it is replayed as it was stored rather than shrunk
+    // again. It is already the smallest value the run that found it could reach.
+    expect(result!.result).toContain("(NotShrunk (Reason NoDecisionTree))");
   });
 });
 

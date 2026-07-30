@@ -34,6 +34,7 @@ import {
   type FuzzExitCode,
   type FuzzOutcome,
 } from "@mettascript/fuzz";
+import { readCorpus, recordCorpusEntry } from "./fuzz-corpus";
 import { readImports } from "./file-imports";
 
 const USAGE = `usage:
@@ -46,6 +47,8 @@ options:
   --max-discards <n>      --max-shrinks <n>       --case-steps <n>
   --case-depth <n>        --max-enumerated <n>    --max-depth <n>
   --max-states <n>        --max-transitions <n>
+  --corpus <dir>          replay the counterexamples stored there, and record new ones
+  --no-record             read the corpus without writing to it
   --json                  print the full result atoms as JSON
   --list                  list declared tests without running them
 
@@ -79,6 +82,9 @@ export interface FuzzCliRequest {
   readonly list: boolean;
   /** `metta reach <file> <id>` restricts the run to one declaration. */
   readonly only: string | undefined;
+  /** Where stored counterexamples live, when a corpus was asked for. */
+  readonly corpus: string | undefined;
+  readonly record: boolean;
 }
 
 export type FuzzCliParse =
@@ -94,6 +100,8 @@ export function parseFuzzArgs(args: readonly string[], mode: "fuzz" | "reach"): 
   let exhaustive = false;
   let json = false;
   let list = false;
+  let corpus: string | undefined;
+  let record = true;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -104,6 +112,17 @@ export function parseFuzzArgs(args: readonly string[], mode: "fuzz" | "reach"): 
       json = true;
     } else if (arg === "--list") {
       list = true;
+    } else if (arg === "--corpus") {
+      // A corpus holds counterexamples for properties. A reachability search has none: its answer is a
+      // witness for a declared model, not an input to try again.
+      if (mode === "reach") return { ok: false, message: "--corpus applies to metta fuzz" };
+      const raw = args[i + 1];
+      if (raw === undefined || raw.startsWith("-"))
+        return { ok: false, message: "--corpus needs a directory" };
+      corpus = raw;
+      i += 1;
+    } else if (arg === "--no-record") {
+      record = false;
     } else if (known.has(arg)) {
       const raw = args[i + 1];
       if (raw === undefined) return { ok: false, message: `${arg} needs a value` };
@@ -122,7 +141,9 @@ export function parseFuzzArgs(args: readonly string[], mode: "fuzz" | "reach"): 
   }
 
   if (file === undefined) return { ok: false, message: "a .metta file is required" };
-  return { ok: true, request: { file, overrides, exhaustive, json, list, only } };
+  if (corpus === undefined && !record)
+    return { ok: false, message: "--no-record applies to --corpus <dir>" };
+  return { ok: true, request: { file, overrides, exhaustive, json, list, only, corpus, record } };
 }
 
 // Loading a module is part of declaring a suite, so these directives are kept while every other one
@@ -142,14 +163,19 @@ function declarationsOf(src: string): TopAtom[] {
   );
 }
 
-/** Results of evaluating one appended query against a file's declarations. */
-function evaluate(src: string, file: string, query: string): QueryResult[] {
+/** Results of evaluating one appended query against a file's declarations and any stored regressions. */
+function evaluate(
+  src: string,
+  file: string,
+  query: string,
+  regressions: readonly TopAtom[] = [],
+): QueryResult[] {
   const fileDir = dirname(resolve(file));
   const imports = readImports(src, fileDir, dirname(fileDir));
   // `import! &self fuzz` is appended rather than required in the file, so a suite file needs no
   // ceremony; importing twice is a no-op.
   const appended = parseAll(`!(import! &self fuzz)\n!${query}`, standardTokenizer());
-  const program = [...declarationsOf(src), ...appended];
+  const program = [...declarationsOf(src), ...regressions, ...appended];
   return evalSequential(program, DEFAULT_FUEL, imports, { tabling: true });
 }
 
@@ -173,7 +199,10 @@ function suiteResults(atom: Atom): readonly { readonly id: string; readonly resu
 
 export interface FuzzCliOutcome {
   readonly code: FuzzCliExit;
+  /** Results, on stdout. Under `--json` this is exactly one JSON document and nothing else. */
   readonly lines: readonly string[];
+  /** Diagnostics, on stderr, so a caller can pipe the results without filtering them out. */
+  readonly notes: readonly string[];
 }
 
 type FuzzCliExit = FuzzExitCode;
@@ -181,7 +210,7 @@ type FuzzCliExit = FuzzExitCode;
 /** Run one request and return what to print plus the exit code, without touching the process. */
 export function runFuzzRequest(request: FuzzCliRequest, mode: "fuzz" | "reach"): FuzzCliOutcome {
   if (!existsSync(request.file))
-    return { code: FUZZ_EXIT_INVALID, lines: [`no such file: ${request.file}`] };
+    return { code: FUZZ_EXIT_INVALID, lines: [], notes: [`no such file: ${request.file}`] };
   const src = readFileSync(request.file, "utf8");
 
   const overrides = `(${request.overrides.join(" ")})`;
@@ -195,31 +224,43 @@ export function runFuzzRequest(request: FuzzCliRequest, mode: "fuzz" | "reach"):
         ? `(fuzz-run-suite-exhaustive ${overrides})`
         : `(fuzz-run-suite-with ${overrides})`;
 
-  const results = evaluate(src, request.file, query);
+  // A listing does not run anything, so it does not need the corpus loaded.
+  const loaded =
+    request.corpus === undefined || request.list ? undefined : readCorpus(request.corpus);
+  if (loaded !== undefined && !loaded.ok)
+    return { code: FUZZ_EXIT_INVALID, lines: [], notes: [loaded.reason] };
+
+  const results = evaluate(src, request.file, query, loaded?.load.facts);
   const last = results.at(-1);
   if (last === undefined || last.results.length !== 1)
     return {
       code: FUZZ_EXIT_INVALID,
-      lines: [`the suite query produced ${last?.results.length ?? 0} results, expected one`],
+      lines: [],
+      notes: [`the suite query produced ${last?.results.length ?? 0} results, expected one`],
     };
   const value = last.results[0]!;
 
-  if (request.list)
-    return {
-      code: 0,
-      lines: value.kind === "expr" ? value.items.map((item) => format(item)) : [format(value)],
-    };
+  if (request.list) {
+    const listed =
+      value.kind === "expr" ? value.items.map((item) => format(item)) : [format(value)];
+    return { code: 0, lines: request.json ? [JSON.stringify(listed)] : listed, notes: [] };
+  }
 
   const pairs = suiteResults(value);
   if (pairs.length === 0) {
     const what = mode === "reach" ? "(FuzzReachTest ...)" : "(FuzzTest ...)";
-    return { code: 0, lines: [`no ${what} declarations in ${request.file}`] };
+    // Under --json an empty run is still a JSON document, so a caller parses stdout unconditionally.
+    return {
+      code: 0,
+      lines: request.json ? ["[]"] : [],
+      notes: [`no ${what} declarations in ${request.file}`],
+    };
   }
 
   const selected =
     request.only === undefined ? pairs : pairs.filter((pair) => pair.id === request.only);
   if (selected.length === 0)
-    return { code: FUZZ_EXIT_INVALID, lines: [`no declaration named ${request.only!}`] };
+    return { code: FUZZ_EXIT_INVALID, lines: [], notes: [`no declaration named ${request.only!}`] };
 
   const outcomes: FuzzOutcome[] = selected.map((pair) => decodeFuzzOutcome(pair.result));
   const lines = request.json
@@ -233,7 +274,43 @@ export function runFuzzRequest(request: FuzzCliRequest, mode: "fuzz" | "reach"):
         ),
       ]
     : outcomes.map(renderOutcomeLine);
-  return { code: exitCodeForOutcomes(outcomes), lines };
+
+  const corpusLines =
+    request.corpus === undefined
+      ? []
+      : corpusReport(request.corpus, request.record, loaded?.load.count ?? 0, selected, outcomes);
+  return { code: exitCodeForOutcomes(outcomes), lines, notes: corpusLines };
+}
+
+// Recording happens after the run and reports what it did. A counterexample that cannot be stored is
+// said so plainly rather than dropped: the failure was still reported, but the corpus does not have it.
+function corpusReport(
+  dir: string,
+  record: boolean,
+  loaded: number,
+  selected: readonly { readonly id: string }[],
+  outcomes: readonly FuzzOutcome[],
+): string[] {
+  const failures = outcomes.flatMap((outcome, index) =>
+    outcome.kind === "failed" && outcome.smallestValue !== undefined
+      ? [{ property: selected[index]!.id, value: outcome.smallestValue }]
+      : [],
+  );
+
+  const problems: string[] = [];
+  let written = 0;
+  if (record) {
+    for (const entry of failures) {
+      const stored = recordCorpusEntry(dir, entry);
+      if (!stored.ok) problems.push(`corpus   ${entry.property}: ${stored.reason}`);
+      else if (stored.recorded) written += 1;
+    }
+  }
+
+  const parts = [`${loaded} replayed`];
+  if (record) parts.push(`${written} recorded`);
+  else if (failures.length > 0) parts.push(`${failures.length} not recorded (--no-record)`);
+  return [`corpus   ${dir}: ${parts.join(", ")}`, ...problems];
 }
 
 /** CLI entry. Writes to stdout/stderr and returns the exit code. */
@@ -249,5 +326,6 @@ export function runFuzzMain(args: readonly string[], mode: "fuzz" | "reach"): Fu
   }
   const outcome = runFuzzRequest(parsed.request, mode);
   for (const line of outcome.lines) process.stdout.write(`${line}\n`);
+  for (const note of outcome.notes) process.stderr.write(`${note}\n`);
   return outcome.code;
 }

@@ -36,6 +36,15 @@ export {
   type ReachStep,
 } from "./decode.js";
 export {
+  corpusRegressionFact,
+  parseCorpusEntries,
+  renderCorpusEntry,
+  FUZZ_CORPUS_FORMAT,
+  type FuzzCorpusEntry,
+  type FuzzCorpusFailure,
+  type FuzzCorpusResult,
+} from "./corpus.js";
+export {
   FUZZ_ALPHA_REPLAY_KEY_ALGORITHM,
   FUZZ_ATOM_CODEC_VERSION,
   FUZZ_ATOM_KEY_ALGORITHM,

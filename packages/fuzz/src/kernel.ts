@@ -4138,6 +4138,12 @@ const decodeAtom: GroundFn = (args) => {
   return ok(decodeReplayAtom(args[0]!));
 };
 
+// The same codec the `_fuzz-encode-atom` and `_fuzz-decode-atom` operations expose to MeTTa, for a
+// host that has to write an atom somewhere text-only and read it back. Both return an `Error` atom
+// rather than throwing: an atom carrying a grounded value with no encoding has no representation, and
+// a stored payload can be corrupted.
+export { encodeReplayAtom as encodeAtomForStorage, decodeReplayAtom as decodeAtomFromStorage };
+
 const KERNEL_OPERATIONS = [
   ["_fuzz-rng-init", rngInit],
   ["_fuzz-draw-int", drawInt],
