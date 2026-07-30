@@ -194,8 +194,17 @@ describe("compiled tail-call nontermination differential", () => {
   // Tail transfers iterate on the heap in every mode, so a runaway tail cycle no longer grows
   // the native stack; the resource bound that stops it is fuel, and exhaustion must surface as
   // the same StackOverflow error in the interpreter and in both compiled modes. A mode that
-  // ignored fuel would show up here as a timeout.
-  const RUNAWAY_FUEL = 200_000;
+  // ignored fuel would run forever and show up here as a timeout.
+  //
+  // The wall clock is only there to catch that, so it is generous and the fuel is small. Burning
+  // fuel costs time in proportion to it, measured at 3.9s for 200,000 and 1.1s for 50,000 in the
+  // slowest mode, and the first version of this test paired 200,000 with a ten-second budget: it
+  // passed locally and timed out on a shared CI runner that was also running the differential
+  // suite. That made it a performance assertion by accident. Fifty thousand still iterates the
+  // cycle tens of thousands of times, and a minute is long enough that only a mode which never
+  // terminates reaches it.
+  const RUNAWAY_FUEL = 50_000;
+  const RUNAWAY_TIMEOUT_MS = 60_000;
   const runawayCases: Array<
     IsolatedCase & {
       readonly name: string;
@@ -237,16 +246,20 @@ describe("compiled tail-call nontermination differential", () => {
 
   for (const testCase of runawayCases) {
     for (const mode of ["on", "off", "interpreted"] as const) {
-      it(`${testCase.name}: ${mode}`, async () => {
-        const outcome = await runIsolated(testCase, mode, 10_000, RUNAWAY_FUEL);
-        expect(outcome.outcome).toBe("stack-overflow-error");
-        if (mode !== "interpreted")
-          for (const name of testCase.holderNames) expect(outcome.holders[name]).toBeDefined();
-        if (outcome.outcome === "stack-overflow-error") {
-          expect(outcome.results).toHaveLength(1);
-          expect(outcome.results[0]).toContain("StackOverflow");
-        }
-      }, 15_000);
+      it(
+        `${testCase.name}: ${mode}`,
+        async () => {
+          const outcome = await runIsolated(testCase, mode, RUNAWAY_TIMEOUT_MS, RUNAWAY_FUEL);
+          expect(outcome.outcome).toBe("stack-overflow-error");
+          if (mode !== "interpreted")
+            for (const name of testCase.holderNames) expect(outcome.holders[name]).toBeDefined();
+          if (outcome.outcome === "stack-overflow-error") {
+            expect(outcome.results).toHaveLength(1);
+            expect(outcome.results[0]).toContain("StackOverflow");
+          }
+        },
+        RUNAWAY_TIMEOUT_MS + 30_000,
+      );
     }
   }
 
