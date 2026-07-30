@@ -480,8 +480,8 @@
                        (append
                          $root-candidates
                          (append
-                           $nested-candidates
-                           $custom-candidates)))
+                           $custom-candidates
+                           $nested-candidates)))
                  (let $wrapped
                        (_fuzz-wrap-child-candidates
                          $kind
@@ -590,14 +590,17 @@
       ((Decision $kind $metadata $selection $children)
        (let $root-candidates
              (_fuzz-built-in-root-candidates $decision)
-         (let $child-candidates
-               (_fuzz-child-shrink-candidates $decision)
-           (let $custom-candidates
-                 (_fuzz-custom-root-candidates $decision)
+         (let $custom-candidates
+               (_fuzz-custom-root-candidates $decision)
+           (let $child-candidates
+                 (_fuzz-child-shrink-candidates $decision)
+             ; Custom root candidates come before child descent: a custom hook's structural
+             ; reductions (removing machine commands, dropping branches) shrink faster than
+             ; simplifying values inside a structure that is about to disappear.
              (_fuzz-deduplicate-trees
                (append
                  $root-candidates
                  (append
-                   $child-candidates
-                   $custom-candidates)))))))
+                   $custom-candidates
+                   $child-candidates)))))))
       ($bad ()))))
