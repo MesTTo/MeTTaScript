@@ -7,6 +7,13 @@ import type { Atom } from "./atom";
 /** Native recursion stays on the fast path below this logical user-call depth. */
 export const EVALUATION_TRAMPOLINE_DEPTH = 32;
 
+/** Hard cap on natively nested evaluation frames. Logical depth misses tail transfers (they
+ *  reuse their level), so a long tail chain nests one native generator quartet per step; at
+ *  roughly 340 bytes a frame the default Node stack fits about 250 of them. Handing off to the
+ *  heap continuation driver at half that keeps headroom for grounded-op internals while leaving
+ *  ordinary deep evaluation on the fast native path. */
+export const NATIVE_EVALUATION_NESTING_LIMIT = 128;
+
 /** The default language-level call bound. Explicit `max-stack-depth 0` remains unlimited. */
 export const DEFAULT_MAX_STACK_DEPTH = 320;
 
@@ -56,6 +63,11 @@ export class EvaluationDepth {
   private observed: number;
   private readonly floor: number;
   private marker: ActiveEvaluationDepthSpan | undefined;
+  /** Native evaluation-frame nesting. Unlike `level`, this counts every frame descent, so a chain
+   *  of tail transfers (which reuse their logical level) still raises it. The evaluator hands a
+   *  branch to the heap continuation driver when this crosses the trampoline threshold, which is
+   *  what keeps arbitrarily long tail loops off the JS stack. */
+  private nativeLevel = 0;
 
   constructor(level = 0) {
     this.level = level;
@@ -65,6 +77,18 @@ export class EvaluationDepth {
 
   get current(): number {
     return this.level;
+  }
+
+  get native(): number {
+    return this.nativeLevel;
+  }
+
+  enterNative(): void {
+    this.nativeLevel += 1;
+  }
+
+  leaveNative(): void {
+    this.nativeLevel -= 1;
   }
 
   get maximum(): number {

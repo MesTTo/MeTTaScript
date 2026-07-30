@@ -263,12 +263,12 @@ describe("compiled tail-call nontermination differential", () => {
       offOutcome: "result",
     },
     {
-      // The guarded multi-rule shape exhausts its budget with the tail continuation off; the
-      // native evaluation cap will complete it in every mode.
+      // The guarded multi-rule shape previously exhausted the native stack with the tail
+      // continuation off; heap-capped nesting completes it in every mode.
       name: "deep guarded multi-rule count-down",
       rules: GUARDED_MULTI_RULE_COUNTDOWN,
       query: "(count 6000)",
-      offOutcome: "stack-overflow-error",
+      offOutcome: "result",
     },
   ];
 

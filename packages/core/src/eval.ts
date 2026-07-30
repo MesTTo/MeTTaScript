@@ -80,6 +80,7 @@ import {
   EVALUATION_TRAMPOLINE_DEPTH,
   EvaluationDepth,
   type EvaluationDepthSpan,
+  NATIVE_EVALUATION_NESTING_LIMIT,
 } from "./eval-depth";
 import { DEFAULT_MAX_STEPS } from "./eval-steps";
 import { canCompactAtom, FlatAtomSpace } from "./flat-atomspace";
@@ -8871,9 +8872,11 @@ function* mettaEvalFrameG(
     reuseLevel: reuseDepthLevel,
   };
   const depthSpan = depth.beginSpan();
+  depth.enterNative();
   try {
     return yield* mettaEvalBodyG(env, fuel, st, bnd, a, w, depth, lease, depthSpan, trampoline);
   } finally {
+    depth.leaveNative();
     depth.endSpan(depthSpan);
     if (lease.ownsLevel) depth.leave();
   }
@@ -8955,7 +8958,16 @@ function* mettaEvalG(
       depth,
       reuseDepthLevel,
     }) as EvalRes;
-  if (depth.current >= EVALUATION_TRAMPOLINE_DEPTH - 1)
+  // Logical depth misses tail transfers (they reuse their level), so a long tail chain would
+  // otherwise nest one native generator frame per step; the native cap catches that too. Open
+  // atoms (unbound variables left after instantiation) are exempt from the native cap: an open
+  // self-expansion mints fresh variables at every level (a match-anything rule head fed its own
+  // body), so the heap driver would branch on it until memory dies, while native recursion cuts
+  // it fast and the top-level catch reports the observable `(Error <query> StackOverflow)`.
+  if (
+    depth.current >= EVALUATION_TRAMPOLINE_DEPTH - 1 ||
+    (depth.native >= NATIVE_EVALUATION_NESTING_LIMIT && (a.ground || inst(env, bnd, a).ground))
+  )
     return yield* driveMettaEvalG({
       kind: EVAL_REQUEST,
       env,
