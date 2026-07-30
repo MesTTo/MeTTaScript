@@ -23,6 +23,92 @@ if (fragments.length === 0) {
 const source = fragments
   .map((name) => readFileSync(join(sourceDir, name), "utf8").trimEnd())
   .join("\n\n");
+
+// A misplaced closing paren can keep a file balanced while folding sibling switch arms into
+// one arm; switch-internal then silently reduces the whole call to Empty. Parse every fragment
+// and reject any switch arm that is not exactly (pattern template) before emitting the module.
+function parseForms(text, name) {
+  const forms = [];
+  const stack = [];
+  let token = "";
+  let inString = false;
+  let inComment = false;
+  const push = (item) => {
+    if (stack.length === 0) forms.push(item);
+    else stack[stack.length - 1].push(item);
+  };
+  const flush = () => {
+    if (token !== "") {
+      push(token);
+      token = "";
+    }
+  };
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inComment) {
+      if (ch === "\n") inComment = false;
+      continue;
+    }
+    if (inString) {
+      token += ch;
+      if (ch === "\\") token += text[++i] ?? "";
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      token += ch;
+      inString = true;
+    } else if (ch === ";") {
+      flush();
+      inComment = true;
+    } else if (ch === "(") {
+      flush();
+      stack.push([]);
+    } else if (ch === ")") {
+      flush();
+      const done = stack.pop();
+      if (done === undefined) throw new Error(`${name}: unbalanced ')'`);
+      push(done);
+    } else if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
+      flush();
+    } else {
+      token += ch;
+    }
+  }
+  flush();
+  if (stack.length !== 0) throw new Error(`${name}: unbalanced '('`);
+  return forms;
+}
+
+function lintSwitchArms(form, name, path) {
+  if (!Array.isArray(form)) return;
+  if ((form[0] === "switch" || form[0] === "switch-minimal") && form.length === 3) {
+    const cases = form[2];
+    if (Array.isArray(cases)) {
+      cases.forEach((arm, index) => {
+        if (!Array.isArray(arm) || arm.length !== 2)
+          throw new Error(
+            `${name}: switch arm ${index} in ${path} has ${
+              Array.isArray(arm) ? arm.length : "a non-expression"
+            } items; every arm must be exactly (pattern template)`,
+          );
+      });
+    }
+  }
+  for (const item of form) lintSwitchArms(item, name, path);
+}
+
+for (const name of fragments) {
+  const text = readFileSync(join(sourceDir, name), "utf8");
+  for (const form of parseForms(text, name)) {
+    const path =
+      Array.isArray(form) && Array.isArray(form[1]) && typeof form[1][0] === "string"
+        ? form[1][0]
+        : "top level";
+    lintSwitchArms(form, name, path);
+  }
+}
+
 const generated = await format(
   [
     "// SPDX-FileCopyrightText: 2026 MesTTo",
