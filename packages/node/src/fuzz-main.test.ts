@@ -18,7 +18,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseFuzzArgs } from "./fuzz-main";
 
@@ -379,6 +379,62 @@ describe("metta fuzz --corpus", () => {
     // A stored entry carries no decision tree, so it is replayed as it was stored rather than shrunk
     // again. It is already the smallest value the run that found it could reach.
     expect(result!.result).toContain("(NotShrunk (Reason NoDecisionTree))");
+  });
+});
+
+// The CLI's own usage text and the website's CLI page both list the options. Either can drift from the
+// parser, and a documented flag that is silently ignored is worse than one that is missing, so the flags
+// are compared in both directions against what the parser actually accepts.
+describe("documented options", () => {
+  const DOCS = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "..",
+    "..",
+    "website",
+    "tools",
+    "cli.md",
+  );
+
+  /** The long options a text mentions, from the `metta fuzz` section onward. */
+  const optionsIn = (text: string): Set<string> =>
+    new Set([...text.matchAll(/`?(--[a-z][a-z-]+)/g)].map((match) => match[1]!));
+
+  const accepted = (flag: string, mode: "fuzz" | "reach"): boolean => {
+    // A value-taking flag is accepted with a value; a boolean one on its own. Either way the parse must
+    // not come back with "unknown option".
+    for (const args of [
+      [flag, "1", "p.metta"],
+      [flag, "p.metta"],
+    ]) {
+      const parsed = parseFuzzArgs(args, mode);
+      if (parsed.ok || !parsed.message.startsWith("unknown option")) return true;
+    }
+    return false;
+  };
+
+  it("accepts every option its own usage text lists", () => {
+    const usage = metta(["fuzz"]).out;
+    for (const flag of optionsIn(usage)) {
+      expect(accepted(flag, "fuzz") || accepted(flag, "reach"), flag).toBe(true);
+    }
+    // The usage text has to actually list options, or the loop above proves nothing.
+    expect(optionsIn(usage).size).toBeGreaterThan(8);
+  });
+
+  it("accepts every option the CLI documentation page lists", () => {
+    const page = readFileSync(DOCS, "utf8");
+    const section = page.slice(page.indexOf("## Run property tests"), page.indexOf("## Render"));
+    const documented = optionsIn(section);
+
+    expect(documented.size).toBeGreaterThan(8);
+    for (const flag of documented) {
+      expect(accepted(flag, "fuzz") || accepted(flag, "reach"), flag).toBe(true);
+    }
+    // And the other direction: every option the CLI offers is documented on the page.
+    for (const flag of optionsIn(metta(["fuzz"]).out)) {
+      expect(documented.has(flag), `${flag} is documented`).toBe(true);
+    }
   });
 });
 
