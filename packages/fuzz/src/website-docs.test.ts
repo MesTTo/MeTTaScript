@@ -2,10 +2,13 @@
 //
 // SPDX-License-Identifier: MIT
 
-// The website's property-testing pages, run. Same idea as the README check: every `metta` block is
-// executed in document order against one accumulating program, and each documented `text` result is
-// matched against what the run actually produced. A tutorial is the documentation a reader copies first,
-// so an example that no longer works there costs the most.
+// The property-testing documentation, run. Same idea as the README check: every `metta` block is executed
+// in document order against one accumulating program, and each documented `text` result is matched against
+// what the run actually produced. A tutorial is the documentation a reader copies first, so an example that
+// no longer works there costs the most.
+//
+// The release notes are checked the same way, but only their current section: earlier sections describe
+// releases whose examples belong to those releases, not to this tree.
 
 import "./index.js";
 import { existsSync, readFileSync } from "node:fs";
@@ -19,11 +22,22 @@ import {
   undefinedDocumentedNames,
 } from "./test-utils.js";
 
-const WEBSITE = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "website");
-const pages = ["fuzz/overview.md", "reference/fuzz.md"].map((name) => resolve(WEBSITE, name));
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const pages: readonly (readonly [string, boolean])[] = [
+  [resolve(REPO, "website", "fuzz", "overview.md"), false],
+  [resolve(REPO, "website", "reference", "fuzz.md"), false],
+  [resolve(REPO, "RELEASE_NOTES.md"), true],
+];
 
-describe.each(pages)("%s", (page) => {
-  const text = existsSync(page) ? readFileSync(page, "utf8") : "";
+/** The text before the second top-level heading, for a document that keeps its history below. */
+function currentSection(text: string): string {
+  const next = text.indexOf("\n# ", 1);
+  return next === -1 ? text : text.slice(0, next);
+}
+
+describe.each(pages)("%s", (page, firstSectionOnly) => {
+  const whole = existsSync(page) ? readFileSync(page, "utf8") : "";
+  const text = firstSectionOnly ? currentSection(whole) : whole;
   const metta = markdownBlocks(text, "metta");
 
   it("exists and carries examples", () => {
