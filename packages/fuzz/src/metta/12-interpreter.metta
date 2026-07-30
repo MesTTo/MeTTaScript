@@ -3,31 +3,61 @@
 ; SPDX-License-Identifier: MIT
 
 ; A dynamic generator function must have one result. This prevents its nondeterminism from being
-; confused with alternatives chosen by the active driver.
-(= (_fuzz-call-one $function $argument $context)
-   (let $results (collapse ($function $argument))
-     (switch $results
-       ((($value) (CallOne $value))
-        (() (_fuzz-generation-error FunctionReturnedNoResults $context))
-        ($many
-         (_fuzz-generation-error FunctionReturnedMultipleResults
+; confused with alternatives chosen by the active driver. The call runs under `collapse-bind`
+; and the single result is extracted purely by unification: `collapse` would re-evaluate the
+; collected results and grounded list operations resolve their arguments, either of which
+; dereferences a live value such as a state handle.
+(= (_fuzz-pair-values $pairs)
+   (if (== $pairs ())
+       ()
+       (let ($head $tail) (decons-atom $pairs)
+         (let $rest (_fuzz-pair-values $tail)
+           (unify $head
+             ($value $bindings)
+             (cons-atom $value $rest)
+             (cons-atom $head $rest))))))
+
+(= (_fuzz-call-results-bind $pairs $context)
+   (unify $pairs
+     (($value $bindings))
+     (CallOne $value)
+     (unify $pairs
+       ()
+       (_fuzz-generation-error FunctionReturnedNoResults $context)
+       (let $values (_fuzz-pair-values $pairs)
+         (_fuzz-generation-error
+           FunctionReturnedMultipleResults
            $context
-           (Results $many)))))))
+           (Results $values))))))
+
+; The collapse-bind sits inside a function/chain context (the prelude's own `case` idiom) so its
+; argument reaches it RAW. As an evaluated argument the call would branch first — Hyperon-verified:
+; `(callrb (collapse-bind (f 1)) ctx)` with a two-rule f yields two singleton results in both
+; engines — and a nondeterministic user relation would slip through the cardinality check as
+; parallel single-result branches instead of being rejected.
+(= (_fuzz-call-one $function $argument $context)
+   (function
+     (chain (context-space) $space
+       (chain (collapse-bind (metta ($function $argument) %Undefined% $space)) $pairs
+         (chain (eval (_fuzz-call-results-bind $pairs $context)) $out
+           (return $out))))))
+
+(= (_fuzz-bool-result $called $context)
+   (switch $called
+     (((CallOne True) (CallBool True))
+      ((CallOne False) (CallBool False))
+      ((CallOne $bad)
+       (_fuzz-generation-error PredicateReturnedNonBoolean
+         $context
+         (Value $bad)))
+      ((FuzzGenerationError $code $details) $called)
+      ($bad
+       (_fuzz-generation-error MalformedFunctionResult
+         $context
+         (Value $bad))))))
 
 (= (_fuzz-call-bool $function $argument $context)
-   (let $called (_fuzz-call-one $function $argument $context)
-     (switch $called
-       (((CallOne True) (CallBool True))
-        ((CallOne False) (CallBool False))
-        ((CallOne $bad)
-         (_fuzz-generation-error PredicateReturnedNonBoolean
-           $context
-           (Value $bad)))
-        ((FuzzGenerationError $code $details) $called)
-        ($bad
-         (_fuzz-generation-error MalformedFunctionResult
-           $context
-           (Value $bad)))))))
+   (_fuzz-bool-result (_fuzz-call-one $function $argument $context) $context))
 
 (= (_fuzz-wrap-sample $kind $metadata $selection $sample)
    (switch $sample
