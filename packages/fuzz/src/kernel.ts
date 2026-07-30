@@ -264,6 +264,11 @@ function groundedKey(atom: Extract<Atom, { readonly kind: "gnd" }>, mode: KeyMod
   if (atom.match !== undefined) return nonReplayable("CustomMatcher");
   if (!atomEq(atom.typ, groundType(atom.value))) return nonReplayable("CustomGroundedType");
 
+  // The two switches below are deliberately parallel rather than factored together. They agree on the
+  // scalar kinds and differ on numbers, which is the whole point: a replay key must separate values a
+  // rerun has to reproduce exactly, so an integer keeps its own kind and a float keys on its bits, while
+  // an identity key must match core's numeric equality and keys both on the Number projection. Sharing
+  // the agreeing arms would save four lines and hide the one distinction a reader has to check.
   if (mode === "Replay" || mode === "AlphaReplay") {
     switch (atom.value.g) {
       case "int":
