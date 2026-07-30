@@ -161,6 +161,55 @@
          (append $visited (cons-atom $tree ()))
      (_fuzz-deduplicate-replay $combined)))
 
+; The shrink order (mettascript-shrink-v1): shortlex over the flattened decision leaves — fewer
+; decisions first, then lexicographically smaller origin-distances. The runner accepts a reproducing
+; candidate only when its canonical tree is strictly smaller under this order, so no candidate
+; source (a built-in shrinker or a custom ShrinkChoices relation) can re-inflate an accepted
+; counterexample through the lenient shrink replay.
+(= (_fuzz-leaf-distance $leaf)
+   (unify $leaf
+     (Decision Int (Bounds $lower $upper) (Origin $origin) (Value $value) ())
+     (abs-math (- $value $origin))
+     0))
+
+(= (_fuzz-leaf-distances $leaves)
+   (if (== $leaves ())
+       ()
+       (let ($head $tail) (decons-atom $leaves)
+         (let $distance (_fuzz-leaf-distance $head)
+           (let $rest (_fuzz-leaf-distances $tail)
+             (cons-atom $distance $rest))))))
+
+(= (_fuzz-distances-less $first $second)
+   (if (== $first ())
+       False
+       (let ($first-head $first-tail) (decons-atom $first)
+         (let ($second-head $second-tail) (decons-atom $second)
+           (if (< $first-head $second-head)
+               True
+               (if (> $first-head $second-head)
+                   False
+                   (_fuzz-distances-less $first-tail $second-tail)))))))
+
+(= (_fuzz-tree-strictly-smaller $candidate-tree $target-tree)
+   (let $candidate-leaves (_fuzz-decision-leaves-op $candidate-tree)
+     (let $target-leaves (_fuzz-decision-leaves-op $target-tree)
+       (unify $candidate-leaves
+         (FuzzDecisionLeaves $candidate-flat)
+         (unify $target-leaves
+           (FuzzDecisionLeaves $target-flat)
+           (let $candidate-count (length $candidate-flat)
+             (let $target-count (length $target-flat)
+               (if (< $candidate-count $target-count)
+                   True
+                   (if (> $candidate-count $target-count)
+                       False
+                       (_fuzz-distances-less
+                         (_fuzz-leaf-distances $candidate-flat)
+                         (_fuzz-leaf-distances $target-flat))))))
+           False)
+         False))))
+
 (= (_fuzz-shrink-finish
      $status
      (FuzzShrinkTarget $value $tree $case)
@@ -455,10 +504,15 @@
                (+ $attempts 1)
                $improvements
                $actual-visited)
-         (if (_fuzz-shrink-case-acceptable
-               $expected-signature
-               (_fuzz-config-get FailureMode $config)
-               $case)
+         (if (and
+               (_fuzz-shrink-case-acceptable
+                 $expected-signature
+                 (_fuzz-config-get FailureMode $config)
+                 $case)
+               (unify $target
+                 (FuzzShrinkTarget $target-value $target-tree $target-case)
+                 (_fuzz-tree-strictly-smaller $actual-tree $target-tree)
+                 False))
              (_fuzz-shrink-start
                (FuzzShrinkContext
                  $generator

@@ -60,6 +60,15 @@
            $tail
            $next))))
 
+; A bound is a shrink candidate only when it sits strictly closer to the origin than the current
+; value. The far-side bound is an anti-shrink: on the machine length decision it re-inflated an
+; accepted (increment increment increment) counterexample back to six commands, because the lenient
+; shrink replay filled the missing draws from each decision's origin and the longer run still failed.
+(= (_fuzz-int-bound-candidate $bound $current $distance $origin $values)
+   (if (< (abs-math (- $bound $origin)) $distance)
+       (_fuzz-add-shrink-value $bound $current $values)
+       $values))
+
 (= (_fuzz-int-value-candidates $current $lower $upper $origin)
    (if (== $current $origin)
        ()
@@ -78,13 +87,17 @@
                  (_fuzz-halves $first-half)
                  $with-origin))
               ($with-lower
-               (_fuzz-add-shrink-value
+               (_fuzz-int-bound-candidate
                  $lower
                  $current
+                 $distance
+                 $origin
                  $with-midpoints)))
-         (_fuzz-add-shrink-value
+         (_fuzz-int-bound-candidate
            $upper
            $current
+           $distance
+           $origin
            $with-lower))))
 
 (= (_fuzz-int-decision-candidates-loop

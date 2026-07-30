@@ -17,7 +17,10 @@ describe("MeTTa fuzz shrink relation", () => {
       `).slice(1),
     ).toEqual([
       ["(0 50 75 88 94 97 99)"],
-      ["(5 6 0 10)"],
+      // Bounds join the ladder only when strictly closer to the origin than the current value:
+      // for value 7 with origin 5, both 0 and 10 sit farther out and would re-inflate an accepted
+      // counterexample through the lenient shrink replay.
+      ["(5 6)"],
       [
         "((Decision Int (Bounds 0 100) (Origin 0) (Value 0) ()) (Decision Int (Bounds 0 100) (Origin 0) (Value 50) ()) (Decision Int (Bounds 0 100) (Origin 0) (Value 75) ()) (Decision Int (Bounds 0 100) (Origin 0) (Value 88) ()) (Decision Int (Bounds 0 100) (Origin 0) (Value 94) ()) (Decision Int (Bounds 0 100) (Origin 0) (Value 97) ()) (Decision Int (Bounds 0 100) (Origin 0) (Value 99) ()))",
       ],
@@ -100,7 +103,9 @@ describe("MeTTa fuzz shrink relation", () => {
     expect(candidates[0]![0]).toContain(
       "(Decision FloatRange (Indices -1 1) (Index 1) ((Decision Int (Bounds -1 1) (Origin 0) (Value 0) ())))",
     );
-    expect(candidates[0]![0]).toContain(
+    // The far bound -1 is no candidate: it sits at the same origin distance as the current value,
+    // a lateral move the shrink order could never accept.
+    expect(candidates[0]![0]).not.toContain(
       "(Decision FloatRange (Indices -1 1) (Index 1) ((Decision Int (Bounds -1 1) (Origin 0) (Value -1) ())))",
     );
     expect(candidates[1]![0]).toContain(
@@ -125,7 +130,7 @@ describe("MeTTa fuzz shrink relation", () => {
     ).toEqual(["((Decision Const () (Value NaN) ()))"]);
   });
 
-  it("appends validated custom shrink choices after built-in passes", () => {
+  it("tries validated custom shrink choices before child descent", () => {
     expect(
       printed(`
         (= (CustomCapabilities Tagged ($tag))
