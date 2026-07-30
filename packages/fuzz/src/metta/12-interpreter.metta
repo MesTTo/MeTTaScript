@@ -520,11 +520,28 @@
         ($bad
          (_fuzz-generation-error MalformedTupleGeneration (Value $bad)))))))
 
+; Flat accumulator, not recurse-then-cons: a drawn list length may be in the thousands and each
+; recursive-then-cons step would cost an evaluator frame. Every element is the same generator, so
+; the accumulation order is not observable and no final reverse is needed.
 (= (_fuzz-repeat-generator $generator $count)
-   (if (> $count 0)
-       (let $tail (_fuzz-repeat-generator $generator (- $count 1))
-         (cons-atom $generator $tail))
-       ()))
+   (_fuzz-repeat-generator-loop (FuzzRepeatFold $generator $count ())))
+
+(= (_fuzz-repeat-generator-loop $state)
+   (if (_fuzz-repeat-generator-finished $state)
+       $state
+       (_fuzz-repeat-generator-loop (_fuzz-repeat-generator-step $state))))
+
+(= (_fuzz-repeat-generator-finished $state)
+   (unify $state (FuzzRepeatFold $generator $count $repeated) False True))
+
+(= (_fuzz-repeat-generator-step $state)
+   (unify $state
+     (FuzzRepeatFold $generator $count $repeated)
+     (if (> $count 0)
+         (let $next (cons-atom $generator $repeated)
+           (FuzzRepeatFold $generator (- $count 1) $next))
+         $repeated)
+     $state))
 
 (= (_fuzz-generate-list $generator $minimum $maximum $driver $size)
    (let* (($effective-maximum (min $maximum (+ $minimum $size)))

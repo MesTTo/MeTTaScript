@@ -366,6 +366,7 @@
 (: ReachWitnessFold (-> Atom Atom Atom))
 (: FuzzPairValuesFold (-> Atom Atom Atom))
 (: FuzzLeafDistanceFold (-> Atom Atom Atom))
+(: FuzzRepeatFold (-> Atom Number Atom Atom))
 
 (: FuzzExhaustiveRun (-> Atom Atom Atom Atom Atom Atom Number Number Atom Atom))
 (: FuzzExhaustivelyVerified (-> Atom Atom Atom Atom Atom))

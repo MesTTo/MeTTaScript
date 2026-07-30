@@ -645,4 +645,21 @@ describe("MeTTa fuzz generators", () => {
       ["(FuzzGenerationError MalformedDecisionTree (Details (Decision malformed)))"],
     ]);
   });
+
+  // Collection generators must scale: a thousand-element list is an ordinary request of a fuzz
+  // library. This used to fail around 250 elements while allocating gigabytes, from two separate
+  // causes - _fuzz-repeat-generator built its list by recurse-then-cons, and the prelude's `let*`
+  // was wrongly admitted to automatic tabling, which made every accumulator step quadratic. Both
+  // are fixed; this pins the linear behaviour at the DEFAULT depth and step budgets.
+  it("generates and replays a thousand-element list", () => {
+    const out = printed(`
+      !(let $sample (fuzz-generate-random (gen-list (gen-const x) 1000 1000) 7 1000)
+         (unify $sample
+           (FuzzSample $value $driver $tree)
+           (Length (size-atom $value))
+           (Failed $sample)))
+    `);
+
+    expect(out.at(-1)![0]).toBe("(Length 1000)");
+  }, 120_000);
 });
