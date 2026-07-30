@@ -7910,6 +7910,13 @@ function* mettaEvalBodyG(
     let lbnd = bnd;
     let lst = st;
     let lw = w;
+    // Each tail transfer is one virtual nested call, so it costs one unit of fuel exactly as the
+    // recursive path it replaces did. This is what bounds a runaway tail cycle: the chain stays
+    // depth-flat, but exhausting `lfuel` cuts it with the same StackOverflow atom as deep recursion.
+    let lfuel = fuel;
+    // True once a tail transfer has happened. The entry application must be var-free for its caller
+    // to observe no bindings; after that, chain-internal steps may carry app-local variables.
+    let inChain = false;
     const pendingKeys: CompletedTableKey[] = [];
     const flushReturn = (res: Array<[Atom, Bindings]>, stR: St): [Array<[Atom, Bindings]>, St] => {
       const finalRes =
@@ -7927,6 +7934,7 @@ function* mettaEvalBodyG(
       return [finalRes, stR];
     };
     reduceTrampoline: for (;;) {
+      if (lfuel <= 0) return flushReturn([[depthOverflowAtom(env, lw), lbnd]], lst);
       const op = (lw.items[0] as { name: string }).name;
       const args = lw.items.slice(1);
       if (
@@ -7994,7 +8002,7 @@ function* mettaEvalBodyG(
           try {
             const [answers, distinctState] = yield* mettaEvalG(
               env,
-              fuel - 1,
+              lfuel - 1,
               lst,
               lbnd,
               collapsedCall,
@@ -8067,16 +8075,16 @@ function* mettaEvalBodyG(
         // bare `match` (e.g. peano's `(demo-peano ...)`).
         const z = args[0]!.items[1]!;
         if (z.kind === "expr" && opOf(z) === "match" && z.items.length === 4) {
-          const counted = yield* countTailMatchG(env, fuel, lst, lbnd, z, depth, trampoline);
+          const counted = yield* countTailMatchG(env, lfuel, lst, lbnd, z, depth, trampoline);
           return flushReturn([[gint(BigInt(counted.count)), lbnd]], counted.state);
         }
-        const routed = yield* tryCollapseRouteG(env, fuel, lst, lbnd, z, depth, trampoline);
+        const routed = yield* tryCollapseRouteG(env, lfuel, lst, lbnd, z, depth, trampoline);
         if (routed !== undefined)
           return flushReturn([[gint(BigInt(routed.count)), lbnd]], routed.state);
         let count = 0;
         const [, stC] = yield* interpretLoopG(
           env,
-          fuel,
+          lfuel,
           lst,
           [
             {
@@ -8111,7 +8119,7 @@ function* mettaEvalBodyG(
         if (source !== undefined) {
           const [selected, stCase] = yield* interpretLoopG(
             env,
-            fuel,
+            lfuel,
             lst,
             source,
             depth,
@@ -8119,7 +8127,7 @@ function* mettaEvalBodyG(
           );
           const [pairs, stReduced] = yield* reduceChildrenG(
             env,
-            fuel,
+            lfuel,
             stCase,
             selected,
             () => undefined,
@@ -8174,14 +8182,14 @@ function* mettaEvalBodyG(
               ? yield* driveMettaEvalG({
                   kind: EVAL_REQUEST,
                   env,
-                  fuel: fuel - 1,
+                  fuel: lfuel - 1,
                   state: cur,
                   bindings: accB,
                   atom: ae,
                   depth,
                   reuseDepthLevel: tailArgument,
                 })
-              : yield* mettaEvalG(env, fuel - 1, cur, accB, ae, depth, trampoline, tailArgument);
+              : yield* mettaEvalG(env, lfuel - 1, cur, accB, ae, depth, trampoline, tailArgument);
             cur = st2;
             for (const p of ps) {
               nextParts.push([[...accAtoms, p[0]], mergeRestrict(env, queryVars, accB, p[1])]);
@@ -8233,7 +8241,7 @@ function* mettaEvalBodyG(
         if (op === "foldl-atom" && canUseNativeFoldlAtom(env, cur2.world)) {
           const folded = yield* evalFoldlAtomCallG(
             env,
-            fuel,
+            lfuel,
             cur2,
             partAtoms,
             partB,
@@ -8251,7 +8259,7 @@ function* mettaEvalBodyG(
         if (op === "map-atom" && canUseNativeMapAtom(env, cur2.world)) {
           const mapped = yield* evalMapAtomCallG(
             env,
-            fuel,
+            lfuel,
             cur2,
             partAtoms,
             partB,
@@ -8269,7 +8277,7 @@ function* mettaEvalBodyG(
         if (op === "filter-atom" && canUseNativeFilterAtom(env, cur2.world)) {
           const filtered = yield* evalFilterAtomCallG(
             env,
-            fuel,
+            lfuel,
             cur2,
             partAtoms,
             partB,
@@ -8291,7 +8299,7 @@ function* mettaEvalBodyG(
         ) {
           const picked = yield* evalMaxByAtomG(
             env,
-            fuel,
+            lfuel,
             cur2,
             partAtoms,
             partB,
@@ -8311,7 +8319,15 @@ function* mettaEvalBodyG(
           !env.ruleIndex.has("top-k-by-atom") &&
           !cur2.world.selfRules.has("top-k-by-atom")
         ) {
-          const topk = yield* evalTopKByAtomG(env, fuel, cur2, partAtoms, partB, depth, trampoline);
+          const topk = yield* evalTopKByAtomG(
+            env,
+            lfuel,
+            cur2,
+            partAtoms,
+            partB,
+            depth,
+            trampoline,
+          );
           if (topk !== undefined && !counterExceedsStepLimit(cur2, topk.state.counter)) {
             if (env.trace) env.trace({ kind: "grounded", op });
             cur2 = topk.state;
@@ -8404,7 +8420,7 @@ function* mettaEvalBodyG(
             cur2,
             COMPILED_IMPURE_OPS,
             undefined,
-            fuel,
+            lfuel,
             depth,
           );
           // A compiled run reports the same logical counter advance as the interpreter. If the atomic
@@ -8438,33 +8454,24 @@ function* mettaEvalBodyG(
                 !(opReturnsAtom && !isEmbeddedOp(nextAtom)) &&
                 !atomEq(nextAtom, wApp)
               ) {
-                const nextOp = (nextAtom.items[0] as { name: string }).name;
-                const staticRules = nextOp === op ? env.ruleIndex.get(op) : undefined;
-                // A lone all-variable direct self rewrite has no rule-level base case. Keep its former
-                // recursive path so a runaway call still reaches the native overflow guard instead of
-                // spinning forever in a loop that deliberately does not consume evaluator fuel.
-                const loneCatchAllSelfCall =
-                  staticRules?.length === 1 &&
-                  staticRules[0]![0].kind === "expr" &&
-                  staticRules[0]![0].items.slice(1).every((item) => item.kind === "var");
-                if (!loneCatchAllSelfCall) {
-                  if (cr.counterDelta !== 0)
-                    cur2 = {
-                      counter: cur2.counter + cr.counterDelta,
-                      world: cur2.world,
-                    };
-                  if (groundKey !== undefined) pendingKeys.push(groundKey);
-                  la = nextAtom;
-                  lbnd = emptyBindings;
-                  lst = cur2;
-                  lw = nextAtom;
-                  continue reduceTrampoline;
-                }
+                if (cr.counterDelta !== 0)
+                  cur2 = {
+                    counter: cur2.counter + cr.counterDelta,
+                    world: cur2.world,
+                  };
+                if (groundKey !== undefined) pendingKeys.push(groundKey);
+                lfuel -= 1;
+                inChain = true;
+                la = nextAtom;
+                lbnd = emptyBindings;
+                lst = cur2;
+                lw = nextAtom;
+                continue reduceTrampoline;
               }
             }
             const [handled, st4] = yield* reduceCompiledResultsG(
               env,
-              fuel,
+              lfuel,
               cur2,
               queryVars,
               partB,
@@ -8590,7 +8597,7 @@ function* mettaEvalBodyG(
           const runProducerPass = function* (start: St): Gen<[Array<[Atom, Bindings]>, St]> {
             const [pairs, st3] = yield* interpretLoopG(
               env,
-              fuel,
+              lfuel,
               start,
               [
                 {
@@ -8603,7 +8610,7 @@ function* mettaEvalBodyG(
             );
             return yield* reduceRulePairsG(
               env,
-              fuel,
+              lfuel,
               st3,
               queryVars,
               partB,
@@ -8637,7 +8644,7 @@ function* mettaEvalBodyG(
               let maxCounter = Math.max(start.counter, firstState.counter);
               let rounds = 1;
               while (added > 0 && !active.overBudget) {
-                if (rounds >= fuel) {
+                if (rounds >= lfuel) {
                   out.push([makeExpr(env, [sym("Error"), wApp, sym("StackOverflow")]), partB]);
                   added = 0;
                   break;
@@ -8678,7 +8685,7 @@ function* mettaEvalBodyG(
           } else {
             const [pairs, st3] = yield* interpretLoopG(
               env,
-              fuel,
+              lfuel,
               cur2,
               [
                 {
@@ -8695,16 +8702,26 @@ function* mettaEvalBodyG(
             // via reduceTrampoline instead of recursing into mettaEvalG, so the native stack stays flat down a
             // deep tail-recursive chain. Defer this call's tabling key to pendingKeys: it shares the chain's
             // normal form, so flushReturn caches it (and every key above it) once the chain terminates.
-            if (partials.length === 1 && queryVars.length === 0 && pairs.length === 1) {
+            // A chain-internal step may carry app-local variables (a let pattern flowing through its
+            // prelude `unify` body). Those cannot be observed by the chain's caller: the entry step was
+            // var-free, and `finalPair` instantiates every result, so a var either bakes its value into
+            // `p[0]` or is still genuinely unbound. Transferring on them keeps `(let $x (impure!) (f ...))`
+            // tail loops flat, the MOPS `K[uσ]` rewrite, instead of nesting one frame per step.
+            if (
+              partials.length === 1 &&
+              (queryVars.length === 0 || inChain) &&
+              pairs.length === 1
+            ) {
               const p = pairs[0]!;
-              // A resource cut is terminal, never a tail-call continuation. Re-feeding it into the
-              // trampoline would repeatedly cut without consuming fuel.
+              // A resource cut is terminal, never a tail-call continuation.
               if (isEvaluationLimitAtom(p[0]))
                 return flushReturn([[p[0], restrictBnd(env, queryVars, p[1])]], cur2);
               const isData = atomEq(p[0], notReducibleA) || atomEq(p[0], wApp);
               if (!isData && !(opReturnsAtom && !isEmbeddedOp(p[0])) && opOf(p[0]) !== undefined) {
                 const pb = mergeRestrict(env, queryVars, partB, p[1]);
                 if (eligible && key !== undefined) pendingKeys.push(key);
+                lfuel -= 1;
+                inChain = true;
                 la = p[0];
                 lbnd = pb;
                 lst = cur2;
@@ -8716,7 +8733,7 @@ function* mettaEvalBodyG(
             }
             const [reduced, st4] = yield* reduceRulePairsG(
               env,
-              fuel,
+              lfuel,
               cur2,
               queryVars,
               partB,
@@ -8984,6 +9001,12 @@ function restrictPublicLimitBindings(
   const pairs = result[0].map((pair): [Atom, Bindings] =>
     isEvaluationLimitAtom(pair[0]) ? [pair[0], restrictBnd(env, vars, pair[1])] : pair,
   );
+  // The public entry is the one place every resource cut flows through (the trampoline's fuel cut,
+  // the plan machine's exhaustion, a compiled runtime cut), so the trace bus reports the overflow
+  // here against the query, as the native-overflow catch always has. A depth cut deeper in the
+  // evaluator may already have announced its own cut point; the query-level event complements it.
+  if (env.trace !== undefined && pairs.some((pair) => containsStackOverflow(pair[0])))
+    env.trace({ kind: "overflow", atom: format(query) });
   return [pairs, result[1]];
 }
 

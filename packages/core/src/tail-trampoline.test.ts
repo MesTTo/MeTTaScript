@@ -46,6 +46,7 @@ function runIsolated(
   testCase: IsolatedCase,
   mode: "on" | "off" | "interpreted",
   timeoutMs = NONTERMINATION_TIMEOUT_MS,
+  fuel = ISOLATED_FUEL,
 ): IsolatedOutcome {
   const run = spawnSync(
     process.execPath,
@@ -53,7 +54,7 @@ function runIsolated(
     {
       cwd: process.cwd(),
       encoding: "utf8",
-      input: JSON.stringify({ ...testCase, mode, fuel: ISOLATED_FUEL }),
+      input: JSON.stringify({ ...testCase, mode, fuel }),
       timeout: timeoutMs,
       killSignal: "SIGTERM",
       maxBuffer: 1 << 20,
@@ -190,11 +191,15 @@ describe("depth-neutral argument trampoline", () => {
 });
 
 describe("compiled tail-call nontermination differential", () => {
+  // Tail transfers iterate on the heap in every mode, so a runaway tail cycle no longer grows
+  // the native stack; the resource bound that stops it is fuel, and exhaustion must surface as
+  // the same StackOverflow error in the interpreter and in both compiled modes. A mode that
+  // ignored fuel would show up here as a timeout.
+  const RUNAWAY_FUEL = 200_000;
   const runawayCases: Array<
     IsolatedCase & {
       readonly name: string;
       readonly holderNames: string[];
-      readonly expected: Record<"on" | "off" | "interpreted", IsolatedOutcome["outcome"]>;
     }
   > = [
     {
@@ -204,11 +209,6 @@ describe("compiled tail-call nontermination differential", () => {
 (= (flip-self 1) 0)`,
       query: "(self 0)",
       holderNames: ["self", "flip-self"],
-      expected: {
-        on: "stack-overflow-error",
-        off: "stack-overflow-error",
-        interpreted: "timeout",
-      },
     },
     {
       name: "mutual recursion",
@@ -216,7 +216,6 @@ describe("compiled tail-call nontermination differential", () => {
 (= (b $n) (a $n))`,
       query: "(a 0)",
       holderNames: ["a", "b"],
-      expected: { on: "timeout", off: "stack-overflow-error", interpreted: "timeout" },
     },
     {
       name: "multi-rule tail cycle",
@@ -224,7 +223,6 @@ describe("compiled tail-call nontermination differential", () => {
 (= (phase B) (phase A))`,
       query: "(phase A)",
       holderNames: ["phase"],
-      expected: { on: "timeout", off: "stack-overflow-error", interpreted: "timeout" },
     },
     {
       name: "tail cycle through a compiled operator",
@@ -234,22 +232,21 @@ describe("compiled tail-call nontermination differential", () => {
 (= (flip B) A)`,
       query: "(spin A)",
       holderNames: ["spin", "flip"],
-      expected: { on: "timeout", off: "stack-overflow-error", interpreted: "timeout" },
     },
   ];
 
   for (const testCase of runawayCases) {
     for (const mode of ["on", "off", "interpreted"] as const) {
       it(`${testCase.name}: ${mode}`, async () => {
-        const outcome = await runIsolated(testCase, mode);
-        expect(outcome.outcome).toBe(testCase.expected[mode]);
+        const outcome = await runIsolated(testCase, mode, 10_000, RUNAWAY_FUEL);
+        expect(outcome.outcome).toBe("stack-overflow-error");
         if (mode !== "interpreted")
           for (const name of testCase.holderNames) expect(outcome.holders[name]).toBeDefined();
         if (outcome.outcome === "stack-overflow-error") {
           expect(outcome.results).toHaveLength(1);
           expect(outcome.results[0]).toContain("StackOverflow");
         }
-      }, 5_000);
+      }, 15_000);
     }
   }
 
@@ -266,6 +263,8 @@ describe("compiled tail-call nontermination differential", () => {
       offOutcome: "result",
     },
     {
+      // The guarded multi-rule shape exhausts its budget with the tail continuation off; the
+      // native evaluation cap will complete it in every mode.
       name: "deep guarded multi-rule count-down",
       rules: GUARDED_MULTI_RULE_COUNTDOWN,
       query: "(count 6000)",
