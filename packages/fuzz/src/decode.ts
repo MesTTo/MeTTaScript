@@ -432,6 +432,16 @@ export function exitCodeForOutcomes(outcomes: readonly FuzzOutcome[]): FuzzExitC
   return FUZZ_EXIT_OK;
 }
 
+// A witness may be hundreds of commands long, which is unreadable on one line. The head is shown with
+// the true total so the elision cannot be mistaken for the whole witness; the full command list is in
+// the result atom.
+const WITNESS_HEAD = 8;
+
+function renderCommands(commands: readonly Atom[]): string {
+  const head = commands.slice(0, WITNESS_HEAD).map(format).join(" ");
+  return commands.length <= WITNESS_HEAD ? head : `${head} ... (${commands.length} commands)`;
+}
+
 /** A single terminal line for an outcome. The full atom stays available for JSON and artifacts. */
 export function renderOutcomeLine(outcome: FuzzOutcome): string {
   switch (outcome.kind) {
@@ -453,9 +463,9 @@ export function renderOutcomeLine(outcome: FuzzOutcome): string {
     case "invalid":
       return `invalid  ${outcome.code}`;
     case "reachable":
-      return `reached  ${outcome.property} in ${outcome.depth ?? "?"} steps: ${outcome.commands
-        .map(format)
-        .join(" ")}`;
+      return `reached  ${outcome.property} in ${outcome.depth ?? "?"} steps: ${renderCommands(
+        outcome.commands,
+      )}`;
     case "unreachable-within-depth":
       return `bounded  ${outcome.property} no target at or below depth ${outcome.depth ?? "?"}`;
     case "reachability-exhausted":

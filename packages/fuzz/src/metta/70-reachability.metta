@@ -130,7 +130,7 @@
      $state))
 
 (= (_fuzz-reach-config-values $config)
-   (let $head (_fuzz-reach-atom-head $config)
+   (let $head (_fuzz-expression-head $config)
      (if (== $head reach-config)
          (let $options (cdr-atom $config)
            (let $defaults (_fuzz-reach-default-values)
@@ -139,7 +139,7 @@
 
 ; The head symbol of an expression, or Empty for anything else, so a malformed argument reports
 ; itself instead of erroring inside car-atom.
-(= (_fuzz-reach-atom-head $atom)
+(= (_fuzz-expression-head $atom)
    (if (== (get-metatype $atom) Expression)
        (if-decons-expr $atom $head $tail $head Empty)
        Empty))
@@ -196,7 +196,7 @@
    (switch $commands
      (((IncompleteCommands $reason) (ReachIncomplete $reason))
        ($listed
-        (let $head (_fuzz-reach-atom-head $listed)
+        (let $head (_fuzz-expression-head $listed)
           (if (== $head FiniteCommands)
               (let $items (cdr-atom $listed) (ReachFinite $items))
               (ReachMalformed (Value $listed))))))))

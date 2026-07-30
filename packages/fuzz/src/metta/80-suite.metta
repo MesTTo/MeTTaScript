@@ -27,7 +27,9 @@
 (: fuzz-run-suite-exhaustive (-> Atom %Undefined%))
 (: fuzz-suite-tests (-> %Undefined%))
 (: _fuzz-suite-cases (-> %Undefined%))
+(: _fuzz-options-merged (-> Atom Atom Atom Atom %Undefined%))
 (: _fuzz-config-with-overrides (-> Atom Atom %Undefined%))
+(: _fuzz-reach-config-with-overrides (-> Atom Atom %Undefined%))
 (: _fuzz-override-names (-> Atom %Undefined%))
 (: _fuzz-options-without (-> Atom Atom %Undefined%))
 ; The loop trio is deliberately UNDECLARED. An `Atom` parameter freezes its argument, and
@@ -54,6 +56,11 @@
 ;
 ; Flat accumulator loops throughout: a suite may carry many options and a recurse-then-cons builder
 ; costs an evaluator frame per element.
+;
+; An option is named by its head symbol rather than by `_fuzz-config-option-name`, whose switch is a
+; whitelist of the `fuzz-config` options and reports anything else as `InvalidOption`. Merging is
+; head-structural so it serves `reach-config` too; an option the target record does not accept is
+; still refused, by that record's own validation.
 
 (= (_fuzz-override-names $overrides)
    (_fuzz-override-names-loop (FuzzOverrideNames $overrides ())))
@@ -72,7 +79,7 @@
      (if (== $options ())
          (reverse $reversed)
          (let ($option $rest) (decons-atom $options)
-           (let $name (_fuzz-config-option-name $option)
+           (let $name (_fuzz-expression-head $option)
              (let $next (cons-atom $name $reversed)
                (FuzzOverrideNames $rest $next)))))
      $state))
@@ -94,32 +101,34 @@
      (if (== $options ())
          (reverse $reversed)
          (let ($option $rest) (decons-atom $options)
-           (let $name (_fuzz-config-option-name $option)
+           (let $name (_fuzz-expression-head $option)
              (if (is-member $name $names)
                  (FuzzOptionFilter $rest $names $reversed)
                  (let $next (cons-atom $option $reversed)
                    (FuzzOptionFilter $rest $names $next))))))
      $state))
 
-; Merge overrides into a config by replacement. An empty override list returns the config unchanged,
-; so the ordinary path allocates nothing.
-(= (_fuzz-config-with-overrides $config $overrides)
+; Merge overrides into an option record by replacement. An empty override list returns the record
+; unchanged, so the ordinary path allocates nothing. The expected head is a parameter because the two
+; record kinds differ only in that symbol: `fuzz-config` rejects a repeated option outright, while
+; `reach-config` folds last-wins, and replacement is right for both.
+(= (_fuzz-options-merged $head $record $overrides $code)
    (if (== $overrides ())
-       $config
-       (let $head (_fuzz-suite-atom-head $config)
-         (if (== $head fuzz-config)
-             (let* (($options (cdr-atom $config))
+       $record
+       (let $found (_fuzz-expression-head $record)
+         (if (== $found $head)
+             (let* (($options (cdr-atom $record))
                     ($names (_fuzz-override-names $overrides))
                     ($kept (_fuzz-options-without $options $names))
                     ($merged (append $kept $overrides)))
-               (cons-atom fuzz-config $merged))
-             (FuzzInvalid InvalidConfig (MalformedConfig (Value (quote $config))))))))
+               (cons-atom $head $merged))
+             (FuzzInvalid $code (MalformedConfig (Value (quote $record))))))))
 
-(: _fuzz-suite-atom-head (-> Atom %Undefined%))
-(= (_fuzz-suite-atom-head $atom)
-   (if (== (get-metatype $atom) Expression)
-       (if-decons-expr $atom $head $tail $head Empty)
-       Empty))
+(= (_fuzz-config-with-overrides $config $overrides)
+   (_fuzz-options-merged fuzz-config $config $overrides InvalidConfig))
+
+(= (_fuzz-reach-config-with-overrides $config $overrides)
+   (_fuzz-options-merged reach-config $config $overrides InvalidReachConfig))
 
 ; ---------------------------------------------------------------------------
 ; Running a suite
@@ -183,3 +192,71 @@
    (fuzz-check-exhaustive $id $generator $property $config))
 
 (: FuzzSuiteResult (-> Atom Atom Atom))
+
+; ---------------------------------------------------------------------------
+; Declared reachability searches
+;
+; The same data-declaration idea for bounded reachability:
+;
+;   (FuzzReachTest counter (Count 0) counter-enumerate counter-transition counter-target
+;                  (reach-config (MaxDepth 20)))
+;
+; A search needs its own relations rather than a machine spec, because a transition that returns
+; several next states is the point of the search; a FuzzMachine's NextModel is single-valued.
+
+(: FuzzReachTest (-> Atom Atom Atom Atom Atom Atom Atom))
+(: FuzzReachCase (-> Atom Atom Atom Atom Atom Atom Atom))
+(: FuzzReachSuiteRun (-> Atom Atom Atom Atom))
+(: fuzz-run-reach-suite (-> %Undefined%))
+(: fuzz-run-reach-suite-with (-> Atom %Undefined%))
+(: fuzz-reach-suite-tests (-> %Undefined%))
+(: _fuzz-reach-suite-cases (-> %Undefined%))
+
+(= (_fuzz-reach-suite-cases)
+   (collapse
+     (match &self
+       (FuzzReachTest $id $initial $enumerate $transition $target $config)
+       (FuzzReachCase $id $initial $enumerate $transition $target $config))))
+
+(= (fuzz-reach-suite-tests)
+   (let $cases (_fuzz-reach-suite-cases) $cases))
+
+(= (fuzz-run-reach-suite)
+   (fuzz-run-reach-suite-with ()))
+
+(= (fuzz-run-reach-suite-with $overrides)
+   (let $cases (_fuzz-reach-suite-cases)
+     (_fuzz-reach-suite-loop (FuzzReachSuiteRun $cases $overrides ()))))
+
+(= (_fuzz-reach-suite-loop $state)
+   (if (_fuzz-reach-suite-finished $state)
+       $state
+       (_fuzz-reach-suite-loop (_fuzz-reach-suite-step $state))))
+
+(= (_fuzz-reach-suite-finished $state)
+   (unify $state (FuzzReachSuiteRun $cases $overrides $reversed) False True))
+
+(= (_fuzz-reach-suite-step $state)
+   (unify $state
+     (FuzzReachSuiteRun $cases $overrides $reversed)
+     (if (== $cases ())
+         (reverse $reversed)
+         (let ($case $rest) (decons-atom $cases)
+           (let $result (_fuzz-reach-suite-run-case $case $overrides)
+             (let $next (cons-atom $result $reversed)
+               (FuzzReachSuiteRun $rest $overrides $next)))))
+     $state))
+
+; As in `_fuzz-suite-run-case`, the merged config is inspected with `unify` rather than `switch` so a
+; merge that failed is reported instead of being evaluated into something else.
+(: _fuzz-reach-suite-run-case (-> Atom Atom %Undefined%))
+(= (_fuzz-reach-suite-run-case $case $overrides)
+   (unify $case
+     (FuzzReachCase $id $initial $enumerate $transition $target $config)
+     (let $merged (_fuzz-reach-config-with-overrides $config $overrides)
+       (unify $merged
+         (FuzzInvalid $code $details)
+         (FuzzSuiteResult $id $merged)
+         (let $result (fuzz-reachable $id $initial $enumerate $transition $target $merged)
+           (FuzzSuiteResult $id $result))))
+     (FuzzSuiteResult Unknown (FuzzInvalid MalformedFuzzReachTest (Value (quote $case))))))

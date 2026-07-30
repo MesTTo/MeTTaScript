@@ -124,3 +124,76 @@ describe("MeTTa suite discovery", () => {
     expect(results).toContain("InvalidConfig");
   });
 });
+
+// A reachability search is declared the same way, but with its own relations rather than one
+// generator, because a transition returning several next states is the point of the search.
+const REACH = `
+  (= (endless-enumerate $state) (FiniteCommands up))
+  (= (endless-transition (Count $n) up) (Count (+ $n 1)))
+  (= (at-three (Count $n)) (== $n 3))
+  (FuzzReachTest climb (Count 0) endless-enumerate endless-transition at-three
+                 (reach-config (MaxDepth 10)))
+`;
+
+describe("MeTTa reachability suite discovery", () => {
+  it("finds declared searches and pairs each result with its id", () => {
+    const results = printed(`
+      ${REACH}
+      !(fuzz-run-reach-suite)
+    `).at(-1)![0]!;
+
+    expect(results).toContain("(FuzzSuiteResult climb (FuzzReachable (Property climb) (Depth 3)");
+  });
+
+  it("lists declared searches without running them", () => {
+    const listed = printed(`
+      ${REACH}
+      !(fuzz-reach-suite-tests)
+    `).at(-1)![0]!;
+
+    expect(listed).toContain("(FuzzReachCase climb (Count 0) endless-enumerate");
+  });
+
+  it("applies reach overrides, so a shallow depth turns the answer into a bounded negative", () => {
+    const bounded = printed(`
+      ${REACH}
+      !(fuzz-run-reach-suite-with ((MaxDepth 2)))
+    `).at(-1)![0]!;
+
+    // The declaration asked for depth 10 and would have found the target; the override replaces it.
+    // A bounded negative must never be reported as exhaustion of the model.
+    expect(bounded).toContain("(FuzzUnreachableWithinDepth (Property climb) (Depth 2)");
+    expect(bounded).not.toContain("FuzzReachabilityExhausted");
+  });
+
+  it("merges reach overrides by replacement under the reach-config head", () => {
+    // Let-bound before quoting: `quote` freezes its argument, so quoting the call directly would
+    // report the call rather than the merge.
+    const out = printed(`
+      !(let $c (_fuzz-reach-config-with-overrides
+                 (reach-config (MaxDepth 10) (StateIdentity Exact)) ((MaxDepth 2)))
+         (quote $c))
+      !(let $c (_fuzz-reach-config-with-overrides (reach-config (MaxDepth 10)) ()) (quote $c))
+      !(_fuzz-reach-config-with-overrides (fuzz-config (Runs 2)) ((MaxDepth 2)))
+    `);
+
+    expect(out.at(-3)![0]).toBe("(quote (reach-config (StateIdentity Exact) (MaxDepth 2)))");
+    expect(out.at(-2)![0]).toBe("(quote (reach-config (MaxDepth 10)))");
+    // A record under the wrong head is refused rather than rewritten into the expected one.
+    expect(out.at(-1)![0]).toContain("InvalidReachConfig");
+  });
+
+  it("reports a malformed reach declaration instead of skipping it", () => {
+    const results = printed(`
+      (FuzzReachTest too-few (Count 0) endless-enumerate)
+      ${REACH}
+      !(fuzz-run-reach-suite)
+    `).at(-1)![0]!;
+
+    expect(results).toContain("(FuzzSuiteResult climb (FuzzReachable");
+  });
+
+  it("reports an empty reach suite as an empty result list", () => {
+    expect(printed(`!(fuzz-run-reach-suite)`).at(-1)![0]).toBe("()");
+  });
+});

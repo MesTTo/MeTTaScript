@@ -337,7 +337,7 @@
 (: _fuzz-call-all-two (-> Atom Atom Atom Atom %Undefined%))
 (: _fuzz-call-all-results (-> %Undefined% Atom %Undefined%))
 (: _fuzz-pair-values (-> %Undefined% %Undefined%))
-(: _fuzz-reach-atom-head (-> Atom %Undefined%))
+(: _fuzz-expression-head (-> Atom %Undefined%))
 (: _fuzz-reach-bound-value (-> Atom Bool))
 (: _fuzz-reach-config-set (-> Atom Atom %Undefined%))
 (: _fuzz-reach-config-values (-> Atom %Undefined%))
