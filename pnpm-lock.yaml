@@ -137,6 +137,9 @@ importers:
       '@mettascript/edsl':
         specifier: workspace:*
         version: link:../packages/edsl
+      '@mettascript/fuzz':
+        specifier: workspace:*
+        version: link:../packages/fuzz
       '@mettascript/grapher':
         specifier: workspace:*
         version: link:../packages/grapher

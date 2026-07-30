@@ -67,7 +67,14 @@ describe("public result decoding", () => {
     // Shrinking drives an integer toward its origin, so the smallest counterexample is 0.
     expect(outcome.smallestValue).toBeDefined();
     expect(format(outcome.smallestValue!)).toBe("0");
-    expect(outcome.replay).toBeDefined();
+    // The original is decoded too, because the difference between the two is information: this property
+    // rejects everything, so the first edge case fails and shrinking still reduces it to 0.
+    expect(outcome.originalValue).toBeDefined();
+    expect(format(outcome.originalDetails!)).toContain("(Saw ");
+    // A decoded field is the value rather than the label around it, so the details are the (Details ...)
+    // record and the replay is the (FuzzReplay ...) record.
+    expect(format(outcome.smallestDetails!)).toBe("(Details (Saw 0))");
+    expect(format(outcome.replay!)).toMatch(/^\(FuzzReplay \(Format 2\)/);
     expect(exitCodeForOutcome(outcome)).toBe(FUZZ_EXIT_PROPERTY_FAILURE);
   });
 

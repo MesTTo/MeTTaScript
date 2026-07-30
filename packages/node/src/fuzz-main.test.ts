@@ -382,19 +382,49 @@ describe("metta fuzz --corpus", () => {
   });
 });
 
+const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+
+// The repository's own example suite, run through the CLI it documents. An example that quietly stops
+// working is the worst kind of documentation, and this is the file a reader copies first.
+describe("the property-testing example", () => {
+  const suite = resolve(REPO, "examples", "property-testing.metta");
+
+  it("runs, fails on the declaration meant to fail, and leaves the file's query alone", () => {
+    const run = metta(["fuzz", suite]);
+
+    expect(run.out).toContain("ok       involution");
+    expect(run.out).toContain("FAILED   sum ExpectedTrue (-1)");
+    expect(run.out).toContain("ok       booleans");
+    expect(run.out).not.toContain("metta run executes this");
+    expect(run.code).toBe(1);
+  });
+
+  it("enumerates what fits and says so about what does not", () => {
+    // The bound is set low here only to keep the test quick: walking a domain to the default bound is
+    // seconds of work, and what is being pinned is which answer each declaration gets, not the bound.
+    const run = metta(["fuzz", "--exhaustive", "--max-enumerated", "50", suite]);
+
+    expect(run.out).toContain("ok       booleans exhaustive, 2 trees");
+    // Lists of up to forty integers do not fit any bound, so the run is incomplete, not verified.
+    expect(run.out).toContain("gave up  involution EnumerationLimit");
+    expect(run.code).toBe(1);
+  });
+
+  it("searches the declared model both ways", () => {
+    const run = metta(["reach", suite]);
+
+    expect(run.out).toContain("reached  reaches-three in 2 steps: up split");
+    // The counter stops at four, so the frontier runs dry and the negative is exhaustion, not a bound.
+    expect(run.out).toContain("ok       never-ninety unreachable in 6 states");
+    expect(run.code).toBe(0);
+  });
+});
+
 // The CLI's own usage text and the website's CLI page both list the options. Either can drift from the
 // parser, and a documented flag that is silently ignored is worse than one that is missing, so the flags
 // are compared in both directions against what the parser actually accepts.
 describe("documented options", () => {
-  const DOCS = resolve(
-    dirname(fileURLToPath(import.meta.url)),
-    "..",
-    "..",
-    "..",
-    "website",
-    "tools",
-    "cli.md",
-  );
+  const DOCS = resolve(REPO, "website", "tools", "cli.md");
 
   /** The long options a text mentions, from the `metta fuzz` section onward. */
   const optionsIn = (text: string): Set<string> =>

@@ -61,6 +61,10 @@ export type FuzzOutcome =
       readonly phase: string | undefined;
       readonly caseIndex: number | undefined;
       readonly failureTag: string;
+      /** What generation produced, before shrinking. */
+      readonly originalValue: Atom | undefined;
+      readonly originalDetails: Atom | undefined;
+      /** What shrinking reduced it to, which is the one to report first. */
       readonly smallestValue: Atom | undefined;
       readonly smallestDetails: Atom | undefined;
       readonly replay: Atom | undefined;
@@ -262,9 +266,15 @@ export function decodeFuzzOutcome(atom: Atom): FuzzOutcome {
         phase: symbolValue(fieldValue(atom, "Phase")),
         caseIndex: integerValue(fieldValue(atom, "CaseIndex")),
         failureTag,
+        // Both values, because the difference between them is information: the original is what
+        // generation produced and the smallest is what shrinking reduced it to.
+        originalValue: unquote(fieldValue(atom, "OriginalValue")),
+        originalDetails: fieldValue(atom, "OriginalDetails"),
         smallestValue: unquote(fieldValue(atom, "SmallestValue")),
-        smallestDetails: field(atom, "SmallestDetails"),
-        replay: field(atom, "Replay"),
+        smallestDetails: fieldValue(atom, "SmallestDetails"),
+        // A decoded field is the value, not the label around it. `Replay` and the details fields each
+        // wrap one record, so the record comes out; `Shrink` is itself the record, so it comes out whole.
+        replay: fieldValue(atom, "Replay"),
         shrink: field(atom, "Shrink"),
         statistics: decodeStatistics(atom),
         atom,

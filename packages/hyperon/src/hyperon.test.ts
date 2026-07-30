@@ -172,6 +172,21 @@ describe("MeTTa runner", () => {
     expect(out[1]!.map((a) => a.toString())).toEqual(["$fuzz-17"]);
   });
 
+  it("runs a whole property test through the module, not only its kernel", () => {
+    // Registering the grounded operations is not the same as the MeTTa module being usable, so this
+    // checks the thing a user actually calls.
+    const m = new MeTTa();
+    const out = m.run(`
+      !(import! &self fuzz)
+      (: always (-> Atom FuzzProperty))
+      (= (always $value) (fuzz-pass))
+      !(fuzz-check smoke (gen-int 0 9) always (fuzz-config (Runs 3) (EdgeCases 0)))
+    `);
+    expect(out.at(-1)!.map((a) => a.toString())[0]).toContain(
+      "(FuzzPassed (Property smoke) (Seed 0)",
+    );
+  });
+
   it("evaluates arithmetic", () => {
     const m = new MeTTa();
     const out = m.run("!(+ 1 2)");

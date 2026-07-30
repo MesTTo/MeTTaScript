@@ -38,6 +38,20 @@ describe("browser source runners", () => {
     ]);
   });
 
+  it("runs a whole property test through the module, not only its kernel", () => {
+    // Registering the grounded operations is not the same as the MeTTa module being usable, so this
+    // checks the thing a user actually calls.
+    const results = runSource(`
+      !(import! &self fuzz)
+      (: always (-> Atom FuzzProperty))
+      (= (always $value) (fuzz-pass))
+      !(fuzz-check smoke (gen-int 0 9) always (fuzz-config (Runs 3) (EdgeCases 0)))
+    `);
+    expect(results.at(-1)!.results.map(format)[0]).toContain(
+      "(FuzzPassed (Property smoke) (Seed 0)",
+    );
+  });
+
   it("runs a source string with in-memory imports", () => {
     const imports = new Map<string, Atom[]>([
       [
