@@ -58,7 +58,7 @@ describe("MeTTa fuzz runner", () => {
       `).slice(1),
     ).toEqual([
       [
-        "(FuzzConfig (Runs 100) (Seed 0) (MaxSize 100) (MaxDiscards 1000) (MaxShrinks 1000) (MaxShrinkImprovements 1000) (CaseSteps 100000) (CaseDepth 1000) (EffectPolicy Sandboxed) (EdgeCases 16) (MaxEnumerated 10000) (FailureMode SameFailureTag))",
+        "(FuzzConfig (Runs 100) (Seed 0) (MaxSize 100) (MaxDiscards 1000) (MaxShrinks 1000) (MaxShrinkImprovements 1000) (CaseSteps 100000) (CaseDepth 1000) (EffectPolicy Sandboxed) (EdgeCases 16) (MaxEnumerated 1000) (FailureMode SameFailureTag))",
       ],
       ["(FuzzInvalid InvalidConfig (InvalidRuns (Runs 0)))"],
       ["(FuzzInvalid InvalidConfig (InvalidMaxSize (MaxSize -1)))"],

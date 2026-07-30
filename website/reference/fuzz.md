@@ -11,13 +11,15 @@ Property testing, shrinking, exhaustive checking, model-based state machines, an
 npm install @mettascript/fuzz
 ```
 
-Importing the package registers the `fuzz` module and its private grounded operations. In bare core, call `registerFuzz()` first.
+Importing the package registers the `fuzz` module and its private grounded operations, so bare `@mettascript/core` resolves `(import! &self fuzz)` once the package has been imported anywhere. `registerFuzz()` is exported for a host that would rather register explicitly; it is idempotent, so calling it after the import changes nothing.
 
 ```ts
 import { registerFuzz } from "@mettascript/fuzz";
 
 registerFuzz();
 ```
+
+The node, browser, and hyperon packages already import it, so nothing is needed there.
 
 ## Entry points
 
@@ -93,18 +95,20 @@ Every generator is data the runner interprets, which is what makes replay, shrin
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `Runs` | 100 | Random cases to try. |
+| `Runs` | 100 | Random cases to try, on top of the edge cases. |
 | `Seed` | 0 | The seed the whole run derives from. |
 | `MaxSize` | 100 | The size parameter generators scale with. |
-| `MaxDiscards` | 500 | Rejected cases tolerated before giving up. |
-| `MaxShrinks` | 500 | Shrink attempts before reporting the best found. |
-| `MaxShrinkImprovements` | 0 | Accepted improvements to stop after; 0 is unlimited. |
-| `CaseSteps` | 1000000 | Evaluation budget for one case. |
+| `MaxDiscards` | 1000 | Rejected cases tolerated before giving up. |
+| `MaxShrinks` | 1000 | Shrink attempts before reporting the best found. |
+| `MaxShrinkImprovements` | 1000 | Accepted improvements before stopping. |
+| `CaseSteps` | 100000 | Evaluation budget for one case. |
 | `CaseDepth` | 1000 | Depth budget for one case. |
-| `EffectPolicy` | `Allow` | Whether a property may perform effects. |
-| `EdgeCases` | generator-chosen | Boundary values drawn before the random ones. |
-| `MaxEnumerated` | 100000 | Domain size ceiling for exhaustive checking. |
+| `EffectPolicy` | `Sandboxed` | How a property's effects are treated. |
+| `EdgeCases` | 16 | Boundary values drawn before the random ones. |
+| `MaxEnumerated` | 1000 | Cases exhaustive mode will walk before reporting `EnumerationLimit`. |
 | `FailureMode` | `SameFailureTag` | Whether shrinking must preserve the failure tag. |
+
+A case costs milliseconds here, because the run loop is interpreted MeTTa: roughly 7ms for a scalar generator and 18ms for a list of forty, measured as the marginal cost of one more case. That is what sizes `MaxEnumerated`: a domain that cannot fit is walked to the bound before the run can say so, and a thousand cases keeps that under half a minute. Raise it when a domain is genuinely larger and worth covering.
 
 `(reach-config <option> ...)` covers the search:
 

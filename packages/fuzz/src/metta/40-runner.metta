@@ -14,7 +14,12 @@
      (CaseDepth 1000)
      (EffectPolicy Sandboxed)
      (EdgeCases 16)
-     (MaxEnumerated 10000)
+     ; A safety bound on exhaustive mode, sized against what a case actually costs. One case is
+     ; milliseconds of interpretation here, measured at roughly 7ms for a scalar generator and 18ms for a
+     ; list of forty, so a bound of 10000 meant a domain that cannot fit ground for three minutes before
+     ; saying so. A thousand keeps that under half a minute. A domain larger than this is still coverable,
+     ; by asking for it: the run reports EnumerationLimit rather than pretending to have covered it.
+     (MaxEnumerated 1000)
      (FailureMode SameFailureTag)))
 
 (= (fuzz-default-config)

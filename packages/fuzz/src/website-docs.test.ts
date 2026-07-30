@@ -66,4 +66,22 @@ describe.each(pages)("%s", (page) => {
   it("names only operations the library actually has", () => {
     expect(undefinedDocumentedNames(text, metta)).toEqual([]);
   });
+
+  it("documents the defaults the library actually uses", () => {
+    // Six of the twelve were wrong when this page was first written, all of them plausible. A table of
+    // defaults is a claim about behaviour like any other, so it is read out of the page and compared with
+    // what the library reports.
+    const rows = [...text.matchAll(/^\| `(\w+)` \| `?([\w.]+)`? \|/gm)];
+    if (rows.length === 0) return;
+
+    const config = printed("!(fuzz-default-config)").at(-1)![0]!;
+    const reach = printed("!(reach-config-defaults)").at(-1)![0]!;
+    const documented = rows.filter(([, name]) => new RegExp(`\\(${name!} `).test(config + reach));
+    expect(documented.length).toBeGreaterThan(10);
+    for (const [, name, value] of documented) {
+      expect(`${config}\n${reach}`, `the page says ${name} defaults to ${value}`).toContain(
+        `(${name!} ${value!})`,
+      );
+    }
+  });
 });
