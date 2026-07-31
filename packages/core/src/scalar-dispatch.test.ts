@@ -112,7 +112,9 @@ describe("scalar constructor dispatch", () => {
       "(var-ev (Bin unresolved-head (C 2) (C 3)))",
     ];
     const actual = trace(compiled, queries);
-    expect(actual).toEqual(trace(interpreted, queries));
+    // Results, not the whole trace: `join` builds a constructor term, so the value compiler takes it, and a
+    // value holder reports its step count only under a step limit. `var-ev` itself stays scalar.
+    expect(actual.results).toEqual(trace(interpreted, queries).results);
     expect(compiled.compiled?.get("var-ev")?.kind).toBe("scalar");
     expect(actual.results.map((row) => row.map((result) => result.atom))).toEqual([
       ["14"],
@@ -405,11 +407,20 @@ describe("scalar constructor dispatch", () => {
     ).toContain("StackOverflow");
   });
 
-  it("loops on grounded scalar tail frames and declines an open frame", () => {
+  it("loops on grounded tail frames and declines an open frame", () => {
     const src = `(= (count $n) (if (== $n 0) done (count (- $n 1))))`;
     const compiled = compiledEnvWith(src);
-    expect(compiled.compiled?.get("count")?.kind).toBe("scalar");
-    expect(trace(compiled, ["(count 1000)"])).toEqual(trace(envWith(src), ["(count 1000)"]));
+    // The value compiler takes this shape now that `done` is a symbol literal it can carry, so the loop runs
+    // as a native frame loop instead of through the scalar path: 0.045us to 0.019us per iteration, measured
+    // as the marginal cost between 20,000 and 120,000 iterations. `lookup` above still covers a scalar
+    // holder tail-recursing.
+    expect(compiled.compiled?.get("count")?.kind).toBe("functional");
+    // Results, not the whole trace: a value holder reports its step count only under a step limit, which is
+    // the only place the count is observable, so the counter this trace carries is 0 where the interpreter
+    // reached 3003. The step limit itself is checked below, and it cuts in the same place in both modes.
+    expect(trace(compiled, ["(count 1000)"]).results).toEqual(
+      trace(envWith(src), ["(count 1000)"]).results,
+    );
     expect(runCompiled(compiled, "count", [parseOne("$n")], initSt())).toBeUndefined();
 
     for (const argument of ["500", "-1"]) {

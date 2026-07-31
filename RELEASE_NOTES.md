@@ -1,3 +1,90 @@
+# MeTTaScript 2.9.0
+
+A compiled fast path that carries more than numbers. A compiled function's parameters could hold an integer
+or a flat tuple of integers, so a loop that carried a symbol, a tag, or a growing structure ran entirely in
+the interpreter no matter how simple it was. Those loops compile now. It is worth 3 to 26 times on the shapes
+it covers, and it turns a doubly-recursive builder from exponential into polynomial. Every terminating
+program produces the same output as 2.8.0, validated byte-identical across the corpus and against the
+270-assertion oracle, so upgrading is safe.
+
+## Symbols and carried values
+
+A bare symbol compiles as itself, guarded by what can reduce it: a symbol that heads a rule or a grounded
+operation is a nullary application, and it still goes to the interpreter. `==` and `!=` compile to an
+identity test whenever one side is a symbol, since symbols are interned and a symbol equals no atom of
+another kind, so a tag dispatch such as `(if (== $tag ping) …)` becomes a compiled branch.
+
+A parameter that a body only carries, an accumulator or a tag, is typed as an opaque atom rather than
+defaulting to an integer. Nothing in such a program says what the parameter holds, so the type arrives with
+the call, and the entry check admits whatever ground atom the caller passed. Branches that disagree box to
+an atom, so one arm may answer with a symbol and the other with a number.
+
+A loop that dispatches on a tag and carries it is the shape this covers:
+
+```metta
+(= (flip $n $tag) (if (== $n 0) $tag (flip (- $n 1) (if (== $tag ping) pong ping))))
+
+!(flip 10000 ping)
+```
+
+```text
+[ping]
+```
+
+Measured over 4,000 iterations, one engine per process: a loop carrying a symbol falls from 23.79 to 0.90
+microseconds per iteration, level with the same loop over integers. A countdown returning a symbol falls from
+0.045 to 0.019 microseconds per iteration, measured as the marginal cost between 20,000 and 120,000
+iterations.
+
+## Loops that build a structure
+
+An expression whose head is inert data is a constructor term rather than an application, so it is built
+directly instead of ending the compiled run. A loop shaped like `(walk (- $n 1) (P $acc))` therefore stays
+compiled, and a parameter embedded in a constructor still counts as carried, because a constructor holds its
+children rather than computing on them. A head that can reduce declines, since anything the interpreter
+would rewrite has to go there.
+
+An expression accumulator falls from 16.39 to 5.48 microseconds per iteration and a list builder from 18.00
+to 6.40.
+
+```metta
+(= (grow $n $acc) (if (== $n 0) $acc (P (grow (- $n 1) $acc) (grow (- $n 1) $acc))))
+
+!(let $tree (grow 16 z) (car-atom $tree))
+```
+
+```text
+[P]
+```
+
+Together with the memo that already covered numbers, this reaches a structural result. A function that calls
+itself twice builds a tree of 2^n leaves out of n distinct subtrees, so the repeated subtrees are shared
+rather than rebuilt. Forcing the build and reading it back, compiled against interpreted: at depth 12, 5ms
+against 246ms; at depth 16, 6ms against 2,652ms; at depth 20, 111ms against 48,058ms.
+
+## A tail loop that reads a space no longer cuts short
+
+A tail-recursive function whose body read a space nested one depth level per iteration and stopped at
+`max-stack-depth`: with the default it completed 319 iterations of a 3,000-iteration loop, while the same
+program without the compiler completed all of them. An argument that is still an unevaluated `match` put its
+pattern variable in the frame and made the application non-ground, and the compiled tail transfer required
+neither. The interpreted transfer beside it already allowed exactly that mid-chain, and the compiled one now
+agrees. The loop completes at 100,000 iterations, and a recursion that genuinely nests is still cut.
+
+## Less analysis before the first evaluation
+
+Defining a rule marks the tabling analysis dirty, and the next evaluation ran six analyses, each starting by
+walking every rule body of every functor: the whole prelude and standard library, hundreds of rules, six
+times over. That walk depends on neither parameter, so it now runs once. Measured on the corpus, minimum of
+nine rounds taken as before-after-before: 83.4ms against 69.6ms.
+
+## Step accounting
+
+A compiled function that does not memoise now reports the steps it took, so a `maxSteps` bound cuts a program
+in the same place whether or not a function compiled. It is reported only under such a bound, which is the
+only place the count is observable. A memoised run still reports nothing, because replaying a memo is not
+what the interpreter would spend recomputing it.
+
 # MeTTaScript 2.8.0
 
 A property-testing library written in MeTTa, `collapse` matching current Hyperon, and interpreter work that

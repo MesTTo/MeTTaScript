@@ -105,6 +105,39 @@ function variableHeaded(a: Atom): boolean {
   );
 }
 
+/** The per-functor head symbols, call heads, and bodies of every static rule.
+ *
+ *  Both analyses below start by walking every rule body of every functor, and `ensureTablingAnalysis`
+ *  runs six of them in a row: three purities over different impure-op sets, and three table-worths over
+ *  the purities they produce. The walk does not depend on either parameter, so it is the same work six
+ *  times over the whole prelude and standard library. Computing it once and passing it in leaves each
+ *  analysis identical and removes five of the six walks. */
+export interface RuleWalk {
+  readonly headDeps: Map<string, Set<string>>;
+  readonly callDeps: Map<string, Set<string>>;
+  readonly bodies: Map<string, Atom[]>;
+}
+
+export function buildRuleWalk(env: MinEnv): RuleWalk {
+  const headDeps = new Map<string, Set<string>>();
+  const callDeps = new Map<string, Set<string>>();
+  const bodies = new Map<string, Atom[]>();
+  for (const [k, eqs] of env.ruleIndex) {
+    const heads = new Set<string>();
+    const calls = new Set<string>();
+    const bs: Atom[] = [];
+    for (const [, rhs] of eqs) {
+      headSymbols(rhs, heads);
+      callHeads(rhs, calls);
+      bs.push(rhs);
+    }
+    headDeps.set(k, heads);
+    callDeps.set(k, calls);
+    bodies.set(k, bs);
+  }
+  return { headDeps, callDeps, bodies };
+}
+
 /** The set of functor names safe to table. Conservative: a variable-headed (`$x`-headed) equation can match
  *  anything, so its presence disables tabling entirely. (`varRules` also holds expression-headed equations,
  *  which match only their own constructor and are harmless here.) `impureOps` defaults to `IMPURE_OPS`
@@ -114,14 +147,10 @@ function variableHeaded(a: Atom): boolean {
 export function analyzePurity(
   env: MinEnv,
   impureOps: ReadonlySet<string> = IMPURE_OPS,
+  walk?: RuleWalk,
 ): Set<string> {
   if (env.varRules.some(([lhs]) => variableHeaded(lhs))) return new Set();
-  const deps = new Map<string, Set<string>>();
-  for (const [k, eqs] of env.ruleIndex) {
-    const s = new Set<string>();
-    for (const [, rhs] of eqs) headSymbols(rhs, s);
-    deps.set(k, s);
-  }
+  const deps = walk?.headDeps ?? buildRuleWalk(env).headDeps;
   const impure = new Set<string>();
   for (const [k, s] of deps) {
     for (const h of s)
@@ -200,20 +229,17 @@ export function inertArgumentPositions(env: MinEnv): (head: string, index: numbe
 /** Pure functors worth automatic tabling. A recursive SCC is worth tabling when some rule body branches
  *  into that same SCC at least twice. This keeps fib/proof-search overlap tabled while avoiding unbounded
  *  caches for single-tail recursion such as factorial or trial division. */
-export function analyzeTableWorth(env: MinEnv, pureFunctors: ReadonlySet<string>): Set<string> {
+/** Every functor sitting in a component that is recursive and branches into itself at least twice.
+ *
+ *  This is all of the table-worth analysis except its last line. The strongly-connected components, the
+ *  recursion test and the branching count all read the call graph and the rule bodies; none of them reads
+ *  which functors are pure. `ensureTablingAnalysis` asks for table-worth three times over three different
+ *  purities, so computing this once turns three Tarjan runs and three sweeps of functorCallCount into one. */
+export function tableWorthCandidates(env: MinEnv, walk?: RuleWalk): Set<string> {
   const inert = inertArgumentPositions(env);
-  const deps = new Map<string, Set<string>>();
-  const bodies = new Map<string, Atom[]>();
-  for (const [k, eqs] of env.ruleIndex) {
-    const s = new Set<string>();
-    const bs: Atom[] = [];
-    for (const [, rhs] of eqs) {
-      callHeads(rhs, s);
-      bs.push(rhs);
-    }
-    deps.set(k, s);
-    bodies.set(k, bs);
-  }
+  const shared = walk ?? buildRuleWalk(env);
+  const deps = shared.callDeps;
+  const bodies = shared.bodies;
 
   let index = 0;
   const stack: string[] = [];
@@ -267,8 +293,21 @@ export function analyzeTableWorth(env: MinEnv, pureFunctors: ReadonlySet<string>
       (bodies.get(f) ?? []).some((rhs) => functorCallCount(rhs, componentSet, inert) >= 2),
     );
     if (!branchesInsideComponent) continue;
-    for (const f of component) if (pureFunctors.has(f)) worth.add(f);
+    for (const f of component) worth.add(f);
   }
+  return worth;
+}
+
+/** The set of functor names worth tabling: a candidate that is also pure under the analysis in play. */
+export function analyzeTableWorth(
+  env: MinEnv,
+  pureFunctors: ReadonlySet<string>,
+  walk?: RuleWalk,
+  candidates?: ReadonlySet<string>,
+): Set<string> {
+  const worthy = candidates ?? tableWorthCandidates(env, walk);
+  const worth = new Set<string>();
+  for (const f of worthy) if (pureFunctors.has(f)) worth.add(f);
   return worth;
 }
 

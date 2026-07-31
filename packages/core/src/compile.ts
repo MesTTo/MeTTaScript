@@ -22,6 +22,7 @@ import {
   variable,
   atomVars,
   emptyExpr,
+  isErrorAtom,
   NUMBER_FAMILY_TYPE_NAMES,
 } from "./atom";
 import { type CellVar, mkCell, derefCell, occursCell, unifyCellOccurs } from "./trail";
@@ -108,6 +109,10 @@ type Node = (frame: FrameVal[], runtime: FunctionalRuntime) => FrameVal | boolea
 interface Compiled {
   readonly node: Node;
   readonly type: Ty;
+  /** The node can return the next argument frame (an array) instead of a value, because a tail self-call is
+   *  reachable from it. Such a node must never be wrapped: a wrapper would box the frame into a garbage
+   *  atom rather than let `makeRun`'s loop consume it. */
+  readonly tail?: boolean;
 }
 
 /** A compiled pure function. `run` is filled after the whole dependency group is compiled, so mutual
@@ -118,6 +123,10 @@ interface FunctionalHolder {
   arity: number;
   retType: Ty;
   paramTypes: Ty[];
+  /** The run memoises, so its step accounting is the cost of the first computation replayed on every hit,
+   *  which is not what the interpreter would spend recomputing. Only a holder without a memo reports its
+   *  steps back to the evaluator. */
+  memoized: boolean;
   run: (vals: FrameVal[], runtime?: FunctionalRuntime, entered?: boolean) => FrameVal | boolean;
 }
 /** A deterministic constructor dispatch with at least one native value- or atom-returning clause. Clauses
@@ -282,6 +291,9 @@ interface ScopedValue {
 interface Scope {
   vars: ReadonlyMap<string, ScopedValue>;
   len: number;
+  /** Whether a bare symbol stands for itself. A symbol that heads a rule or a grounded operation is a
+   *  nullary application the interpreter reduces, so it declines instead of compiling to a literal. */
+  readonly isData: (name: string) => boolean;
 }
 
 const ARITH: Record<string, (x: IntVal, y: IntVal) => IntVal> = {
@@ -390,10 +402,25 @@ function compileArgument(
 }
 
 function coerceForReturn(c: Compiled | undefined, expected: Ty): Compiled | undefined {
+  const coerced = coerceValueForReturn(c, expected);
+  if (c === undefined || coerced === undefined) return coerced;
+  // An identity coercion of a tail-call node is fine; a wrapper around one would box the next argument
+  // frame into a garbage atom, so it declines to the interpreter instead.
+  return c.tail === true && coerced.node !== c.node ? undefined : coerced;
+}
+
+function coerceValueForReturn(c: Compiled | undefined, expected: Ty): Compiled | undefined {
   if (c === undefined) return undefined;
   if (expected === "atom") {
     if (c.type === "atom") return c;
-    if (!isNumberType(c.type) && c.type !== "bool" && !c.type.startsWith("tuple")) return undefined;
+    // A `sym` node already yields the interned SymAtom, so the wrapper below is the identity on it.
+    if (
+      !isNumberType(c.type) &&
+      c.type !== "bool" &&
+      c.type !== "sym" &&
+      !c.type.startsWith("tuple")
+    )
+      return undefined;
     return {
       node: (frame, runtime) => frameValueToAtom(c.node(frame, runtime)),
       type: "atom",
@@ -411,6 +438,21 @@ function mergedType(a: Ty, b: Ty): Ty | undefined {
   if (a === b) return a;
   return isNumberType(a) && isNumberType(b) ? "number" : undefined;
 }
+
+/** The two branches of an `if`/`unify` under one result type. Same (or commonly numeric) types keep it;
+ *  disagreeing branches box to `atom`, which is what lets one arm answer with a symbol and the other with a
+ *  number. Boxing a tail-call branch is refused by `coerceForReturn`, so such a pair declines instead. */
+function unifiedBranches(t: Compiled, e: Compiled): [Node, Node, Ty] | undefined {
+  const merged = mergedType(t.type, e.type);
+  if (merged !== undefined) return [t.node, e.node, merged];
+  const ta = coerceForReturn(t, "atom");
+  const ea = coerceForReturn(e, "atom");
+  return ta === undefined || ea === undefined ? undefined : [ta.node, ea.node, "atom"];
+}
+
+/** inferType's mirror of `unifiedBranches`. Optimistic like the rest of inference: the strict pass declines
+ *  the function if the branches turn out not to box. */
+const branchType = (a: Ty, b: Ty): Ty => mergedType(a, b) ?? "atom";
 
 /** Compile the two operands of a binary integer operation. */
 function binIntArgs(
@@ -472,11 +514,10 @@ function compileIf(
   const t = branch(then_);
   const e = branch(els);
   if (!c || !t || !e || c.type !== "bool") return undefined;
-  const type = mergedType(t.type, e.type);
-  if (type === undefined) return undefined;
+  const branches = unifiedBranches(t, e);
+  if (branches === undefined) return undefined;
+  const [tn, en, type] = branches;
   const cn = c.node as (f: FrameVal[], runtime: FunctionalRuntime) => boolean;
-  const tn = t.node;
-  const en = e.node;
   return {
     node: (f, runtime) => {
       const condition = cn(f, runtime);
@@ -484,6 +525,55 @@ function compileIf(
       return condition ? tn(f, runtime) : en(f, runtime);
     },
     type,
+    ...(t.tail === true || e.tail === true ? { tail: true } : {}),
+  };
+}
+
+/** Whether an operand is a symbol on sight: a data symbol, or a variable a slot already types as one. */
+function symbolValued(a: Atom, scope: Scope): boolean {
+  if (a.kind === "sym") return scope.isData(a.name);
+  if (a.kind !== "var") return false;
+  const bound = scope.vars.get(a.name);
+  return bound !== undefined && (bound.type === "sym" || bound.type === "atom");
+}
+
+/** `==`/`!=` where at least one operand is a symbol. Symbols are interned, so `atomEq` on them is reference
+ *  equality (atom.ts: `a !== b` means different symbols), and a symbol equals no atom of another kind. That
+ *  makes `===` exact here, and turns a tag dispatch such as `(if (== $op Add) …)` into a compiled branch
+ *  instead of a call back into the interpreter.
+ *
+ *  The one case identity misses is an Error operand: `==` propagates it as the result rather than answering
+ *  False (builtins.ts `equalityCmp`), so an `atom`-typed side declines to the interpreter when it holds one. */
+function compileSymbolEquality(
+  args: readonly Atom[],
+  positive: boolean,
+  scope: Scope,
+  holders: ValueFns,
+): Compiled | undefined {
+  if (args.length !== 2) return undefined;
+  // Decide from the syntax before compiling anything. Compiling both operands to find out costs the numeric
+  // path below a second compile of the same subtrees whenever this declines, and operands nest, so the
+  // doubling compounds with depth.
+  if (!args.some((a) => symbolValued(a, scope))) return undefined;
+  const x = compileBody(args[0]!, scope, holders);
+  const y = compileBody(args[1]!, scope, holders);
+  if (x === undefined || y === undefined) return undefined;
+  const comparable = (t: Ty): boolean => t === "sym" || t === "atom";
+  if (!comparable(x.type) || !comparable(y.type) || (x.type !== "sym" && y.type !== "sym"))
+    return undefined;
+  const side = (c: Compiled): Node =>
+    c.type === "sym"
+      ? c.node
+      : (frame, runtime) => {
+          const value = c.node(frame, runtime);
+          if (isAtomFrameVal(value) && isErrorAtom(value)) throw BAIL;
+          return value;
+        };
+  const xn = side(x);
+  const yn = side(y);
+  return {
+    node: (frame, runtime) => (xn(frame, runtime) === yn(frame, runtime)) === positive,
+    type: "bool",
   };
 }
 
@@ -494,6 +584,7 @@ function compileBody(a: Atom, scope: Scope, holders: ValueFns): Compiled | undef
     if (v === undefined) return undefined;
     return { node: v.acc, type: v.type };
   }
+  if (a.kind === "sym") return scope.isData(a.name) ? { node: () => a, type: "sym" } : undefined;
   if (a.kind === "gnd") {
     const v = a.value;
     if (v.g === "int") {
@@ -542,12 +633,22 @@ function compileBody(a: Atom, scope: Scope, holders: ValueFns): Compiled | undef
   const isCall = head.kind === "sym" && (KNOWN_OPS.has(head.name) || holders.has(head.name));
   if (!isCall) {
     const elems = a.items.map((e) => compileBody(e, scope, holders));
-    if (elems.some((c) => !c || c.type !== "int")) return undefined;
-    const ns = elems.map((c) => asIntNode(c!));
-    return {
-      node: (f, runtime) => new Tup(ns.map((n) => n(f, runtime))),
-      type: `tuple${a.items.length}`,
-    };
+    if (elems.every((c) => c !== undefined && c.type === "int")) {
+      const ns = elems.map((c) => asIntNode(c!));
+      return {
+        node: (f, runtime) => new Tup(ns.map((n) => n(f, runtime))),
+        type: `tuple${a.items.length}`,
+      };
+    }
+    // Not a flat int tuple, so it is a constructor term: an inert head applied to values. Building it here is
+    // what lets a loop carry a growing structure, `(walk (- $n 1) (P $acc))`, without leaving the compiled
+    // path. Every element is a compiled value, so the term allocated is already in normal form; a head that
+    // is not an inert symbol declines, since anything else can reduce.
+    if (head.kind !== "sym" || !scope.isData(head.name)) return undefined;
+    const boxed = elems.map((c) => coerceForReturn(c, "atom"));
+    if (boxed.some((c) => c === undefined)) return undefined;
+    const parts = boxed.map((c) => c!.node);
+    return { node: (f, runtime) => expr(parts.map((n) => n(f, runtime) as Atom)), type: "atom" };
   }
   const op = (head as { name: string }).name;
   const args = a.items.slice(1);
@@ -588,6 +689,10 @@ function compileBody(a: Atom, scope: Scope, holders: ValueFns): Compiled | undef
       type: "int",
     };
   }
+  if (op === "==" || op === "!=") {
+    const identity = compileSymbolEquality(args, op === "==", scope, holders);
+    if (identity !== undefined) return identity;
+  }
   if (op === "<" || op === "<=" || op === ">" || op === ">=" || op === "==" || op === "!=") {
     const xy = binNumberArgs(args, scope, holders);
     if (!xy) return undefined;
@@ -626,11 +731,10 @@ function compileBody(a: Atom, scope: Scope, holders: ValueFns): Compiled | undef
     const t = compileBody(args[2]!, scope, holders);
     const e = compileBody(args[3]!, scope, holders);
     if (!x || !t || !e) return undefined;
-    const type = mergedType(t.type, e.type);
-    if (type === undefined) return undefined;
+    const branches = unifiedBranches(t, e);
+    if (branches === undefined) return undefined;
+    const [tn, en, type] = branches;
     const xn = asNumberNode(x);
-    const tn = t.node;
-    const en = e.node;
     return {
       node: (fr, runtime) =>
         compareNumberValues(xn(fr, runtime), patVal) === 0 ? tn(fr, runtime) : en(fr, runtime),
@@ -651,6 +755,7 @@ function compileBody(a: Atom, scope: Scope, holders: ValueFns): Compiled | undef
         type: val.type,
       }),
       len: scope.len + 1,
+      isData: scope.isData,
     };
     const body = compileBody(args[2]!, np, holders);
     if (!body) return undefined;
@@ -703,6 +808,7 @@ function compileTailSelfCall(
   return {
     node: (f, runtime) => ns.map((n) => n(f, runtime)) as unknown as FrameVal,
     type: h.retType,
+    tail: true,
   };
 }
 
@@ -737,6 +843,7 @@ function compileTail(
           type: value.type,
         }),
         len: idx + 1,
+        isData: scope.isData,
       };
       const body = compileTail(a.items[3]!, nextScope, holders, self, expected);
       if (body === undefined) return undefined;
@@ -748,6 +855,7 @@ function compileTail(
           return body.node(next, runtime);
         },
         type: body.type,
+        ...(body.tail === true ? { tail: true } : {}),
       };
     }
     if (op === self) {
@@ -812,11 +920,16 @@ function makeRun(
     : undefined;
   // A tuple argument must be keyed by its contents, not `String(tup)` (which is "[object Object]" for every
   // tuple and so collapses distinct tuples in the same position to one (a stale memo hit). Numbers key as
-  // themselves; an int and a bigint of equal value share a key, which is a correct hit (same value). Scalar
-  // Atom frames are never memoised; throwing here makes an accidental future use decline instead of aliasing
-  // distinct constructor inputs.
+  // themselves; an int and a bigint of equal value share a key, which is a correct hit (same value). A symbol
+  // keys by its name behind a length prefix, so no name can spell another key: "s1:a,s1:b" (two symbols) and
+  // "s6:a,s1:b" (one symbol named `a,s1:b`) stay distinct, and neither collides with a number or a tuple.
+  // Other Atom frames (a constructor's ground subterm) are never memoised; throwing here makes an accidental
+  // future use decline instead of aliasing distinct inputs.
   const keyOf = (v: FrameVal): string => {
-    if (isAtomFrameVal(v) || v instanceof FloatVal) throw BAIL;
+    if (isAtomFrameVal(v))
+      if (v.kind === "sym") return "s" + String(v.name.length) + ":" + v.name;
+      else throw BAIL;
+    if (v instanceof FloatVal) throw BAIL;
     return v instanceof Tup ? "(" + v.v.map(keyOf).join(" ") + ")" : String(v);
   };
   return (vals, inherited, entered = false) => {
@@ -898,13 +1011,17 @@ function singleClauseHead(
 /** Build the lexical scope a function body compiles against, using each parameter's resolved type: a plain
  *  var reads its frame slot (its type may be a tuple, inferred from usage); a tuple pattern's elements read
  *  into the tuple sitting in that slot. */
-function buildScope(params: readonly ParamPat[], paramTypes: readonly Ty[]): Scope {
+function buildScope(
+  params: readonly ParamPat[],
+  paramTypes: readonly Ty[],
+  isData: (name: string) => boolean,
+): Scope {
   const vars = new Map<string, ScopedValue>();
   params.forEach((p, i) => {
     if (typeof p === "string") vars.set(p, { acc: (f) => f[i]!, type: paramTypes[i]! });
     else p.forEach((e, j) => vars.set(e, { acc: (f) => (f[i] as Tup).v[j]!, type: "int" }));
   });
-  return { vars, len: params.length };
+  return { vars, len: params.length, isData };
 }
 
 /** Map of every variable a parameter list binds to its type, for inferType (tuple elements are int). */
@@ -922,20 +1039,79 @@ function varTypesOf(params: readonly ParamPat[], paramTypes: readonly Ty[]): Map
 const paramTypesOf = (params: readonly ParamPat[]): Ty[] =>
   params.map((p) => (typeof p === "string" ? "int" : (`tuple${p.length}` as Ty)));
 
-/** Infer a plain-var parameter's type from its first use as an argument to a compiled function: if it is
- *  passed where that function expects a tuple, it is that tuple type. Returns undefined if only used as int. */
-function inferVarType(body: Atom, name: string, holders: FunctionalFns): Ty | undefined {
-  let found: Ty | undefined;
+/** Whether parameter `index` of `functor` is only ever carried: every occurrence is the function's result,
+ *  a branch that becomes the result, or the same argument position of a self-call, and none of them computes
+ *  on it. Nothing in the body constrains such a parameter, so its `int` default is an artifact of having no
+ *  evidence rather than a fact about the program, and widening it to `atom` costs nothing (no operation
+ *  unboxes it) while letting the caller carry any value through. An accumulator is the shape that matters:
+ *  `(= (walk $n $acc) (if (== $n 0) $acc (walk (- $n 1) $acc)))`. */
+function isCarriedParam(
+  body: Atom,
+  name: string,
+  functor: string,
+  index: number,
+  arity: number,
+  isData: (symbol: string) => boolean,
+): boolean {
+  const carriedWalk = (a: Atom, result: boolean): boolean => {
+    if (a.kind === "var") return a.name !== name || result;
+    if (a.kind !== "expr" || a.items.length === 0) return true;
+    const head = a.items[0]!;
+    const op = head.kind === "sym" ? head.name : undefined;
+    if (op === functor && a.items.length === arity + 1)
+      return a.items.slice(1).every((arg, j) => carriedWalk(arg, j === index));
+    const branches = op === "if" && a.items.length === 4 ? [2, 3] : [];
+    if (op === "unify" && a.items.length === 5) branches.push(3, 4);
+    // A constructor holds its children rather than computing on them, so a value embedded in one is still
+    // carried: `(walk (- $n 1) (P $acc))` says nothing about what `$acc` is.
+    if (branches.length === 0 && op !== undefined && isData(op))
+      return a.items.every((it, j) => j === 0 || carriedWalk(it, result));
+    return a.items.every((it, j) => j === 0 || carriedWalk(it, result && branches.includes(j)));
+  };
+  return carriedWalk(body, true);
+}
+
+/** Every plain-var parameter's type read off its first use in the body: passed where a compiled function
+ *  expects a tuple it is that tuple type, and compared against a symbol it is a symbol. The comparison types
+ *  the tag of a dispatch loop, `(if (== $tag ping) …)`, whose parameter no other use constrains; without it
+ *  the body compares an int-typed slot against a symbol, declines, and the function stays interpreted.
+ *
+ *  One walk answers for every parameter. Walking once per parameter, which is what this replaced, put an
+ *  O(parameters) factor on every round of the fixpoint, and that walk carried the largest self time of any
+ *  function in a profile of compilation. A parameter absent from the result has no use that constrains it. */
+function paramTypesFromUses(
+  body: Atom,
+  names: ReadonlyMap<string, number>,
+  holders: FunctionalFns,
+  isData: (symbol: string) => boolean,
+): Map<string, Ty> {
+  const found = new Map<string, Ty>();
+  const take = (a: Atom, type: Ty | undefined): void => {
+    if (
+      a.kind === "var" &&
+      type !== undefined &&
+      type !== "int" &&
+      names.has(a.name) &&
+      !found.has(a.name)
+    )
+      found.set(a.name, type);
+  };
   const walk = (a: Atom): void => {
-    if (found !== undefined || a.kind !== "expr" || a.items.length === 0) return;
-    if (a.items[0]!.kind === "sym") {
-      const h = holders.get((a.items[0] as { name: string }).name);
-      if (h !== undefined)
-        for (let i = 0; i + 1 < a.items.length && found === undefined; i++) {
-          const arg = a.items[i + 1]!;
-          if (arg.kind === "var" && arg.name === name && h.paramTypes[i] !== "int")
-            found = h.paramTypes[i];
-        }
+    if (a.kind !== "expr" || a.items.length === 0) return;
+    const head = a.items[0]!;
+    if (head.kind === "sym") {
+      const callee = holders.get(head.name);
+      if (callee !== undefined)
+        for (let i = 0; i + 1 < a.items.length; i++) take(a.items[i + 1]!, callee.paramTypes[i]);
+      // Compared against a symbol, so the slot holds an atom. `atom` rather than `sym`: the idiom is a base
+      // case, `(if (== $t Leaf) … )`, where the other branch takes the value apart, so most calls arrive
+      // holding a structure and a `sym` slot would turn every one of them away at the gate. Identity
+      // comparison still compiles, since it needs only one side to be a symbol.
+      if ((head.name === "==" || head.name === "!=") && a.items.length === 3) {
+        const [x, y] = [a.items[1]!, a.items[2]!];
+        if (y.kind === "sym" && isData(y.name)) take(x, "atom");
+        if (x.kind === "sym" && isData(x.name)) take(y, "atom");
+      }
     }
     for (const it of a.items) walk(it);
   };
@@ -952,8 +1128,10 @@ function inferType(
   a: Atom,
   varTypes: ReadonlyMap<string, Ty>,
   holders: FunctionalFns,
+  isData: (name: string) => boolean,
 ): Ty | undefined {
   if (a.kind === "var") return varTypes.get(a.name);
+  if (a.kind === "sym") return isData(a.name) ? "sym" : undefined;
   if (a.kind === "gnd")
     return a.value.g === "int"
       ? "int"
@@ -963,17 +1141,20 @@ function inferType(
           ? "bool"
           : undefined;
   if (a.kind !== "expr" || a.items.length === 0) return undefined;
-  // A non-operator-headed expression is a tuple literal; its type is `tuple<n>` if every element is int.
+  // A non-operator-headed expression is a tuple literal when every element is int, and otherwise a
+  // constructor term.
   const hd = a.items[0]!;
-  if (!(hd.kind === "sym" && (KNOWN_OPS.has(hd.name) || holders.has(hd.name))))
-    return a.items.every((e) => inferType(e, varTypes, holders) === "int")
-      ? `tuple${a.items.length}`
-      : undefined;
+  if (!(hd.kind === "sym" && (KNOWN_OPS.has(hd.name) || holders.has(hd.name)))) {
+    if (a.items.every((e) => inferType(e, varTypes, holders, isData) === "int"))
+      return `tuple${a.items.length}`;
+    // Mirrors compileBody: an inert head applied to values is a constructor term, and the term is an atom.
+    return hd.kind === "sym" && isData(hd.name) ? "atom" : undefined;
+  }
   const op = (hd as { name: string }).name;
   if (op === "+" || op === "-" || op === "*" || op === "/") {
     if (a.items.length !== 3) return undefined;
-    const left = inferType(a.items[1]!, varTypes, holders);
-    const right = inferType(a.items[2]!, varTypes, holders);
+    const left = inferType(a.items[1]!, varTypes, holders, isData);
+    const right = inferType(a.items[2]!, varTypes, holders, isData);
     if (left !== undefined && !isNumberType(left)) return undefined;
     if (right !== undefined && !isNumberType(right)) return undefined;
     return mergedType(left ?? "int", right ?? "int");
@@ -982,18 +1163,19 @@ function inferType(
   if (op === "<" || op === "<=" || op === ">" || op === ">=" || op === "==" || op === "!=")
     return "bool";
   if (op === "if" && a.items.length === 4) {
-    const tt = inferType(a.items[2]!, varTypes, holders);
-    const te = inferType(a.items[3]!, varTypes, holders);
-    if (tt !== undefined && te !== undefined) return mergedType(tt, te);
+    const tt = inferType(a.items[2]!, varTypes, holders, isData);
+    const te = inferType(a.items[3]!, varTypes, holders, isData);
+    if (tt !== undefined && te !== undefined) return branchType(tt, te);
     return tt ?? te;
   }
   if (op === "unify" && a.items.length === 5) {
-    const tt = inferType(a.items[3]!, varTypes, holders);
-    const te = inferType(a.items[4]!, varTypes, holders);
-    if (tt !== undefined && te !== undefined) return mergedType(tt, te);
+    const tt = inferType(a.items[3]!, varTypes, holders, isData);
+    const te = inferType(a.items[4]!, varTypes, holders, isData);
+    if (tt !== undefined && te !== undefined) return branchType(tt, te);
     return tt ?? te;
   }
-  if (op === "let" && a.items.length === 4) return inferType(a.items[3]!, varTypes, holders); // body's type
+  if (op === "let" && a.items.length === 4)
+    return inferType(a.items[3]!, varTypes, holders, isData); // body's type
   return holders.get(op)?.retType; // a call: its inferred return type, if known yet
 }
 
@@ -1691,7 +1873,11 @@ function scalarSlot(frame: FrameVal[], position: ScalarSlotPosition): Atom {
   return value;
 }
 
-function scalarScope(clause: ScalarClauseCandidate, arity: number): Scope {
+function scalarScope(
+  clause: ScalarClauseCandidate,
+  arity: number,
+  isData: (name: string) => boolean,
+): Scope {
   const vars = new Map<string, ScopedValue>();
   for (const [name, slot] of clause.slots) {
     const position = clause.positions[slot]!;
@@ -1701,7 +1887,7 @@ function scalarScope(clause: ScalarClauseCandidate, arity: number): Scope {
       runtimeNumericHead: position.path.length !== 0,
     });
   }
-  return { vars, len: arity };
+  return { vars, len: arity, isData };
 }
 
 /** Build an atom result while executing supported nested value calls. Unresolved heads are constructors;
@@ -1769,6 +1955,7 @@ function compileScalarAtom(
         type: boundValue.type,
       }),
       len: index + 1,
+      isData: scope.isData,
     };
     const body = compileScalarAtom(env, atom.items[3]!, nextScope, holders);
     if (body === undefined) return undefined;
@@ -1833,7 +2020,7 @@ function compileScalarClause(
   expected: "number" | "atom",
   holders: ValueFns,
 ): Compiled | undefined {
-  const scope = scalarScope(clause, candidate.arity);
+  const scope = scalarScope(clause, candidate.arity, inertSymbolTest(env));
   return compileScalarTail(env, clause.body, scope, holders, functor, expected);
 }
 
@@ -4146,6 +4333,14 @@ function isDataSymbol(env: MinEnv, name: string): boolean {
   return !dataDeny().has(name) && !env.ruleIndex.has(name) && !env.gt.has(name);
 }
 
+/** The `Scope.isData` test: a bare symbol stands for itself only when nothing can reduce it. `isDataSymbol`
+ *  rules out rule heads, sync grounded operations and the operator names; an async grounded operation is a
+ *  nullary application as well. */
+const inertSymbolTest =
+  (env: MinEnv) =>
+  (name: string): boolean =>
+    isDataSymbol(env, name) && !env.agt.has(name);
+
 function compileImpStaticAtom(env: MinEnv, a: Atom, scope: ImpScope): ImpCompiled | undefined {
   if (a.kind === "var") {
     const slot = scope.vars.get(a.name);
@@ -4843,7 +5038,15 @@ export function compileEnv(env: MinEnv): CompiledFns {
   const cand: Cand = new Map();
   for (const f of pure) {
     const h = singleClauseHead(env, f);
-    if (h !== undefined) cand.set(f, h);
+    // A body that is a bare literal answers without reading its arguments, so a value holder for it can only
+    // ever decline: its parameters keep the `int` default, and the meta-typed atoms such a functor is called
+    // with never match. Compiling symbol literals made these candidates for the first time, and registering
+    // one takes the functor away from `compileSymbolic`, which does run for it — the prelude's
+    // `(= (quote $atom) NotReducible)` is exactly this shape. Holders are claimed in order, so widening what
+    // this compiler accepts silently reassigns functors that were another compiler's; leaving a constant body
+    // alone keeps that claim where it was. A bare variable is different: that projection was already a
+    // candidate before symbols compiled, so it stays one.
+    if (h !== undefined && (h.body.kind === "expr" || h.body.kind === "var")) cand.set(f, h);
   }
 
   // A holder per candidate, types refined below. retType starts undefined (a sentinel that inferType reads
@@ -4857,49 +5060,79 @@ export function compileEnv(env: MinEnv): CompiledFns {
       arity: params.length,
       retType: undefined as unknown as Ty,
       paramTypes: paramTypesOf(params),
+      memoized: false,
       run: bailRun,
     });
-  for (let changed = true; changed; ) {
-    changed = false;
-    for (const [f, { params, body }] of cand) {
-      const h = holders.get(f)!;
-      params.forEach((p, i) => {
-        if (typeof p === "string" && h.paramTypes[i] === "int") {
-          const t = inferVarType(body, p, holders);
-          if (t !== undefined && t !== "int") {
-            h.paramTypes[i] = t;
+  const isData = inertSymbolTest(env);
+  const inferTypes = (): void => {
+    for (const h of holders.values()) h.retType = undefined as unknown as Ty;
+    for (let changed = true; changed; ) {
+      changed = false;
+      for (const [f, { params, body }] of cand) {
+        const h = holders.get(f);
+        if (h === undefined) continue;
+        const open = new Map<string, number>();
+        params.forEach((p, i) => {
+          if (typeof p === "string" && h.paramTypes[i] === "int") open.set(p, i);
+        });
+        if (open.size > 0)
+          for (const [name, type] of paramTypesFromUses(body, open, holders, isData)) {
+            h.paramTypes[open.get(name)!] = type;
+            changed = true;
+          }
+        if ((h.retType as Ty | undefined) === undefined) {
+          const rt = inferType(body, varTypesOf(params, h.paramTypes), holders, isData);
+          if (rt !== undefined) {
+            h.retType = rt;
             changed = true;
           }
         }
-      });
-      if ((h.retType as Ty | undefined) === undefined) {
-        const rt = inferType(body, varTypesOf(params, h.paramTypes), holders);
-        if (rt !== undefined) {
-          h.retType = rt;
-          changed = true;
-        }
       }
     }
+    for (const [f, h] of [...holders])
+      if ((h.retType as Ty | undefined) === undefined) holders.delete(f);
+  };
+  // Opaque parameters widen before the fixpoint runs, so it runs once. Nothing is lost by going first: a
+  // carried parameter is only ever passed to its own position, so `paramTypesFromUses` has nothing to say
+  // about it either way.
+  for (const [f, { params, body }] of cand) {
+    // A projection hands an argument straight back, so there is no work in it for a compiled entry to repay,
+    // and widening its parameters only claims the calls the `int` typing used to decline — the combinators
+    // `(= (I $x) $x)` and `(= (K $x $y) $x)` are the shape. As above, leaving it alone is what keeps this
+    // change from reassigning a functor another compiler already handles.
+    if (body.kind !== "expr") continue;
+    const h = holders.get(f)!;
+    params.forEach((p, i) => {
+      if (typeof p === "string" && isCarriedParam(body, p, f, i, h.arity, isData))
+        h.paramTypes[i] = "atom";
+    });
   }
-  for (const [f, h] of [...holders])
-    if ((h.retType as Ty | undefined) === undefined) holders.delete(f);
+  inferTypes();
 
   for (;;) {
     let removed = false;
     const result = new Map<string, { node: Node; arity: number }>();
     for (const [f] of [...holders]) {
       const cd = cand.get(f)!;
-      const c = compileTail(cd.body, buildScope(cd.params, holders.get(f)!.paramTypes), holders, f);
-      if (c === undefined) {
-        holders.delete(f);
-        removed = true;
-      } else {
+      const c = compileTail(
+        cd.body,
+        buildScope(cd.params, holders.get(f)!.paramTypes, isData),
+        holders,
+        f,
+      );
+      if (c !== undefined) {
         result.set(f, { node: c.node, arity: cd.params.length });
+        continue;
       }
+      removed = true;
+      holders.delete(f);
     }
     if (!removed) {
-      for (const [f, { node, arity }] of result)
-        holders.get(f)!.run = makeRun(f, arity, node, selfCallCount(cand.get(f)!.body, f) >= 2);
+      for (const [f, { node, arity }] of result) {
+        const h = holders.get(f)!;
+        h.memoized = selfCallCount(cand.get(f)!.body, f) >= 2;
+        h.run = makeRun(f, arity, node, h.memoized);
+      }
       const compiled: CompiledFns = new Map(holders);
       for (const [f, h] of compileScalarHolders(env, pure, holders)) compiled.set(f, h);
       for (const f of pure) {
@@ -4991,7 +5224,18 @@ export function runCompiled(
       const atom = frameValueToAtom(r);
       return {
         results: [{ atom, bnd: emptyBindings }],
-        counterDelta: holder.kind === "scalar" ? runtime.counterDelta : 0,
+        // The compiled nodes charge where the interpreter charges (one per clause tried, two per `if`, one
+        // per `let`), so a run without a memo reports a step count the interpreter would have reached, and
+        // `maxSteps` means the same thing whether or not a function compiled. A memoised run cannot: replaying
+        // a memo's span is not what the interpreter would spend recomputing it.
+        //
+        // Only under a step limit, though. Without one the count is not observable from a program at all,
+        // and reporting it costs a fresh `St` per compiled call where a zero delta reuses the caller's,
+        // measured at 3.9% of nilbc.
+        counterDelta:
+          holder.kind === "scalar" || (!holder.memoized && st.world.maxSteps > 0)
+            ? runtime.counterDelta
+            : 0,
       };
     } catch (e) {
       if (e instanceof EvaluationDepthHandoff) return undefined;
@@ -5031,10 +5275,21 @@ export function runCompiled(
     if (r.value === EMPTY_VALUE) return { results: [], counterDelta: 0, state: r.st };
     return { results: [{ atom: r.value, bnd: emptyBindings }], counterDelta: 0, state: r.st };
   }
-  // An argument is a ground int, or a flat tuple of ground ints `(i1 i2 ...)` (the iterate/quad-step state).
+  // An argument is a ground int, a flat tuple of ground ints `(i1 i2 ...)` (the iterate/quad-step state), or
+  // a symbol where the parameter was inferred to carry one. The declared type has to gate the symbol slot:
+  // the body reads that slot with `===` against interned symbols, so an int landing there would compare
+  // unequal to every symbol instead of declining.
   const vals: FrameVal[] = [];
-  for (const a of partAtoms) {
-    if (a.kind === "gnd" && a.value.g === "int") vals.push(a.value.n);
+  for (let i = 0; i < partAtoms.length; i++) {
+    const a = partAtoms[i]!;
+    const declared = h.paramTypes[i];
+    if (declared === "sym" || declared === "atom") {
+      // A carried slot takes any ground atom; the body either passes it along or coerces it and BAILs when
+      // the value does not fit. An Error argument declines: `==` answers with the error rather than a Bool
+      // (builtins.ts `equalityCmp`), and the interpreter is the faithful place to work that out.
+      if (declared === "sym" ? a.kind !== "sym" : !a.ground || isErrorAtom(a)) return undefined;
+      vals.push(a);
+    } else if (a.kind === "gnd" && a.value.g === "int") vals.push(a.value.n);
     else if (
       a.kind === "expr" &&
       a.items.length > 0 &&

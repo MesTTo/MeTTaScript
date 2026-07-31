@@ -109,6 +109,8 @@ import { stdlibDocAtoms } from "./stdlib";
 import { applySubst, type Subst } from "./substitution";
 import {
   analyzePurity as analyzePurityRef,
+  buildRuleWalk,
+  tableWorthCandidates,
   analyzeTableWorth,
   functorCallCount,
   inertArgumentPositions,
@@ -1508,12 +1510,19 @@ function ensureTablingAnalysis(env: MinEnv): void {
     env.spaceReadTableWorth !== undefined
   )
     return;
-  env.pureFunctors = analyzePurityRef(env);
-  env.tableWorth = analyzeTableWorth(env, env.pureFunctors);
-  env.modedPureFunctors = analyzePurityRef(env, MODED_IMPURE_OPS);
-  env.modedTableWorth = analyzeTableWorth(env, env.modedPureFunctors);
-  env.spaceReadPureFunctors = analyzePurityRef(env, SPACE_READ_IMPURE_OPS);
-  env.spaceReadTableWorth = analyzeTableWorth(env, env.spaceReadPureFunctors);
+  // One walk over the rule bodies for all six analyses. They differ only in which ops count as impure and
+  // which purity they read, never in the walk, and the bodies here are the whole prelude and standard
+  // library, so walking once instead of six times is most of what this round costs.
+  const walk = buildRuleWalk(env);
+  // The components worth tabling do not depend on which purity is in play, so they are found once and each
+  // analysis only intersects them with its own pure set.
+  const candidates = tableWorthCandidates(env, walk);
+  env.pureFunctors = analyzePurityRef(env, undefined, walk);
+  env.tableWorth = analyzeTableWorth(env, env.pureFunctors, walk, candidates);
+  env.modedPureFunctors = analyzePurityRef(env, MODED_IMPURE_OPS, walk);
+  env.modedTableWorth = analyzeTableWorth(env, env.modedPureFunctors, walk, candidates);
+  env.spaceReadPureFunctors = analyzePurityRef(env, SPACE_READ_IMPURE_OPS, walk);
+  env.spaceReadTableWorth = analyzeTableWorth(env, env.spaceReadPureFunctors, walk, candidates);
   env.tablingDirty = false;
 }
 
@@ -8446,10 +8455,18 @@ function* mettaEvalBodyG(
               ? compiled
               : undefined;
           if (cr !== undefined) {
+            // A chain-internal step may carry app-local variables, the same case the interpreted transfer
+            // below already allows under `inChain`: an argument that is still an unevaluated `match` puts
+            // its pattern variable in the frame's query vars and makes the application non-ground, which
+            // refused the transfer here and nested one frame per iteration. The chain entered var-free, and
+            // the result is instantiated under its own bindings before it becomes the next application, so
+            // those variables cannot be observed by the chain's caller. Outside a chain both conditions
+            // still hold as before, so every other call reaches this the way it did.
+            const chainInternal = inChain && (queryVars.length > 0 || !wApp.ground);
             const singleTailResult =
               partials.length === 1 &&
-              queryVars.length === 0 &&
-              wApp.ground &&
+              (queryVars.length === 0 || chainInternal) &&
+              (wApp.ground || chainInternal) &&
               cr.state === undefined &&
               cr.results.length === 1
                 ? cr.results[0]!
@@ -8462,7 +8479,7 @@ function* mettaEvalBodyG(
                 nextAtom.kind === "expr" &&
                 nextAtom.items.length > 0 &&
                 nextAtom.items[0]!.kind === "sym" &&
-                nextAtom.ground &&
+                (nextAtom.ground || chainInternal) &&
                 !isEvaluationLimitAtom(nextAtom) &&
                 !(opReturnsAtom && !isEmbeddedOp(nextAtom)) &&
                 !atomEq(nextAtom, wApp)
@@ -8476,9 +8493,14 @@ function* mettaEvalBodyG(
                 lfuel -= 1;
                 inChain = true;
                 la = nextAtom;
-                lbnd = emptyBindings;
+                // A ground continuation needs no bindings, which is what every existing chain step took.
+                // A chain-internal one carries the result's own, and the application is instantiated under
+                // them, exactly as the interpreted transfer does.
+                lbnd = nextAtom.ground
+                  ? emptyBindings
+                  : mergeRestrict(env, queryVars, partB, tailResult.bnd);
                 lst = cur2;
-                lw = nextAtom;
+                lw = nextAtom.ground ? nextAtom : (inst(env, lbnd, nextAtom) as ExprAtom);
                 continue reduceTrampoline;
               }
             }

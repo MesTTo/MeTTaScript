@@ -10,7 +10,8 @@ import { stdTable } from "./builtins";
 import { parseAll, format } from "./parser";
 import { standardTokenizer, preludeAtoms, runProgram } from "./runner";
 import { analyzePurity } from "./tabling";
-import { compileDependentNondetGroup, compileEnv } from "./compile";
+import { compileDependentNondetGroup, compileEnv, runCompiled } from "./compile";
+import { compiledEnvWith } from "./compile-test-utils";
 import { TableSpace } from "./table-space";
 
 const atoms = (src: string) =>
@@ -529,4 +530,126 @@ describe("deterministic-core compiler", () => {
       }
     }
   });
+});
+
+describe("carried and symbolic values on the compiled fast path", () => {
+  // Every parameter used to be typed int-or-tuple, so a function carrying a symbol or dispatching on one
+  // fell back to the interpreter for its whole loop. These are the shapes that unlocks, plus the guard that
+  // keeps a reducible symbol out.
+  const compiledKind = (src: string, name: string) => {
+    const holder = compileEnv(envWith(src)).get(name);
+    return holder === undefined ? undefined : holder.kind;
+  };
+
+  const compiledParamTypes = (src: string, name: string) => {
+    const holder = compileEnv(envWith(src)).get(name);
+    return holder !== undefined && holder.kind === "functional" ? holder.paramTypes : undefined;
+  };
+
+  it("carries a symbol through a loop instead of interpreting it", () => {
+    const rules = `(= (walk $n $acc) (if (== $n 0) $acc (walk (- $n 1) $acc)))`;
+    expect(compiledParamTypes(rules, "walk")).toEqual(["int", "atom"]);
+    expect(compareCompiledAndInterpreted(`${rules}\n!(walk 300 start)`)).toEqual([["start"]]);
+    // Non-vacuous: the compiled entry itself accepts the symbol argument and answers, rather than declining
+    // to the interpreter the way it did while every parameter had to be a number.
+    const env = compiledEnvWith(rules);
+    const direct = runCompiled(env, "walk", [gint(300n), sym("start")], initSt());
+    expect(direct?.results.map((r) => format(r.atom))).toEqual(["start"]);
+    // A compiled run charges the evaluator's step counter where the interpreter charges, but only under a
+    // step limit, which is the only place the count is observable. So a limit cuts the loop in the same
+    // place whether or not it compiled.
+    for (const maxSteps of [40, 200, 700]) {
+      const limited = (tabling: boolean) =>
+        runProgram(`${rules}\n!(walk 300 start)`, 100_000, new Map(), { tabling, maxSteps }).map(
+          (r) => r.results.map(format),
+        );
+      expect(limited(true), `maxSteps ${maxSteps}`).toEqual(limited(false));
+    }
+  });
+
+  it("dispatches on a symbol by identity", () => {
+    const rules = `(= (tick $n $tag) (if (== $n 0) $tag (tick (- $n 1) (if (== $tag ping) pong ping))))`;
+    expect(compiledKind(rules, "tick")).toBe("functional");
+    for (const [n, tag, want] of [
+      [0, "ping", "ping"],
+      [1, "ping", "pong"],
+      [2, "ping", "ping"],
+      [7, "pong", "ping"],
+    ] as const)
+      expect(compareCompiledAndInterpreted(`${rules}\n!(tick ${n} ${tag})`)).toEqual([[want]]);
+  });
+
+  it("boxes branches that disagree, so one arm may answer with a symbol and the other with a number", () => {
+    const rules = `(= (sign $n) (if (> $n 0) positive $n))`;
+    expect(compiledKind(rules, "sign")).toBe("functional");
+    expect(compareCompiledAndInterpreted(`${rules}\n!(sign 5)`)).toEqual([["positive"]]);
+    expect(compareCompiledAndInterpreted(`${rules}\n!(sign -2)`)).toEqual([["-2"]]);
+  });
+
+  it("declines a bare symbol that is itself a nullary rule head", () => {
+    // `a` is not data: it reduces to 5, so compiling it as a literal would answer with the symbol.
+    const src = `(= a 5)\n(= (pick $n) (if (== $n 0) a b))\n!(pick 0)\n!(pick 1)`;
+    expect(compareCompiledAndInterpreted(src)).toEqual([["5"], ["b"]]);
+  });
+
+  it("builds a constructor term so a loop can carry a growing structure", () => {
+    const rules = `(= (grow $n $acc) (if (== $n 0) $acc (grow (- $n 1) (P $acc))))`;
+    expect(compiledParamTypes(rules, "grow")).toEqual(["int", "atom"]);
+    expect(compareCompiledAndInterpreted(`${rules}\n!(grow 4 z)`)).toEqual([["(P (P (P (P z))))"]]);
+    expect(compareCompiledAndInterpreted(`${rules}\n!(grow 2 7)`)).toEqual([["(P (P 7))"]]);
+    const list = `(= (bld $n $acc) (if (== $n 0) $acc (bld (- $n 1) (Cons $n $acc))))`;
+    expect(compareCompiledAndInterpreted(`${list}\n!(bld 3 Nil)`)).toEqual([
+      ["(Cons 1 (Cons 2 (Cons 3 Nil)))"],
+    ]);
+  });
+
+  it("memoises a doubly-recursive builder, so it stays polynomial where the interpreter is exponential", () => {
+    const rules = `(= (grow $n $a) (if (== $n 0) $a (P (grow (- $n 1) $a) (grow (- $n 1) $a))))`;
+    expect(compareCompiledAndInterpreted(`${rules}\n!(grow 3 z)`)).toEqual([
+      ["(P (P (P z z) (P z z)) (P (P z z) (P z z)))"],
+    ]);
+    // `let` forces the build, so this really constructs a tree of 2^20 leaves, and the memo is what shares
+    // the repeated subtrees. Measured 111ms here against 48s interpreted, so the timeout below is what
+    // catches a memo that stopped keying these arguments; a fuel bound does not, since the interpreter
+    // finishes within one.
+    const built = runProgram(
+      `${rules}\n!(let $t (grow 20 z) (car-atom $t))`,
+      200_000_000,
+      new Map(),
+      {
+        tabling: true,
+      },
+    );
+    expect(built.at(-1)!.results.map(format)).toEqual(["P"]);
+  }, 20_000);
+
+  it("declines a constructor head that can reduce", () => {
+    // `P` heads a rule, so `(P $acc)` is an application: building it as data would answer with the term
+    // instead of what the rule rewrites it to.
+    const reducible = `(= (P $x) (Seen $x))
+(= (grow $n $acc) (if (== $n 0) $acc (grow (- $n 1) (P $acc))))`;
+    expect(compareCompiledAndInterpreted(`${reducible}\n!(grow 2 z)`)).toEqual([
+      ["(Seen (Seen z))"],
+    ]);
+    const grounded = `(= (walk $n $acc) (if (== $n 0) $acc (walk (- $n 1) (car-atom $acc))))`;
+    expect(compareCompiledAndInterpreted(`${grounded}\n!(walk 1 (a b))`)).toEqual([["a"]]);
+  });
+
+  it("stays byte-identical across generated symbol-carrying calls", () => {
+    const rules = `(= (relay $n $acc) (if (== $n 0) $acc (relay (- $n 1) $acc)))
+(= (flip $n $tag) (if (== $n 0) $tag (flip (- $n 1) (if (== $tag up) down up))))
+(= (grow $n $acc) (if (== $n 0) $acc (grow (- $n 1) (P $acc))))`;
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 0, max: 24 }),
+        fc.constantFrom("up", "down", "sideways", "7"),
+        (depth, tag) => {
+          compareCompiledAndInterpreted(`${rules}\n!(relay ${depth} ${tag})`);
+          compareCompiledAndInterpreted(`${rules}\n!(flip ${depth} ${tag})`);
+          compareCompiledAndInterpreted(`${rules}\n!(grow ${depth} ${tag})`);
+        },
+      ),
+      { numRuns: 60 },
+    );
+  }, 30_000);
 });

@@ -190,6 +190,41 @@ describe("depth-neutral argument trampoline", () => {
   });
 });
 
+describe("chain-internal variables keep a tail loop flat", () => {
+  // A tail loop whose body reads a space used to nest one logical depth level per iteration once the
+  // compiler was present, and cut at max-stack-depth: 320 completed 319 iterations, 1000 completed 999.
+  // The unevaluated `match` in the argument puts its pattern variable in the frame's query vars and makes
+  // the application non-ground, and the compiled transfer required both to be absent. The interpreted one
+  // already allowed them mid-chain, on the argument that a chain entered var-free cannot leak an app-local
+  // variable to its caller; the compiled one now agrees.
+  const SPACE_READ_LOOP = `(fact c 3)
+(= (look $n $acc) (if (== $n 0) $acc (look (- $n 1) (match &self (fact c $v) $v))))`;
+
+  it.each([500, 3000, 20000])(
+    "completes %i iterations with and without the compiler",
+    (n) => {
+      const src = `${SPACE_READ_LOOP}\n!(look ${n} 0)`;
+      const compiled = runProgram(src, 2_000_000_000, new Map(), { tabling: true });
+      const interpreted = runProgram(src, 2_000_000_000, new Map(), { tabling: false });
+
+      expect(compiled[0]!.results.map(format)).toEqual(["3"]);
+      expect(interpreted[0]!.results.map(format)).toEqual(["3"]);
+    },
+    60_000,
+  );
+
+  it("still cuts a loop that genuinely nests, rather than flattening everything", () => {
+    // Not a tail call: the recursive result is consumed by an enclosing expression, so the depth is real
+    // and max-stack-depth must still stop it.
+    const src = `(= (deep $n) (if (== $n 0) 0 (+ 1 (deep (- $n 1)))))\n!(pragma! max-stack-depth 50)\n!(deep 500)`;
+    const out = runProgram(src, 500_000_000, new Map(), { tabling: true })
+      .at(-1)!
+      .results.map(format);
+
+    expect(out.join()).toContain("StackOverflow");
+  }, 30_000);
+});
+
 describe("compiled tail-call nontermination differential", () => {
   // Tail transfers iterate on the heap in every mode, so a runaway tail cycle no longer grows
   // the native stack; the resource bound that stops it is fuel, and exhaustion must surface as
