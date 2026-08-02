@@ -31,7 +31,7 @@ describe("atom constructors", () => {
     const atoms: Atom[] = [sym("a"), variable("x"), expr([]), gint(1)];
     for (const x of atoms) {
       expect(Object.keys(x).sort()).toEqual(
-        ["exec", "ground", "items", "kind", "match", "name", "typ", "value"].sort(),
+        ["exec", "ground", "items", "kind", "match", "name", "typ", "value", "vars"].sort(),
       );
     }
   });

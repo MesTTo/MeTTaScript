@@ -19,6 +19,11 @@ export type TraceEvent =
   // `from` (e.g. `BestCandidate`) became the specialized functor `to` (e.g. `BestCandidate$PriorityRankNeg`).
   | { readonly kind: "specialize"; readonly from: string; readonly to: string }
   // A native stack overflow was caught and cut. `atom` is the call that was being reduced at the cut.
-  | { readonly kind: "overflow"; readonly atom: string };
+  | { readonly kind: "overflow"; readonly atom: string }
+  // A compiled holder answered a call instead of the equations. `op` is the head symbol and `holder` the
+  // kind of holder that ran. This is what makes a compiled and an interpreted run comparable: replaying the
+  // same program with those holders declined (`RunOptions.declineCompiled`) and diffing the two traces
+  // points at the first step where compiling changed the evaluation.
+  | { readonly kind: "compiled"; readonly op: string; readonly holder: string };
 
 export type TraceSink = (event: TraceEvent) => void;

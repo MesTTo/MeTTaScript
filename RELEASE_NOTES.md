@@ -1,3 +1,117 @@
+# MeTTaScript 2.10.0
+
+A program split across files now runs at single-file speed, the world's tables stopped charging every
+effect for everything the program ever created, and import failures are visible. Two behaviors moved to
+match Hyperon 0.2.10, both verified by running the same programs there directly: multi-signature
+functions answer with the first declared signature in any file layout, and an import that resolves
+nowhere is an error instead of a silent no-op.
+
+## A program in many files runs like one file
+
+`import!` used to leave a module's definitions in the runtime rule tables, where a dozen fast paths,
+indexes, and the compiler each declined separately. A completed top-level `!(import! &self "mod")` is
+now folded into the static program between directives, the way a Prolog consult loads clauses, so the
+rest of the run evaluates exactly as if the module had been part of the file. The corpus Fibonacci
+split in two ran 276 times slower than whole in 2.9.0; it is now 1.00x. The Peano saturation was 24
+times slower split; now 1.00x. Splitting any corpus example costs 0.99x overall. Imports evaluated in
+computed or nested positions keep the previous world-local behavior.
+
+## One signature story in any layout
+
+Static loading kept the last `(: f (-> ...))` declaration per function while imports kept the first, so
+a program could answer differently depending on which file a declaration sat in. Hyperon keeps every
+declaration and its answers do not depend on layout. Registration is now first-declaration-wins on both
+paths, which matches Hyperon on the calls it admits:
+
+```metta
+(: f (-> Type1 Type1))
+(: f (-> Type2 Type2))
+(: T1in Type1)
+(= (f $x) $x)
+!(f T1in)
+```
+
+```text
+[T1in]
+```
+
+Hyperon 0.2.10 answers `T1in` here; 2.9.0 rejected the call against the second signature. Keeping every
+declaration live at once is the remaining gap and is tracked.
+
+## Spaces and state stop paying for each other
+
+Every `bind!`, `new-space`, or `change-state!` cloned the world by copying its named-space, state, and
+token tables, so one effect cost as much as everything the program had ever created: 6400 `bind!`
+handles took 3.4 seconds, and 3000 state writes ran six times slower with 3200 named spaces standing
+by. The tables are now persistent hash tries (node size proportional to occupancy, structural sharing
+across worlds, iteration in insertion order), and a world clone copies nothing. The 6400 handles cost
+about 100ms of loading; state writes no longer see the space count.
+
+```metta
+!(bind! &counter (new-state 0))
+!(change-state! &counter 41)
+!(+ 1 (get-state &counter))
+```
+
+```text
+[()]
+[(State 0)]
+[42]
+```
+
+## get-atoms enumerates the program, not the library
+
+This build keeps the prelude and standard library inside `&self`, and `get-atoms` walked all of it,
+reducing every enumerated atom on the way out. A program with a few hundred atoms of its own overflowed
+the default stack or hung for minutes on `!(get-atoms &self)`. Hyperon holds its library behind a
+separate space atom, so enumerating `&self` there yields the program's own atoms; `get-atoms` now does
+the same, enumerating everything after the preloaded base. Matching and reduction still see the whole
+store. The reported reproduction went from twenty seconds and a StackOverflow to 0.2 seconds.
+
+## Imports fail loudly and the root is yours to set
+
+An `import!` whose literal target resolved nowhere loaded nothing and said nothing. Hyperon answers
+with an error, and so does this release: `(Error (import! &self nope) "Failed to resolve module
+nope")`. That one change surfaced seven corpus programs that had never loaded the libraries they
+imported; two of them were the corpus's long-standing failures, and they pass with their libraries
+loaded. Registered libraries answer to both their plain name and the PeTTa-convention `lib_` spelling,
+and the `random` module resolves with signatures for the grounded random operations.
+
+File imports resolve inside an import root that defaulted to one directory above the entry file and
+could not be changed, so a layout with tests two levels down importing shared utilities was
+unreachable. The program can now declare its own root, read at load time and resolved against the
+file's directory:
+
+```metta
+!(pragma! import-root ../..)
+```
+
+The CLI's `--import-root <dir>` overrides the pragma when an operator needs to.
+
+## Saturation and search
+
+Three defects surfaced while gating the import work on a search-heavy corpus program, each one general:
+
+- Inert-data verdicts were invalidated by every space write, so a loop adding one atom per state
+  re-walked its whole accumulator per membership probe. The cache is now keyed on a version that moves
+  only when a type declaration enters or leaves a space.
+- After `maxSteps` ran out, the unwind re-scanned every pending call's arguments per remaining
+  candidate. Expressions verified free of the limit marker are now remembered, so cancelling a run
+  costs what the run cost.
+- The higher-order specializer rewrites `(foldl f ...)` calls into first-order form before the first
+  query, and the native breadth-first-search recognizer only knew the pristine spelling, so it never
+  fired in compiled runs. It recognizes both, from the plain route and the chain route alike.
+
+The corpus tile puzzle runs in 0.6 seconds in both its layouts; its single-file layout previously hung
+under default options.
+
+## Compatibility
+
+125 corpus programs are output-identical to 2.9.0 except the ones named above: the two multi-signature
+programs (both moved to the Hyperon-verified answers), and the seven whose imports now actually load or
+loudly fail. Whole-versus-split answers agree corpus-wide. The 1,879-test suite, the 270-assertion
+oracle, and a 131-file external application suite pass with every per-file assertion count unchanged.
+
 # MeTTaScript 2.9.0
 
 A compiled fast path that carries more than numbers. A compiled function's parameters could hold an integer

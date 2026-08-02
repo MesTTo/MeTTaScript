@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: MIT
 
+import { ptSet } from "./pmap";
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { buildEnv, addAtomToEnv, initSt, mettaEval } from "./eval";
@@ -292,7 +293,7 @@ describe("static nested argument-head indexing", () => {
     ];
     const env = buildEnv(facts, stdTable());
     const state = initSt();
-    state.world.store.set(0, nested("red", "state-value"));
+    state.world.store = ptSet(state.world.store, "0", nested("red", "state-value"));
     const query = A(
       sym("match"),
       sym("&self"),

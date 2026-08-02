@@ -11,6 +11,7 @@ import {
   expr,
   internBuiltExpr,
   variable,
+  varNamesOf,
 } from "./atom";
 import { type Bindings, lookupVal, isEmpty, valEntries } from "./bindings";
 import { readEnv } from "./env";
@@ -77,6 +78,14 @@ function lookup(ctx: Ctx, name: string): Atom | undefined {
   return ctx.index !== null ? ctx.index.get(name) : lookupVal(ctx.b, name);
 }
 
+/** Whether `b` binds no variable occurring in `a`, so applying it leaves `a` untouched. */
+function bindsNoVarOf(b: Bindings, a: Atom): boolean {
+  const index = buildLookup(b);
+  for (const v of varNamesOf(a))
+    if ((index !== null ? index.get(v) : lookupVal(b, v)) !== undefined) return false;
+  return true;
+}
+
 /**
  * Apply a binding set to an atom as a substitution, resolved to a fixpoint. A binding set produced by
  * unification is triangular: a variable's value can mention another still-bound variable (nonlinear
@@ -102,6 +111,14 @@ export function instantiate(b: Bindings, a: Atom, suffix = "", intern?: InternTa
   if (a.kind === "var" && isEmpty(b)) return suffix === "" ? a : variable(a.name + suffix);
   if (a.kind !== "var" && a.kind !== "expr") return a;
   if (isEmpty(b) && suffix === "") return a;
+  // A binding cannot change a term none of whose variables it binds: every variable resolves to itself,
+  // so every expression node rebuilds identically and `resolve` hands back the original object anyway.
+  // Deciding that up front costs one lookup per variable of `a` against a binding that averages 3
+  // relations, and skips a full walk of the term — the common case in a rewrite-heavy search, where most
+  // of what a step carries is untouched by that step's binding. Only sound without a suffix: a suffix
+  // renames every variable whether the binding reaches it or not. `eq` aliases are irrelevant because
+  // `lookup` consults value bindings alone.
+  if (suffix === "" && bindsNoVarOf(b, a)) return a;
   const ctx: Ctx = {
     b,
     index: buildLookup(b),

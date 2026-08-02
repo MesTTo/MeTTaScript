@@ -11,7 +11,7 @@
 // engine use. Variables are keyed by name (the same identity the immutable matcher uses), so results are
 // interchangeable with the reference matcher; only the binding *mechanism* differs.
 
-import { type Atom, atomEq } from "./atom";
+import { type Atom, atomEq, expr } from "./atom";
 
 export class Trail {
   private readonly binds = new Map<string, Atom>();
@@ -69,7 +69,9 @@ export class Trail {
         items.push(r);
       }
     }
-    return items === null ? a : { ...a, items };
+    // Rebuild through `expr()`, never `{ ...a, items }`. The spread carries the old node's derived fields, its
+    // `ground` flag and its memoised variable list, onto a node whose children just changed.
+    return items === null ? a : expr(items);
   }
 }
 
@@ -104,7 +106,7 @@ export function unifyTrail(tr: Trail, l0: Atom, r0: Atom): boolean {
 // The compiled chainer's variables, with the binding ON the variable: `b` is a mutable slot, deref chases
 // pointers, and the trail is an array of bound cells. This removes the string-keyed Map from the search's
 // three hottest operations (deref, bind, undo) — no string hashing, no name concatenation. A cell is
-// structurally a `VarAtom` (same eight fields, one extra slot), so it flows through `expr` and unification
+// structurally a `VarAtom` (same nine fields, one extra slot), so it flows through `expr` and unification
 // unchanged; `name` starts empty and is assigned only if the cell survives unbound into a materialized
 // answer. Cells are search-private: every variable entering the search (clause text and the entry call's
 // arguments alike) is freshened into a cell first, so binding never mutates an engine-owned atom.
@@ -118,6 +120,8 @@ export interface CellVar {
   readonly exec: undefined;
   readonly match: undefined;
   readonly ground: false;
+  /** Never filled: a cell is named after it is built, so its variable list stays derived per ask. */
+  vars: undefined;
   b: Atom | undefined;
 }
 
@@ -131,6 +135,7 @@ export function mkCell(): CellVar {
     exec: undefined,
     match: undefined,
     ground: false,
+    vars: undefined,
     b: undefined,
   };
 }

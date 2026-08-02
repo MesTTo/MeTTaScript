@@ -10,7 +10,14 @@ import {
   standardTokenizer,
   type TraceEvent,
 } from "@mettascript/core";
-import { assembleQuery, collectTrace, explainCall, summarize, type TraceRunner } from "./index";
+import {
+  assembleQuery,
+  collectTrace,
+  compareRuns,
+  explainCall,
+  summarize,
+  type TraceRunner,
+} from "./index";
 
 const sequentialRunner: TraceRunner = (program, fuel, imports, opts) =>
   evalSequential(parseAll(program, standardTokenizer()), fuel, imports, opts);
@@ -37,6 +44,8 @@ describe("@mettascript/debug", () => {
       { kind: "specialize", from: "twice", to: "twice$inc" },
       { kind: "overflow", atom: "(loop 0)" },
       { kind: "overflow", atom: "(loop 1)" },
+      { kind: "compiled", op: "fib", holder: "functional" },
+      { kind: "compiled", op: "fib", holder: "functional" },
       { kind: "reduce", atom: "(done)" },
     ];
 
@@ -48,6 +57,7 @@ describe("@mettascript/debug", () => {
       specialized: ["twice -> twice$inc"],
       overflow: ["(loop 0)", "(loop 1)"],
       reductions: 2,
+      compiled: { fib: 2 },
     });
   });
 
@@ -77,5 +87,36 @@ describe("@mettascript/debug", () => {
     );
 
     expect(trace.some((e) => e.kind === "grounded" && e.op === "top-k-by-atom")).toBe(true);
+  });
+  // The point of running a program twice is to localise a compiled/interpreted disagreement: same answers
+  // means the compiler is not what changed the result, and the hunks say which steps only one run took.
+  it("compares a run against the same run with a compiled holder declined", () => {
+    const src = `(= (twice $n) (* 2 $n))\n!(twice 21)`;
+    const same = compareRuns(
+      programRunner,
+      src,
+      {},
+      { runOptions: { declineCompiled: { functors: ["twice"] } } },
+    );
+    expect(same.leftResult).toEqual(["42"]);
+    expect(same.sameResult).toBe(true);
+    expect(same.queryDiffs).toEqual([]);
+    // Whatever the two runs did differently, it was steps one took and the other did not: no hunk has both
+    // sides non-empty, which is what "the compiler did not change the evaluation" looks like in a trace.
+    expect(same.hunks.every((h) => h.left.length === 0 || h.right.length === 0)).toBe(true);
+  });
+
+  it("names the query whose answer a declined holder changes", () => {
+    // Nothing here disagrees, so the query list is empty; the field exists to point at the one query out of
+    // hundreds that moved, which is the only tractable entry point on a large program.
+    const src = `(= (id2 $x) $x)\n!(id2 a)\n!(id2 b)`;
+    const cmp = compareRuns(
+      programRunner,
+      src,
+      {},
+      { runOptions: { declineCompiled: { kinds: ["symbolic", "functional", "scalar"] } } },
+    );
+    expect(cmp.leftResult).toEqual(["a", "b"]);
+    expect(cmp.queryDiffs).toEqual([]);
   });
 });

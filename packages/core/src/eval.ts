@@ -11,8 +11,10 @@ import {
   type Atom,
   atomEq,
   atomVars,
-  collectSubstitutedVars,
+  collectSubstitutedVarsAmong,
   collectVars,
+  collectVarsAmong,
+  type VarProbe,
   type ExprAtom,
   emptyExpr,
   expr,
@@ -40,9 +42,12 @@ import {
   logSize,
   logToArray,
 } from "./atomlog";
+import { emptyPTable, ptEntries, ptGet, ptKeys, ptSet, type PTable } from "./pmap";
 import {
   type BindingRel,
   type Bindings,
+  bindingNames,
+  probeSize,
   emptyBindings,
   eqRelations,
   fromRelations,
@@ -490,7 +495,9 @@ function embeddedOperationEffect(op: string): GroundedOperationEffect {
   return "Pure";
 }
 
-function isEmbeddedOp(a: Atom): boolean {
+/** Whether `a` is headed by an embedded instruction. Exported because the compiler asks the same question:
+ *  a right-hand side of that shape re-enters evaluation by a different route than the rule it stands for. */
+export function isEmbeddedOp(a: Atom): boolean {
   const op = opOf(a);
   return op !== undefined && EMBEDDED.has(op);
 }
@@ -729,18 +736,21 @@ function reduciblyDefinedHead(env: MinEnv, w: World, name: string): boolean {
 }
 
 // Inert verdicts also depend on the type tables (a constructor application is inert only while its
-// arguments type-check), so entries carry the space version beside the rule-table signature.
+// arguments type-check), and type checking reads runtime `(: ...)` atoms, so entries carry the
+// type-content version beside the rule-table signature. NOT the whole-space version: a program that
+// adds plain data atoms in a loop would then invalidate every verdict on every write and re-walk its
+// whole accumulator per membership probe, which is quadratic (the corpus tile puzzle's hang).
 interface InertEntry extends NormalFormEntry {
-  readonly spaceVersion: number;
+  readonly typeVersion: number;
 }
 const inertDataCache = new WeakMap<Atom, InertEntry>();
 
 function inertEntry(env: MinEnv, w: World, res: boolean): InertEntry {
-  return { ...normalFormEntry(env, w, res), spaceVersion: w.spaceVersion };
+  return { ...normalFormEntry(env, w, res), typeVersion: w.typeVersion };
 }
 
 function inertEntryValid(entry: InertEntry, env: MinEnv, w: World): boolean {
-  return normalFormEntryValid(entry, env, w) && entry.spaceVersion === w.spaceVersion;
+  return normalFormEntryValid(entry, env, w) && entry.typeVersion === w.typeVersion;
 }
 
 function isInertData(env: MinEnv, w: World, t: Atom, exprHeads: ReadonlySet<string>): boolean {
@@ -847,6 +857,25 @@ export type ImportMap = Map<string, ImportEntry>;
 
 export interface MinEnv {
   ruleIndex: Map<string, Array<[Atom, Atom]>>;
+  /** The `&self` equations an `import!` added, as of the last compile.
+   *
+   *  A module's equations land in the space, so the evaluator finds them through the world's rule index and
+   *  `ruleIndex` never hears about them. The compiler has no world, so `ensureCompiled` hands it this
+   *  snapshot and rebuilds whenever the world's `selfRuleVersion` moves off `compiledRuleVersion`. Without
+   *  it a multi-file program could not be compiled at all, which cost a corpus Peano saturation 27x and a
+   *  corpus Fibonacci 276x purely for living in two files. */
+  compileSelfRules?: ReadonlyMap<string, Array<[Atom, Atom]>> | undefined;
+  /** The `selfRuleVersion` `compileSelfRules` was taken at; `undefined` before the first query. */
+  compiledRuleVersion?: number | undefined;
+  /** Pure functors over the rules the COMPILER can see, which is the static ones plus `compileSelfRules`.
+   *  `pureFunctors` answers the same question for tabling, which a runtime rule addition deliberately
+   *  switches off in favour of its own versioned gates; compilation stays on. Only built when a module
+   *  actually contributed equations, so a single-file program reuses `pureFunctors` untouched. */
+  compilePureFunctors?: Set<string> | undefined;
+  /** The rule source a parallel-hyperpose worker re-evaluates branches from: the program's own non-`!`
+   *  atoms, extended by import promotion with each promoted module's definitions, so a worker sees the
+   *  same static rules the main evaluation does. Read at call time by the `parEval` closures. */
+  parRulesSrc?: string | undefined;
   varRules: Array<[Atom, Atom]>;
   // The genuinely variable-headed (`($x …)`) subset of `varRules`. Those can match a query of ANY head;
   // the rest of `varRules` are expression-headed (e.g. PeTTa's `((|-> …) …)` applicators) and can only match
@@ -858,6 +887,13 @@ export interface MinEnv {
    *  to slots by occurrence id and `get-atoms` order is observable, so the compaction sweep swaps a
    *  slot's storage without renumbering. */
   atoms: StaticAtomStore;
+  /** How many leading `atoms` are the preloaded prelude/stdlib base. `get-atoms &self` enumerates the
+   *  atoms AFTER this point: Hyperon keeps its standard library in a separate space reachable through an
+   *  embedded space atom, so enumerating `&self` there yields the program's own atoms, not thousands of
+   *  library definitions (and each enumerated atom is reduced, so enumerating the library here meant
+   *  reducing every open library rule body, which overflowed or hung on any real program). Matching and
+   *  reduction still see the whole store; only the enumeration boundary moves. */
+  preloadBase?: number | undefined;
   types: Map<string, Atom[]>;
   imports: ImportMap;
   /** Canonical module ids loaded into each space during this evaluator run. */
@@ -876,6 +912,11 @@ export interface MinEnv {
   /** Optional opt-in execution trace sink. `undefined` when tracing is off, so emit sites cost one branch.
    *  Always present (as `undefined` when off) to keep the env object's shape monomorphic on the hot path. */
   trace?: TraceSink | undefined;
+  /** Which compiled holders to leave unbuilt, asked once per holder after each compile. A differential
+   *  debugging switch rather than a tuning knob: running a program as-is and again with one functor's
+   *  holder declined says whether compiling THAT functor is what changed the answer, and diffing the two
+   *  traces says where. `undefined` builds every holder, which is the normal path. */
+  declineCompiled?: ((functor: string, kind: string) => boolean) | undefined;
   /** Per-runner `with-mutex` locks (a Promise chain per key), so mutexes do not leak across runners. */
   mutexes: Map<string, Promise<void>>;
   /** Optional per-run hash-cons table for immutable terms. */
@@ -1526,25 +1567,50 @@ function ensureTablingAnalysis(env: MinEnv): void {
   env.tablingDirty = false;
 }
 
-/** Static rule functors mentioned as expression heads in a query. This is a conservative call set: a
- *  data position can cause extra compilation, but a missing head can never expose stale compiled code. */
+/** Rule functors mentioned as expression heads in a query, static or imported. This is a conservative call
+ *  set: a data position can cause extra compilation, but a missing head can never expose stale compiled
+ *  code. */
 function queryRuleFunctors(env: MinEnv, a: Atom, into: Set<string>): void {
+  const imported = env.compileSelfRules;
   const pending = [a];
   while (pending.length > 0) {
     const current = pending.pop()!;
     if (current.kind !== "expr" || current.items.length === 0) continue;
     const head = current.items[0]!;
-    if (head.kind === "sym" && env.ruleIndex.has(head.name)) into.add(head.name);
+    if (head.kind === "sym" && (env.ruleIndex.has(head.name) || imported?.has(head.name) === true))
+      into.add(head.name);
     for (let i = current.items.length - 1; i >= 0; i--) pending.push(current.items[i]!);
   }
 }
 
 /** Bring the compiler map up to date for one top-level query. Answer-dependent recursive search groups
  *  compile on demand; a query needing any other missing functor promotes the map to a complete compile. */
-function ensureCompiled(env: MinEnv, query: Atom): void {
+function ensureCompiled(env: MinEnv, w: World, query: Atom): void {
   if (env.compiled === undefined) {
     ensureTablingAnalysis(env);
     return;
+  }
+  // A variable-headed runtime equation (`(= ($f $x) …)`) can fire on a call to ANY head, so nothing
+  // compiled can be trusted while one is loaded. The static counterpart of this test is `env.varRulesVar`,
+  // which each compiler already checks for itself.
+  if (w.selfVarRules.length > 0) {
+    ensureTablingAnalysis(env);
+    return;
+  }
+  // The rules an `import!` added live in the world. Take them as they stand and rebuild whenever the
+  // world's version says they moved; before the first query there is nothing to rebuild, so the version is
+  // only recorded. A rollback restores an older world, whose version differs from the one the map was built
+  // at, so it invalidates just as an addition does.
+  if (env.compiledRuleVersion === undefined) {
+    env.compileSelfRules = w.selfRules;
+    env.compiledRuleVersion = w.selfRuleVersion;
+  } else if (env.compiledRuleVersion !== w.selfRuleVersion) {
+    env.compileSelfRules = w.selfRules;
+    env.compiledRuleVersion = w.selfRuleVersion;
+    env.compilePureFunctors = undefined;
+    env.compiled.clear();
+    env.compileDirty = true;
+    env.compiledComplete = false;
   }
 
   const called = new Set<string>();
@@ -1585,10 +1651,14 @@ function ensureCompiled(env: MinEnv, query: Atom): void {
 /** Runtime `add-atom`/`import!` can add equations into `selfRules`, so clear static table state and let the
  *  runtime versioned purity/worth gates decide whether those new rules can be memoised. */
 function disableTabling(env: MinEnv): void {
-  env.evaluatedAtoms = new WeakSet();
+  clearRuntimeRuleAnalyses(env);
   env.compiled = undefined;
   env.compileDirty = undefined;
   env.compiledComplete = undefined;
+}
+
+function clearRuntimeRuleAnalyses(env: MinEnv): void {
+  env.evaluatedAtoms = new WeakSet();
   if (env.tableSpace !== undefined) {
     env.tableSpace.clear();
     env.pureFunctors = new Set();
@@ -1599,6 +1669,18 @@ function disableTabling(env: MinEnv): void {
     env.spaceReadTableWorth = new Set();
     env.tablingDirty = false;
   }
+}
+
+/** Take in a module's equations without giving up on compiling the program.
+ *
+ *  Tabling still stands down exactly as it does for any other runtime rule addition, leaving memoisation to
+ *  the runtime versioned gates. Compilation does not: `ensureCompiled` notices the world's rule version
+ *  moved, snapshots the new rules and rebuilds against them, so a program keeps the compiled path it would
+ *  have had if its modules had been one file. Only the compiler's own purity set is dropped here, since it
+ *  was derived from the rules as they stood before this module arrived. */
+function noteImportedEquations(env: MinEnv): void {
+  clearRuntimeRuleAnalyses(env);
+  env.compilePureFunctors = undefined;
 }
 
 /** The argIndex/nonGroundAtPos postings for one expression fact. Shared by addAtomToEnv and
@@ -1614,8 +1696,15 @@ function indexFactArgs(env: MinEnv, atom: ExprAtom, fk: string): void {
 
 /** Incorporate one atom into `env` (mutating): rule index, signatures, types, and the atom list.
  *  Lets a sequential runner extend the env per atom instead of rebuilding it each query; correctness
- *  gated by the 270/270 oracle. */
-function addAtomToEnvPlanned(env: MinEnv, x: Atom, skipArgIndexHeads?: ReadonlySet<string>): void {
+ *  gated by the 270/270 oracle. `typesRegistered` is the import-promotion mode: the atom's `(: ...)`
+ *  registration already happened through `registerImportedTypes` under the import contract (a module's
+ *  signature may add but never override), so only the fact side of a `:` atom is indexed here. */
+function addAtomToEnvPlanned(
+  env: MinEnv,
+  x: Atom,
+  skipArgIndexHeads?: ReadonlySet<string>,
+  typesRegistered = false,
+): void {
   const atom = env.intern === undefined ? x : internAtom(env.intern, x);
   // A static add to a compacted functor first restores that functor to object storage, so the new
   // fact and its bucket keep one representation and one insertion order.
@@ -1668,11 +1757,18 @@ function addAtomToEnvPlanned(env: MinEnv, x: Atom, skipArgIndexHeads?: ReadonlyS
     }
     invalidateTabling(env);
   }
-  if (atom.kind === "expr" && opOf(atom) === ":" && atom.items.length === 3) {
+  if (!typesRegistered && atom.kind === "expr" && opOf(atom) === ":" && atom.items.length === 3) {
     const subj = atom.items[1]!;
     const t = atom.items[2]!;
     if (subj.kind === "sym") {
-      if (opOf(t) === "->" && t.kind === "expr") env.sigs.set(subj.name, t.items.slice(1));
+      // First registration wins, the same rule `registerImportedTypes` applies, so a program means the
+      // same thing whether a declaration arrived in the file or through `import!`. Hyperon itself keeps
+      // EVERY declaration and admits a call under any of them (layout cannot matter there); with one
+      // active signature per op, the first is the faithful pick: on the two-signature `types_nondet`
+      // shape Hyperon answers `(f T1in)` with `T1out`, which is the first signature's verdict and the
+      // last one's rejection. All declarations are still recorded in `types` for `get-type`.
+      if (opOf(t) === "->" && t.kind === "expr" && !env.sigs.has(subj.name))
+        env.sigs.set(subj.name, t.items.slice(1));
       pushUniqueType(env.types, subj.name, t);
     } else if (subj.kind === "expr") {
       if (!env.exprTypes.some(([s, tt]) => atomEq(s, subj) && atomEq(tt, t)))
@@ -1747,6 +1843,17 @@ function selfAtoms(env: MinEnv, w: World): readonly Atom[] {
   const runtime = runtimeAtoms(w);
   // toArray is memoized on the store, so the common no-runtime case stays allocation-free per call.
   return runtime.length === 0 ? env.atoms.toArray() : [...env.atoms.toArray(), ...runtime];
+}
+
+/** The `&self` atoms a program observes through `get-atoms`: everything after the preloaded base. */
+function userSelfAtoms(env: MinEnv, w: World): readonly Atom[] {
+  const base = env.preloadBase ?? 0;
+  if (base === 0) return selfAtoms(env, w);
+  const all = env.atoms.toArray();
+  const stat = all.slice(base);
+  const visible = w.removedStatic === null ? stat : stat.filter((a) => !staticAtomRemoved(w, a));
+  const runtime = runtimeAtoms(w);
+  return runtime.length === 0 ? visible : [...visible, ...runtime];
 }
 
 function runtimeAtoms(w: World): Atom[] {
@@ -1891,7 +1998,7 @@ function namedSpaceAtoms(space: NamedSpace | undefined): Atom[] {
 }
 
 function namedSpaceEnv(env: MinEnv, w: World, name: string): MinEnv {
-  const view = buildEnv(namedSpaceAtoms(w.spaces.get(name)), env.gt);
+  const view = buildEnv(namedSpaceAtoms(ptGet(w.spaces, name)), env.gt);
   view.imports = env.imports;
   view.loadedModules = env.loadedModules;
   view.groundedEffects = new Map(env.groundedEffects);
@@ -1930,9 +2037,14 @@ const LOG_RANKS: ReadonlyMap<string, number> = new Map([
 ]);
 
 export interface World {
-  spaces: Map<string, NamedSpace>;
-  store: Map<number, Atom>;
-  tokens: Map<string, Atom>;
+  // The named-space, state, and token tables are persistent (CHAMP-backed `PTable`s): an effect builds a
+  // new world sharing every untouched entry instead of copying whole Maps, which made a program that
+  // creates N spaces pay O(N) per bind! and O(N^2) overall. Iteration order is Map-faithful
+  // (first-insertion) and `size` is O(1), so the guards and merges read them like the Maps they replace.
+  spaces: PTable<NamedSpace>;
+  /** State cells keyed by `String(handle)`. */
+  store: PTable<Atom>;
+  tokens: PTable<Atom>;
   // `&self` runtime additions as a persistent O(1)-append log (was a wholesale-copied `Atom[]`).
   selfExtra: AtomLog;
   // Experimental compact runtime additions for `&self`. Present only when `experimental.flatAtomspace` is on
@@ -1950,6 +2062,12 @@ export interface World {
   // Monotone whole-world atom-space content version. Space-read table keys include this value, so any write
   // to &self or a named space makes earlier completed answer bags unreachable.
   spaceVersion: number;
+  // Monotone version of the TYPE-relevant space content: moves only when a `(: ...)` declaration enters or
+  // leaves a space. Inert-data verdicts depend on type checking, which reads runtime `:` atoms, so their
+  // cache is keyed on this rather than `spaceVersion`: a saturation loop adding plain data atoms must not
+  // invalidate them, or every membership probe re-walks its whole accumulator (a corpus tile puzzle went
+  // from half a second to an hour-class hang on exactly that).
+  typeVersion: number;
   // Static atoms removed from `&self` in this world. Static program atoms live in `env`; this tombstone
   // keeps removal branch-local without mutating the shared env.
   removedStatic: AtomLog;
@@ -1982,6 +2100,15 @@ let spaceContentVersionCounter = 0;
 function nextSpaceContentVersion(): number {
   return ++spaceContentVersionCounter;
 }
+let typeContentVersionCounter = 0;
+function nextTypeContentVersion(): number {
+  return ++typeContentVersionCounter;
+}
+/** Whether a space write carries a type declaration, the only space content type checking reads. */
+function hasTypeDeclarations(atoms: readonly Atom[]): boolean {
+  for (const a of atoms) if (opOf(a) === ":") return true;
+  return false;
+}
 function markSpaceMutation(w: World): void {
   w.spaceVersion = nextSpaceContentVersion();
 }
@@ -1989,15 +2116,16 @@ function markSpaceMutation(w: World): void {
 export const initSt = (): St => ({
   counter: 0,
   world: {
-    spaces: new Map(),
-    store: new Map(),
-    tokens: new Map(),
+    spaces: emptyPTable(),
+    store: emptyPTable(),
+    tokens: emptyPTable(),
     selfExtra: emptyLog,
     flatSelfExtra: undefined,
     selfRules: new Map(),
     selfVarRules: [],
     selfRuleVersion: 0,
     spaceVersion: 0,
+    typeVersion: 0,
     removedStatic: emptyLog,
     removedStaticHeads: new Set(),
     removedStaticVarRules: false,
@@ -2008,18 +2136,24 @@ export const initSt = (): St => ({
   },
 });
 function cloneWorld(w: World): World {
+  // The persistent tables are shared as they stand: a caller changes one by REASSIGNING the field to a
+  // ptSet result, never by mutating in place, so the clone costs the rule index and tombstone set only.
   return {
-    spaces: new Map(w.spaces),
-    store: new Map(w.store),
-    tokens: new Map(w.tokens),
+    spaces: w.spaces,
+    store: w.store,
+    tokens: w.tokens,
     selfExtra: w.selfExtra,
     flatSelfExtra: w.flatSelfExtra,
-    selfRules: new Map(w.selfRules),
+    // Shared, not copied: every writer replaces these wholesale (appendSpace copies before indexing a
+    // rule, reindexRuntimeSelfRules assigns fresh maps, addStaticRemoval builds a new set), so a clone
+    // holding the parent's objects is safe and an effect no longer pays for the program's rule count.
+    selfRules: w.selfRules,
     selfVarRules: w.selfVarRules,
     selfRuleVersion: w.selfRuleVersion,
     spaceVersion: w.spaceVersion,
+    typeVersion: w.typeVersion,
     removedStatic: w.removedStatic,
-    removedStaticHeads: new Set(w.removedStaticHeads),
+    removedStaticHeads: w.removedStaticHeads,
     removedStaticVarRules: w.removedStaticVarRules,
     maxStackDepth: w.maxStackDepth,
     maxSteps: w.maxSteps,
@@ -2064,23 +2198,26 @@ function mergeWorlds(base: World, branches: readonly World[]): World {
   // rebuilt into a log. The atom order is preserved so merged `&self` content matches the array version.
   const baseSelf = runtimeAtoms(base);
   let selfExtra = baseSelf.slice();
-  const spaces = new Map(base.spaces);
-  const store = new Map(base.store);
-  const tokens = new Map(base.tokens);
+  let spaces = base.spaces;
+  let store = base.store;
+  let tokens = base.tokens;
   const staticRemovals = mergeStaticRemovals(base, branches);
   for (const w of branches) {
     const d = multisetDelta(baseSelf, runtimeAtoms(w));
     selfExtra = applyAtomDelta(selfExtra, d.added, d.removed);
-    for (const [k, v] of w.spaces) {
-      const baseV = namedSpaceAtoms(base.spaces.get(k));
+    for (const [k, v] of ptEntries(w.spaces)) {
+      const baseV = namedSpaceAtoms(ptGet(base.spaces, k));
       const sd = multisetDelta(baseV, namedSpaceAtoms(v));
-      spaces.set(
+      spaces = ptSet(
+        spaces,
         k,
-        logFromArray(applyAtomDelta(namedSpaceAtoms(spaces.get(k)), sd.added, sd.removed)),
+        logFromArray(applyAtomDelta(namedSpaceAtoms(ptGet(spaces, k)), sd.added, sd.removed)),
       );
     }
-    for (const [k, v] of w.store) if (!Object.is(base.store.get(k), v)) store.set(k, v);
-    for (const [k, v] of w.tokens) if (!Object.is(base.tokens.get(k), v)) tokens.set(k, v);
+    for (const [k, v] of ptEntries(w.store))
+      if (!Object.is(ptGet(base.store, k), v)) store = ptSet(store, k, v);
+    for (const [k, v] of ptEntries(w.tokens))
+      if (!Object.is(ptGet(base.tokens, k), v)) tokens = ptSet(tokens, k, v);
   }
   // Rebuild the rule index from the merged `&self` atoms (par is rare; correctness over speed here).
   const flat = base.flatSelfExtra === undefined ? undefined : FlatAtomSpace.fromAtoms(selfExtra);
@@ -2094,6 +2231,7 @@ function mergeWorlds(base: World, branches: readonly World[]): World {
     selfVarRules: [],
     selfRuleVersion: nextRuntimeRuleSetVersion(),
     spaceVersion: nextSpaceContentVersion(),
+    typeVersion: nextTypeContentVersion(),
     removedStatic: staticRemovals.removedStatic,
     removedStaticHeads: staticRemovals.removedStaticHeads,
     removedStaticVarRules: staticRemovals.removedStaticVarRules,
@@ -2127,7 +2265,7 @@ function mutexKey(a: Atom): string {
 }
 
 function resolveTok(w: World, a: Atom): Atom {
-  if (a.kind === "sym") return w.tokens.get(a.name) ?? a;
+  if (a.kind === "sym") return ptGet(w.tokens, a.name) ?? a;
   return a;
 }
 const stateHandle = (id: number): Atom => expr([sym("State"), gint(id)]);
@@ -2158,18 +2296,47 @@ function resolveStates(w: World, a: Atom): Atom {
   if (a.kind === "expr") {
     if (opOf(a) === "State" && a.items.length === 2) {
       const g = a.items[1]!;
-      if (g.kind === "gnd" && g.value.g === "int") return w.store.get(Number(g.value.n)) ?? a;
+      if (g.kind === "gnd" && g.value.g === "int")
+        return ptGet(w.store, String(Number(g.value.n))) ?? a;
     }
     return expr(a.items.map((x) => resolveStates(w, x)));
   }
   return a;
 }
+// Whether an expression can be left alone depends on the token table's KEY set and nothing else: a
+// substitution happens exactly when one of the expression's symbols is a key. Values are free to differ.
+// So the key set is what a "nothing to substitute here" verdict is filed under, and `cloneWorld`'s fresh
+// map — a different object with the same keys — reuses the verdict rather than re-deriving it.
+const tokenKeySignatures = new WeakMap<PTable<Atom>, string>();
+
+function tokenKeySignature(tokens: PTable<Atom>): string {
+  let sig = tokenKeySignatures.get(tokens);
+  if (sig === undefined) {
+    // Length-prefixed, so no separator has to be assumed absent from a symbol name.
+    sig = ptKeys(tokens)
+      .sort()
+      .map((k) => `${k.length}:${k}`)
+      .join("");
+    tokenKeySignatures.set(tokens, sig);
+  }
+  return sig;
+}
+
+// Expressions already proven to contain no symbol from a given token key set. Sound forever for that key
+// set, since an atom is immutable — the same reasoning behind the precomputed `ground` flag and the
+// variable-set cache. Without it every grounded-op argument is re-walked in full on every evaluation
+// step: a forward-chaining saturation over MeTTaSpeak's world knowledge spent a third of its time here,
+// substituting three `bind!` handles that its formulas never mention.
+const tokenFreeCache = new WeakMap<ExprAtom, string>();
+
 function subTokensExpr(
   w: World,
   a: ExprAtom,
   intern: InternTable | undefined,
   memo: Map<Atom, Atom>,
+  sig: string,
 ): Atom {
+  if (tokenFreeCache.get(a) === sig) return a;
   const cached = memo.get(a);
   if (cached !== undefined) return cached;
   const its = a.items;
@@ -2178,9 +2345,9 @@ function subTokensExpr(
     const it = its[i]!;
     const r =
       it.kind === "sym"
-        ? (w.tokens.get(it.name) ?? it)
+        ? (ptGet(w.tokens, it.name) ?? it)
         : it.kind === "expr"
-          ? subTokensExpr(w, it, intern, memo)
+          ? subTokensExpr(w, it, intern, memo, sig)
           : it;
     if (items !== null) items.push(r);
     else if (r !== it) {
@@ -2188,8 +2355,11 @@ function subTokensExpr(
       items.push(r);
     }
   }
-  const result =
-    items === null ? a : intern === undefined ? expr(items) : internBuiltExpr(intern, expr(items));
+  if (items === null) {
+    tokenFreeCache.set(a, sig);
+    return a;
+  }
+  const result = intern === undefined ? expr(items) : internBuiltExpr(intern, expr(items));
   memo.set(a, result);
   return result;
 }
@@ -2202,9 +2372,9 @@ function subTokensExpr(
 // returning `a` unchanged when no child substituted restores both the sharing and the single-visit cost.
 function subTokens(w: World, a: Atom, intern?: InternTable): Atom {
   if (w.tokens.size === 0) return a; // no bind! tokens: identity, skip the tree clone (hot path)
-  if (a.kind === "sym") return w.tokens.get(a.name) ?? a;
+  if (a.kind === "sym") return ptGet(w.tokens, a.name) ?? a;
   if (a.kind !== "expr") return a;
-  return subTokensExpr(w, a, intern, new Map());
+  return subTokensExpr(w, a, intern, new Map(), tokenKeySignature(w.tokens));
 }
 function wrapStatesExpr(w: World, a: ExprAtom, memo: Map<Atom, Atom>): Atom {
   const cached = memo.get(a);
@@ -2212,7 +2382,7 @@ function wrapStatesExpr(w: World, a: ExprAtom, memo: Map<Atom, Atom>): Atom {
   if (opOf(a) === "State" && a.items.length === 2) {
     const g = a.items[1]!;
     if (g.kind === "gnd" && g.value.g === "int") {
-      const v = w.store.get(Number(g.value.n));
+      const v = ptGet(w.store, String(Number(g.value.n)));
       const result = v !== undefined ? expr([sym("StateValue"), v]) : a;
       memo.set(a, result);
       return result;
@@ -2534,13 +2704,25 @@ function isEvaluationLimitAtom(a: Atom): boolean {
 // ResourceLimit is an ordinary MeTTa value. Evaluation that carries the marker may spend the rule steps
 // needed to route it through `case`; once a handler replaces it with another value, the original query
 // budget applies again and no later search alternative can resume.
+// Expressions verified to contain no resource-limit marker anywhere. Marker-freedom is structural and
+// atoms are immutable, so a clean verdict never expires. Without this, a run that exhausts its step
+// budget re-walks every pending call's arguments per remaining candidate while unwinding; with a large
+// accumulator in flight that unwind alone is quadratic and dwarfs the evaluation it is cancelling.
+const resourceLimitClean = new WeakSet<Atom>();
+
 function containsResourceLimit(a: Atom): boolean {
   const pending = [a];
+  const verified: Atom[] = [];
   while (pending.length > 0) {
     const next = pending.pop()!;
+    if (next.kind === "expr" && resourceLimitClean.has(next)) continue;
     if (isResourceLimitAtom(next)) return true;
-    if (next.kind === "expr") for (const item of next.items) pending.push(item);
+    if (next.kind === "expr") {
+      verified.push(next);
+      for (const item of next.items) pending.push(item);
+    }
   }
+  for (const clean of verified) resourceLimitClean.add(clean);
   return false;
 }
 
@@ -2880,11 +3062,25 @@ function scopeVars(env: MinEnv, b: Bindings, prev: Stack): string[] {
   }
   return out;
 }
-function chainLiveVars(template: Atom, name: string, value: Atom, prev: Stack): string[] {
+// The same live variables, narrowed to the ones `want` contains and in the same order. `restrictBnd` reads
+// its `vars` argument only through `vars ∩ bindingNames(b)` — any other name misses in `lookupVal` and
+// cannot be an `eq` endpoint — so the intersection returns an identical binding for much less work when the
+// binding really is the small side: a schema registration averages 3.0 relations against 12.4 pending
+// frames and 30.2 live variables, and the walk stops as soon as every wanted name is placed. An empty
+// binding keeps nothing, so it walks no frames at all — 22.4% of chain steps on that workload.
+function chainLiveVarsIn(
+  want: VarProbe,
+  template: Atom,
+  name: string,
+  value: Atom,
+  prev: Stack,
+): string[] {
   const out: string[] = [];
-  const seen = new Set<string>();
-  for (let p = prev; p !== null; p = p.tail) collectVars(p.head.atom, out, seen);
-  collectSubstitutedVars(template, name, value, out, seen);
+  const total = probeSize(want);
+  if (total === 0) return out;
+  for (let p = prev; p !== null && out.length < total; p = p.tail)
+    collectVarsAmong(p.head.atom, want, out);
+  if (out.length < total) collectSubstitutedVarsAmong(template, name, value, want, out);
   return out;
 }
 function superposeItem(prev: Stack, b: Bindings, pair: Atom): Item {
@@ -3445,6 +3641,23 @@ function boolValue(a: Atom): boolean | undefined {
   return a.kind === "gnd" && a.value.g === "bool" ? a.value.b : undefined;
 }
 
+/** Whether a compiled holder for `op` still describes `w`.
+ *
+ *  A holder is built from the rules the compiler could see: the static index plus the `&self` equations
+ *  `ensureCompiled` snapshotted from the world. Comparing that snapshot's version against the world's is
+ *  what says the holder is still about this program. An equation added since, or a rollback to a world from
+ *  before, moves the version and the call goes back to the evaluator; so does a variable-headed runtime
+ *  equation, which can fire on a call to any head at all. This used to read "the world has no rules for
+ *  `op`", which was the only safe test while the compiler could not see imported equations, and which is
+ *  why a program's own definitions never ran compiled once they lived in a module. */
+function compiledHolderApplies(env: MinEnv, w: World, op: string): boolean {
+  return (
+    env.compiledRuleVersion === w.selfRuleVersion &&
+    w.selfVarRules.length === 0 &&
+    !staticRulesChangedFor(w, op)
+  );
+}
+
 function* evalGroundedCompiledExprG(
   env: MinEnv,
   fuel: number,
@@ -3458,17 +3671,13 @@ function* evalGroundedCompiledExprG(
   const head = atom.items[0]!;
   if (head.kind !== "sym") return undefined;
   const op = head.name;
-  if (
-    env.compiled?.has(op) !== true ||
-    st.world.selfRules.has(op) ||
-    staticRulesChangedFor(st.world, op) ||
-    st.world.selfVarRules.length !== 0
-  )
-    return undefined;
+  if (env.compiled?.has(op) !== true || !compiledHolderApplies(env, st.world, op)) return undefined;
   const args = atom.items.slice(1);
   if (checkApplication(env, st.world, op, args, env.sigs.get(op)) !== null) return undefined;
   const cr = runCompiled(env, op, args, st, COMPILED_IMPURE_OPS, undefined, fuel, depth);
   if (cr === undefined || compiledRunExceedsStepLimit(st, cr)) return undefined;
+  if (env.trace)
+    env.trace({ kind: "compiled", op, holder: env.compiled?.get(op)?.kind ?? "unknown" });
   const sig = env.sigs.get(op);
   const opReturnsAtom =
     sig !== undefined && sig.length > 0 && atomEq(sig[sig.length - 1]!, sym("Atom"));
@@ -4092,10 +4301,21 @@ function splitConjGoals(
     const pInst = insts[i]!;
     const tuples: Array<Map<string, Atom>> = [];
     let relational = true;
+    // A `Relation` is a SET of tuples and the join indexes it into a trie keyed by value, so two identical
+    // tuples collapse into one. The knowledge base is a multiset (MOPS page 12: `k = {K1[t1]..Kn[tn]}` and
+    // Transform emits one result per occurrence), and a plain `match` over a space holding the same atom
+    // twice does answer twice, so collapsing them here would make a conjunction disagree with both the
+    // specification and the rest of the engine. A goal whose candidates really do repeat therefore leaves
+    // the join for the nested loop, which counts occurrences.
+    // Two rows can only coincide because two candidates did: the pattern's own variables are what build
+    // the row, so distinct matching atoms project to distinct rows. Keying the candidate is therefore the
+    // same test, at one `format` per atom rather than one per variable per row.
+    const rowKeys = new Set<string>();
     const source = getCandidates(pInst);
     for (const atom of source) {
       const fresh = freshenRule(counter, atom, atom)[0];
       counter += 1;
+      let matched = false;
       for (const mb of matchAtoms(pInst, fresh)) {
         const t = new Map<string, Atom>();
         for (const v of pvars) {
@@ -4103,7 +4323,13 @@ function splitConjGoals(
           t.set(v, val);
           if (!val.ground && (joinVars === undefined || joinVars.has(v))) relational = false;
         }
+        matched = true;
         tuples.push(t);
+      }
+      if (matched) {
+        const key = format(atom);
+        if (rowKeys.has(key)) relational = false;
+        rowKeys.add(key);
       }
     }
     counter += candidateCounterPadding(source);
@@ -4451,7 +4677,29 @@ function* interpretStack1G(
   }
   switch (op) {
     case "eval":
-      if (it2.length === 2) return yield* evalOpG(env, st, prev, it2[1]!, it.bnd);
+      if (it2.length === 2) {
+        // The chain route must not lose a whole-call native rule the apply loop would recognize. The
+        // head-name gate keeps the common step free; a result that would bind variables falls through
+        // to the ordinary one-step eval, since a chain frame carries its bindings itself.
+        const rawTarget = it2[1]!;
+        if (
+          rawTarget.kind === "expr" &&
+          rawTarget.items[0]?.kind === "sym" &&
+          FAST_WHOLE_CALL_OPS.has(rawTarget.items[0].name)
+        ) {
+          const target = inst(env, it.bnd, rawTarget);
+          if (target.kind === "expr") {
+            const fast = tryFastWholeRuleCall(env, st, target);
+            if (
+              fast !== undefined &&
+              !counterExceedsStepLimit(st, fast.state.counter) &&
+              fast.results.every(([, rb]) => rb.length === 0)
+            )
+              return [fast.results.map(([value]) => finItem(prev, value, it.bnd)), fast.state];
+          }
+        }
+        return yield* evalOpG(env, st, prev, it2[1]!, it.bnd);
+      }
       break;
     case "evalc":
       if (it2.length === 3) {
@@ -4484,7 +4732,11 @@ function* interpretStack1G(
         // `(div 350000 5 0)` quadratic. The full stack is visible here (unlike inside a reduce-loop arg
         // sub-evaluation), so the live set is complete; restrictBnd resolves transitively, so a value still
         // reachable through a dropped variable is flattened into what is kept rather than lost.
-        const bnd = restrictBnd(env, chainLiveVars(it2[3]!, v, it2[1]!, prev), it.bnd);
+        const bnd = restrictBnd(
+          env,
+          chainLiveVarsIn(bindingNames(it.bnd), it2[3]!, v, it2[1]!, prev),
+          it.bnd,
+        );
         return [[{ stack: atomToStack(cont, prev), bnd }], st];
       }
       break;
@@ -4821,13 +5073,14 @@ function* interpretStack1G(
       if (it2.length !== 2) break;
       const id = st.counter;
       const w = cloneWorld(st.world);
-      w.store.set(id, inst(env, it.bnd, it2[1]!));
+      w.store = ptSet(w.store, String(id), inst(env, it.bnd, it2[1]!));
       return [[finItem(prev, stateHandle(id), it.bnd)], { counter: id + 1, world: w }];
     }
     case "get-state": {
       if (it2.length !== 2) break;
       const id = stateId(st.world, inst(env, it.bnd, it2[1]!));
-      if (id !== undefined) return [[finItem(prev, st.world.store.get(id) ?? emptyA, it.bnd)], st];
+      if (id !== undefined)
+        return [[finItem(prev, ptGet(st.world.store, String(id)) ?? emptyA, it.bnd)], st];
       return [
         [finItem(prev, errAtom(inst(env, it.bnd, it2[1]!), "get-state: not a state"), it.bnd)],
         st,
@@ -4838,7 +5091,7 @@ function* interpretStack1G(
       const id = stateId(st.world, inst(env, it.bnd, it2[1]!));
       if (id !== undefined) {
         const w = cloneWorld(st.world);
-        w.store.set(id, inst(env, it.bnd, it2[2]!));
+        w.store = ptSet(w.store, String(id), inst(env, it.bnd, it2[2]!));
         return [[finItem(prev, stateHandle(id), it.bnd)], { counter: st.counter, world: w }];
       }
       return [
@@ -4851,7 +5104,7 @@ function* interpretStack1G(
       const id = st.counter;
       const name = "&space-" + String(id);
       const w = cloneWorld(st.world);
-      w.spaces.set(name, emptyLog);
+      w.spaces = ptSet(w.spaces, name, emptyLog);
       markSpaceMutation(w);
       return [[finItem(prev, sym(name), it.bnd)], { counter: id + 1, world: w }];
     }
@@ -4864,11 +5117,11 @@ function* interpretStack1G(
           st,
         ];
       const srcAtoms =
-        src === "&self" ? selfAtoms(env, st.world) : namedSpaceAtoms(st.world.spaces.get(src));
+        src === "&self" ? selfAtoms(env, st.world) : namedSpaceAtoms(ptGet(st.world.spaces, src));
       const id = st.counter;
       const name = "&space-" + String(id);
       const w = cloneWorld(st.world);
-      w.spaces.set(name, logFromArray(srcAtoms));
+      w.spaces = ptSet(w.spaces, name, logFromArray(srcAtoms));
       markSpaceMutation(w);
       return [[finItem(prev, sym(name), it.bnd)], { counter: id + 1, world: w }];
     }
@@ -4899,7 +5152,9 @@ function* interpretStack1G(
           st,
         ];
       const list =
-        name === "&self" ? selfAtoms(env, st.world) : namedSpaceAtoms(st.world.spaces.get(name));
+        name === "&self"
+          ? userSelfAtoms(env, st.world)
+          : namedSpaceAtoms(ptGet(st.world.spaces, name));
       return [list.map((x) => finItem(prev, x, it.bnd)), st];
     }
     case "pragma!": {
@@ -4950,7 +5205,7 @@ function* interpretStack1G(
       const tok = inst(env, it.bnd, it2[1]!);
       if (tok.kind === "sym") {
         const w = cloneWorld(st.world);
-        w.tokens.set(tok.name, inst(env, it.bnd, it2[2]!));
+        w.tokens = ptSet(w.tokens, tok.name, inst(env, it.bnd, it2[2]!));
         markSpaceMutation(w);
         return [[finItem(prev, emptyExpr, it.bnd)], { counter: st.counter, world: w }];
       }
@@ -4973,6 +5228,20 @@ function* interpretStack1G(
         return [[finItem(prev, errTextAtom(inst(env, it.bnd, a), hostResult.msg), it.bnd)], st];
       }
       const moduleName = literalImportName(fileAtom);
+      // Hyperon answers an unresolvable module with an error; a silent no-op instead hid every
+      // misspelled or out-of-root import behind whatever the program happened to do without it.
+      // A computed (non-literal) target keeps the established no-follow behavior.
+      if (moduleName !== undefined && env.imports.get(moduleName) === undefined)
+        return [
+          [
+            finItem(
+              prev,
+              errTextAtom(inst(env, it.bnd, a), `Failed to resolve module ${moduleName}`),
+              it.bnd,
+            ),
+          ],
+          st,
+        ];
       return spaceMutate(env, st, prev, it2[1]!, it.bnd, (w, name) =>
         moduleName === undefined ? w : appendImportedModule(env, w, name, moduleName),
       );
@@ -5058,6 +5327,7 @@ function appendSpace(env: MinEnv, w0: World, name: string, atoms: Atom[]): World
       selfVarRules,
       selfRuleVersion: copiedRules ? nextRuntimeRuleSetVersion() : w0.selfRuleVersion,
       spaceVersion: nextSpaceContentVersion(),
+      typeVersion: hasTypeDeclarations(atoms) ? nextTypeContentVersion() : w0.typeVersion,
       removedStatic: w0.removedStatic,
       removedStaticHeads: w0.removedStaticHeads,
       removedStaticVarRules: w0.removedStaticVarRules,
@@ -5067,9 +5337,13 @@ function appendSpace(env: MinEnv, w0: World, name: string, atoms: Atom[]): World
       logLevel: w0.logLevel,
     };
   }
-  const spaces = new Map(w0.spaces);
-  spaces.set(name, logAppendAll(spaces.get(name) ?? emptyLog, atoms));
-  return { ...w0, spaces, spaceVersion: nextSpaceContentVersion() };
+  const spaces = ptSet(w0.spaces, name, logAppendAll(ptGet(w0.spaces, name) ?? emptyLog, atoms));
+  return {
+    ...w0,
+    spaces,
+    spaceVersion: nextSpaceContentVersion(),
+    typeVersion: hasTypeDeclarations(atoms) ? nextTypeContentVersion() : w0.typeVersion,
+  };
 }
 
 /** Append one module's transitive definition closure once to `name`. Mark before descending to break cycles. */
@@ -5092,8 +5366,8 @@ function appendImportedModule(env: MinEnv, w0: World, name: string, moduleName: 
 
   // A space's atom list does not feed `env.sigs`, so register imported declarations explicitly.
   registerImportedTypes(env, defs);
-  // Only newly loaded equations invalidate compilation. Missing, data-only, and duplicate imports do not.
-  if (defs.some((atom) => opOf(atom) === "=")) disableTabling(env);
+  // Only newly loaded equations invalidate the analyses. Missing, data-only, and duplicate imports do not.
+  if (defs.some((atom) => opOf(atom) === "=")) noteImportedEquations(env);
   return appendSpace(env, w, name, defs);
 }
 function reindexRuntimeSelfRules(w: World): void {
@@ -5103,9 +5377,86 @@ function reindexRuntimeSelfRules(w: World): void {
   w.selfRuleVersion = nextRuntimeRuleSetVersion();
 }
 
+/** A directive of exactly the shape `!(import! &self "literal")`, the only shape promotion accepts:
+ *  a literal target cannot fork evaluation, and `&self` is where the module's closure lands. */
+function selfImportDirectiveTarget(atom: Atom): string | undefined {
+  if (atom.kind !== "expr" || opOf(atom) !== "import!" || atom.items.length !== 3) return undefined;
+  const space = atom.items[1]!;
+  if (space.kind !== "sym" || space.name !== "&self") return undefined;
+  return literalImportName(atom.items[2]!);
+}
+
+/** No runtime additions or static removals: the state in which everything a completed import put in the
+ *  world is exactly the loaded module closure, and in which promotion cannot reorder any candidate list
+ *  (imported defs go after the statics, which is where the log put them too). */
+function promotableImportState(w: World): boolean {
+  return (
+    w.selfExtra === null &&
+    w.flatSelfExtra === undefined &&
+    w.selfRules.size === 0 &&
+    w.selfVarRules.length === 0 &&
+    w.removedStatic === null &&
+    w.removedStaticHeads.size === 0 &&
+    !w.removedStaticVarRules
+  );
+}
+
+/** Consult semantics for a completed top-level import: move the module closure a literal
+ *  `!(import! &self "mod")` directive appended to the world into the env's static tables, through the
+ *  same `addAtomToEnvPlanned` path a single-file program's own definitions take, and hand back a world
+ *  whose runtime side is empty again.
+ *
+ *  Runs only between directives (the caller threads exactly one world there, and the interpretation plan
+ *  is empty), and only over a world that held no runtime additions before the import, so the move cannot
+ *  be observed by any program construct: the `&self` multiset and its candidate order are unchanged.
+ *  What it buys is that every static-state fast path, index, purity analysis, tabling admission, and
+ *  compiled dispatch guard now sees the imported program exactly as it would a single-file one, instead
+ *  of each of them separately declining on "there are runtime rules". Imports evaluated anywhere else
+ *  (computed targets, nested in a body, non-`&self` spaces) keep the world-local path untouched.
+ *
+ *  Type declarations are NOT re-registered: `registerImportedTypes` already applied them under the
+ *  import contract (a module may add a signature but never override one), which promotion must preserve.
+ *  Returns the promoted state, `post` itself when the import brought nothing new (dedup, missing module),
+ *  or `undefined` when the directive or the pre-state disqualifies promotion. */
+export function promoteCompletedSelfImport(
+  env: MinEnv,
+  directive: Atom,
+  preWorld: World,
+  post: St,
+): St | undefined {
+  if (selfImportDirectiveTarget(directive) === undefined) return undefined;
+  if (!promotableImportState(preWorld)) return undefined;
+  const w = post.world;
+  // The module closure lands in the flat store when every def has a compact encoding, in the plain log
+  // otherwise; a later module that fails flat encoding moves everything to the log. Either way the
+  // candidate convention orders flat atoms before log atoms, so promotion replays them in that order.
+  const defs =
+    w.flatSelfExtra !== undefined
+      ? [...w.flatSelfExtra.toArray(), ...logToArray(w.selfExtra)]
+      : logToArray(w.selfExtra);
+  if (defs.length === 0 && w.selfRules.size === 0 && w.selfVarRules.length === 0) return post;
+  for (const a of defs) addAtomToEnvPlanned(env, a, undefined, true);
+  // A parallel-hyperpose worker rebuilds its env from this source, so it must grow by exactly the
+  // definitions the main env just did.
+  if (env.parRulesSrc !== undefined)
+    env.parRulesSrc += "\n" + defs.map((a) => format(a)).join("\n");
+  return {
+    counter: post.counter,
+    world: {
+      ...w,
+      selfExtra: emptyLog,
+      flatSelfExtra: undefined,
+      selfRules: new Map(),
+      selfVarRules: [],
+      selfRuleVersion: nextRuntimeRuleSetVersion(),
+    },
+  };
+}
+
 function eraseSpace(env: MinEnv, w0: World, name: string, a: Atom): World {
   const w = cloneWorld(w0);
   markSpaceMutation(w);
+  if (opOf(a) === ":") w.typeVersion = nextTypeContentVersion();
   const erase1 = (xs: readonly Atom[]): Atom[] => {
     const i = xs.findIndex((y) => atomEq(y, a));
     return i < 0 ? [...xs] : [...xs.slice(0, i), ...xs.slice(i + 1)];
@@ -5125,7 +5476,8 @@ function eraseSpace(env: MinEnv, w0: World, name: string, a: Atom): World {
       w.selfExtra = logFromArray([...xs.slice(0, i), ...xs.slice(i + 1)]);
       reindexRuntimeSelfRules(w);
     } else if (hasStaticAtom(env, a)) addStaticRemoval(w, a);
-  } else w.spaces.set(name, logFromArray(erase1(namedSpaceAtoms(w.spaces.get(name)))));
+  } else
+    w.spaces = ptSet(w.spaces, name, logFromArray(erase1(namedSpaceAtoms(ptGet(w.spaces, name)))));
   return w;
 }
 function spaceMutate(
@@ -5175,7 +5527,7 @@ function applyReduceEffects(
       }
       case "bindToken": {
         const w = cloneWorld(next.world);
-        w.tokens.set(effect.name, inst(env, b, effect.atom));
+        w.tokens = ptSet(w.tokens, effect.name, inst(env, b, effect.atom));
         markSpaceMutation(w);
         next = { counter: next.counter, world: w };
         break;
@@ -5265,7 +5617,7 @@ function compiledAddIfAbsent(
       },
     };
   }
-  const log = w.spaces.get(name) ?? emptyLog;
+  const log = ptGet(w.spaces, name) ?? emptyLog;
   if (logNonGround(log) !== 0) return undefined;
   const checked: St = { counter: st.counter + logSize(log), world: w };
   if (idxCount(logGroundIdx(log), atom) !== 0) return { added: false, state: checked };
@@ -5346,7 +5698,7 @@ function matchSetup(
     };
   }
   return {
-    getCandidates: namedSpaceCandidateGetter(st.world, st.world.spaces.get(sn)),
+    getCandidates: namedSpaceCandidateGetter(st.world, ptGet(st.world.spaces, sn)),
     patterns,
   };
 }
@@ -5384,7 +5736,7 @@ function tryFastNamedOnceMatch(
   const subbed = subTokens(st.world, body.items[2]!, env.intern);
   if (opOf(subbed) === "," && subbed.kind === "expr") return undefined;
   const pInst = inst(env, b, resolveStates(st.world, subbed));
-  const space = st.world.spaces.get(sn) ?? emptyLog;
+  const space = ptGet(st.world.spaces, sn) ?? emptyLog;
   if (!pInst.ground || logNonGround(space) !== 0 || st.world.store.size !== 0) return undefined;
   const st2 = { counter: st.counter + logSize(space), world: st.world };
   if (idxCount(logGroundIdx(space), pInst) === 0) return { value: undefined, state: st2 };
@@ -5421,7 +5773,7 @@ function tryFastNamedAddIfAbsent(
   if (!atomEq(matchSpace, addSpace) || !atomEq(matchAtom, addAtom)) return undefined;
   const name = spaceName(st.world, matchSpace);
   if (name === undefined || name === "&self") return undefined;
-  const space = st.world.spaces.get(name) ?? emptyLog;
+  const space = ptGet(st.world.spaces, name) ?? emptyLog;
   if (!matchAtom.ground || logNonGround(space) !== 0 || st.world.store.size !== 0) return undefined;
   const checked: St = { counter: st.counter + logSize(space), world: st.world };
   if (idxCount(logGroundIdx(space), matchAtom) !== 0) return { added: false, state: checked };
@@ -5488,7 +5840,7 @@ function tryFastAddUniqueOrFailCall(
   if (name === undefined || name === "&self") return undefined;
   const value = inst(env, b, call.items[2]!);
   const key = expr([sym("s"), expr([sym("repra"), value])]);
-  const space = st.world.spaces.get(name) ?? emptyLog;
+  const space = ptGet(st.world.spaces, name) ?? emptyLog;
   if (!key.ground || logNonGround(space) !== 0 || st.world.store.size !== 0) return undefined;
   const checked: St = {
     counter: st.counter + rules.length + logSize(space),
@@ -5706,9 +6058,19 @@ function isCanonicalTilePuzzleBfsLoopStepRule(lhs: Atom, rhs: Atom): boolean {
   if (!isMoveAnyCall(moveCall, stateVar)) return false;
   if (!isCanonicalAddUniqueOrFailCall(markCall, sym("&dup"), snewVar)) return false;
   if (!atomEq(inner.body, snewVar)) return false;
-  if (!isExprOp(foldCall, "foldl", 4)) return false;
-  if (!atomEq(foldCall.items[1]!, sym("enqueue"))) return false;
-  if (!atomEq(foldCall.items[2]!, lnVar) || !atomEq(foldCall.items[3]!, q1Var)) return false;
+  // `specializeHO` rewrites `(foldl enqueue ...)` into the first-order `(foldl$enqueue ...)` before the
+  // first query of a compiled/tabled run, so the canonical loop exists in two spellings and the native
+  // BFS must recognize both; matching only the pristine one made the whole recognizer mode-dependent.
+  if (foldCall.kind !== "expr" || foldCall.items[0]?.kind !== "sym") return false;
+  const foldHead = foldCall.items[0].name;
+  if (foldHead === "foldl" && foldCall.items.length === 4) {
+    if (!atomEq(foldCall.items[1]!, sym("enqueue"))) return false;
+    if (!atomEq(foldCall.items[2]!, lnVar) || !atomEq(foldCall.items[3]!, q1Var)) return false;
+  } else if (foldHead === "foldl$enqueue" && foldCall.items.length === 3) {
+    if (!atomEq(foldCall.items[1]!, lnVar) || !atomEq(foldCall.items[2]!, q1Var)) return false;
+  } else {
+    return false;
+  }
   if (
     !isExprOp(plusCall, "+", 3) ||
     !atomEq(plusCall.items[1]!, n0) ||
@@ -5797,6 +6159,25 @@ function tryFastQueueCall(env: MinEnv, st: St, call: ExprAtom): FastRuleResult |
   return undefined;
 }
 
+/** Heads the whole-call fast rules can serve, checked before paying for instantiation on hot paths. */
+const FAST_WHOLE_CALL_OPS: ReadonlySet<string> = new Set([
+  "bfs_all",
+  "empty-queue",
+  "enqueue",
+  "dequeue",
+]);
+
+/** One entry point for the recognized whole-call fast rules (the canonical tile-puzzle BFS and the
+ *  three-slot functional queue). Both evaluators consult it: the classic apply loop, and the chain
+ *  evaluator's `eval` step, which the flattened `let` tail route uses — a program whose calls arrive
+ *  as chains must not lose a native rule the apply loop would have recognized (the corpus tile puzzle
+ *  only ever ran natively when its `let` body happened to dodge the chain route). */
+function tryFastWholeRuleCall(env: MinEnv, st: St, call: ExprAtom): FastRuleResult | undefined {
+  const tile = tryFastTilePuzzleBfsAll(env, st, call);
+  if (tile !== undefined) return tile;
+  return tryFastQueueCall(env, st, call);
+}
+
 function tileCellKey(a: Atom): string | undefined {
   if (a.kind === "sym") return "s:" + a.name;
   if (a.kind === "gnd" && a.value.g === "int") return "i:" + String(a.value.n);
@@ -5864,7 +6245,7 @@ function hasCanonicalTilePuzzleRuntime(env: MinEnv, w: World): boolean {
     !isCanonicalTilePuzzleBfsLoopStepRule(bfsLoopRules[1]![0], bfsLoopRules[1]![1])
   )
     return false;
-  if (logSize(w.spaces.get("&dup") ?? emptyLog) !== 0) return false;
+  if (logSize(ptGet(w.spaces, "&dup") ?? emptyLog) !== 0) return false;
   const emptyRules = candidatesW(env, w, expr([sym("empty-queue")]));
   if (emptyRules.length !== 1 || !isCanonicalEmptyQueueRule(emptyRules[0]![0], emptyRules[0]![1]))
     return false;
@@ -7011,6 +7392,7 @@ interface CollapseRoute {
 function splitVoidBuild(
   buildExpr: Atom,
   env: MinEnv,
+  w: World,
 ):
   | {
       readonly prefix: Atom;
@@ -7023,7 +7405,11 @@ function splitVoidBuild(
       return undefined;
     const op = rhs.items[0]!.name;
     const args = rhs.items.slice(1);
-    if (env.compiled?.get(op)?.kind !== "imperative" || args.some((a) => !a.ground))
+    if (
+      env.compiled?.get(op)?.kind !== "imperative" ||
+      !compiledHolderApplies(env, w, op) ||
+      args.some((a) => !a.ground)
+    )
       return undefined;
     return { op, args };
   };
@@ -7161,7 +7547,7 @@ function prepareCollapseRoute(
   let buildExpr = tail.buildExpr;
   let voidCalls: ReadonlyArray<{ readonly op: string; readonly args: readonly Atom[] }> | undefined;
   if (voidBuildEnabled()) {
-    const split = splitVoidBuild(buildExpr, env);
+    const split = splitVoidBuild(buildExpr, env, st.world);
     if (split !== undefined) {
       buildExpr = split.prefix;
       voidCalls = split.calls;
@@ -7559,7 +7945,7 @@ function isDiscardedFiniteMatch(env: MinEnv, world: World, call: ExprAtom): bool
     if (staticSpaceHasCustomMatcher(env)) return false;
     return !logToArray(world.selfExtra).some(atomHasCustomGrounded);
   }
-  const named = world.spaces.get(space.name);
+  const named = ptGet(world.spaces, space.name);
   return named === undefined || !logToArray(named).some(atomHasCustomGrounded);
 }
 
@@ -8363,20 +8749,10 @@ function* mettaEvalBodyG(
             continue;
           }
         }
-        const fastTilePuzzle = tryFastTilePuzzleBfsAll(env, cur2, wApp);
-        if (
-          fastTilePuzzle !== undefined &&
-          !counterExceedsStepLimit(cur2, fastTilePuzzle.state.counter)
-        ) {
-          cur2 = fastTilePuzzle.state;
-          for (const [value, rb] of fastTilePuzzle.results)
-            out.push([value, mergeRestrict(env, queryVars, partB, rb)]);
-          continue;
-        }
-        const fastQueue = tryFastQueueCall(env, cur2, wApp);
-        if (fastQueue !== undefined && !counterExceedsStepLimit(cur2, fastQueue.state.counter)) {
-          cur2 = fastQueue.state;
-          for (const [value, rb] of fastQueue.results)
+        const fastWhole = tryFastWholeRuleCall(env, cur2, wApp);
+        if (fastWhole !== undefined && !counterExceedsStepLimit(cur2, fastWhole.state.counter)) {
+          cur2 = fastWhole.state;
+          for (const [value, rb] of fastWhole.results)
             out.push([value, mergeRestrict(env, queryVars, partB, rb)]);
           continue;
         }
@@ -8431,9 +8807,7 @@ function* mettaEvalBodyG(
         if (
           env.compiled !== undefined &&
           (!modedTableAdmissible || preferCompiledModed) &&
-          !cur2.world.selfRules.has(op) &&
-          !staticRulesChangedFor(cur2.world, op) &&
-          cur2.world.selfVarRules.length === 0
+          compiledHolderApplies(env, cur2.world, op)
         ) {
           const compiled = runCompiled(
             env,
@@ -8445,6 +8819,8 @@ function* mettaEvalBodyG(
             lfuel,
             depth,
           );
+          if (env.trace && compiled !== undefined)
+            env.trace({ kind: "compiled", op, holder: compiledHolder?.kind ?? "unknown" });
           // A compiled run reports the same logical counter advance as the interpreter. If the atomic
           // compiled attempt would cross the remaining query budget, discard its persistent result and
           // replay this call through the interpreted candidate loop, which cuts at the exact candidate.
@@ -8481,6 +8857,12 @@ function* mettaEvalBodyG(
                 nextAtom.items[0]!.kind === "sym" &&
                 (nextAtom.ground || chainInternal) &&
                 !isEvaluationLimitAtom(nextAtom) &&
+                // A `function` is not a tail call. It delimits an evaluation and exits through `return`,
+                // whose payload goes to the enclosing delimiter and still has to be reduced; taking it as
+                // the chain's next atom instead makes that payload the chain's own result and stops.
+                // `reduceCompiledResultsG` has a branch for exactly this protocol, so decline the transfer
+                // and let it run.
+                opOf(nextAtom) !== "function" &&
                 !(opReturnsAtom && !isEmbeddedOp(nextAtom)) &&
                 !atomEq(nextAtom, wApp)
               ) {
@@ -9146,7 +9528,7 @@ function mettaEval(
   st.world.stepStart = st.counter;
   const tabled = tryReplayTopSpaceReadTable(env, st, bnd, a, depth);
   if (tabled !== undefined) return tabled;
-  ensureCompiled(env, a);
+  ensureCompiled(env, st.world, a);
   try {
     const direct = tryDirectTopMatch(env, fuel, st, bnd, a);
     if (direct !== undefined) return direct;
@@ -9176,7 +9558,7 @@ function mettaEvalAsyncInternal(
   if (beginQuery) st.world.stepStart = st.counter;
   const tabled = tryReplayTopSpaceReadTable(env, st, bnd, a, depth);
   if (tabled !== undefined) return Promise.resolve(tabled);
-  ensureCompiled(env, a);
+  ensureCompiled(env, st.world, a);
   const direct = tryDirectTopMatch(env, fuel, st, bnd, a);
   if (direct !== undefined) return Promise.resolve(direct);
   return runGenAsync(mettaEvalG(env, fuel, st, bnd, a, depth, undefined), signal)

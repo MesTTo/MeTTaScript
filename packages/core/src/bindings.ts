@@ -4,7 +4,7 @@
 
 // Binding sets, a faithful port of LeaTTa `Core/Bindings.lean`.
 // A binding set is a list of relations: `val x a` is `$x ← a`; `eq x y` is `$x = $y`.
-import { type Atom, atomEq, atomVars } from "./atom";
+import { type Atom, type VarProbe, atomEq, atomVars, VARS_SCAN_LIMIT } from "./atom";
 
 export interface ValRel {
   readonly tag: "val";
@@ -258,6 +258,36 @@ export function someVal(b: Bindings, pred: (x: string, a: Atom) => boolean): boo
 export function hasEq(b: Bindings): boolean {
   for (const r of b) if (r.tag === "eq") return true;
   return false;
+}
+
+/** Every variable name the set mentions: each relation's subject plus an `eq`'s other endpoint. A name
+ *  outside this list misses in `lookupVal` and cannot be an `eq` endpoint, so restricting a binding to a
+ *  set of live variables reads that set only through its intersection with these names. Callers holding an
+ *  expensive live set can therefore intersect first and skip building the rest of it.
+ *
+ *  Returned as a list while it is short enough that scanning beats hashing, and as a set once it is not.
+ *  The caller probes it once per live variable, so it wants the set anyway at that size — and deduplicating
+ *  a few hundred names by scanning the accumulated list is quadratic on its own. */
+export function bindingNames(b: Bindings): VarProbe {
+  if (b.length > VARS_SCAN_LIMIT) {
+    const set = new Set<string>();
+    for (const r of b) {
+      set.add(r.x);
+      if (r.tag === "eq") set.add(r.y);
+    }
+    return set;
+  }
+  const out: string[] = [];
+  for (const r of b) {
+    if (!out.includes(r.x)) out.push(r.x);
+    if (r.tag === "eq" && !out.includes(r.y)) out.push(r.y);
+  }
+  return out;
+}
+
+/** How many distinct names a probe holds. */
+export function probeSize(w: VarProbe): number {
+  return Array.isArray(w) ? w.length : (w as ReadonlySet<string>).size;
 }
 
 /** Each `eq` alias relation, newest-first. */

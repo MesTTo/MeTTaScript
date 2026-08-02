@@ -4,7 +4,7 @@
 
 // Nondeterministic pattern matching and binding-set merge, a faithful port of
 // LeaTTa `Core/Matching.lean`. Matching follows the official left/right style.
-import { type Atom, atomEq, variable } from "./atom";
+import { type Atom, atomEq, expr, variable } from "./atom";
 import {
   type Bindings,
   type BindingRel,
@@ -34,7 +34,9 @@ function suffixVars(a: Atom, suffix: string): Atom {
         items.push(r);
       }
     }
-    return items === null ? a : { ...a, items };
+    // Rebuild through `expr()`, never `{ ...a, items }`. The spread carries the old node's derived fields, its
+    // `ground` flag and its memoised variable list, onto a node whose children just changed.
+    return items === null ? a : expr(items);
   }
   return a;
 }

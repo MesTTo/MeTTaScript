@@ -7,16 +7,23 @@ import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { type QueryResult, type RunOptions } from "@mettascript/core";
 import { runSource, runSourceAllDirectives } from "./source";
-import { readImports } from "./file-imports";
+import { importRootPragma, readImports } from "./file-imports";
 
-export { readImports } from "./file-imports";
+export { importRootPragma, readImports } from "./file-imports";
 
 /** Run a `.metta` file from disk, resolving `import!` relative to the file's directory. `fuel` is the
  *  per-path recursion allowance; `opts` carries query settings such as `maxSteps` and `maxStackDepth`. */
 export function runFile(path: string, fuel?: number, opts?: RunOptions): QueryResult[] {
   const src = readFileSync(path, "utf8");
   const fileDir = dirname(resolve(path));
-  return runSource(src, fuel, readImports(src, fileDir, dirname(fileDir)), opts);
+  return runSource(src, fuel, readImports(src, fileDir, fileImportRoot(src, fileDir)), opts);
+}
+
+/** The import root a file's own `!(pragma! import-root ...)` declares (resolved against the file's
+ *  directory), or the default: one directory above the file. */
+function fileImportRoot(src: string, fileDir: string): string {
+  const declared = importRootPragma(src);
+  return declared === undefined ? dirname(fileDir) : resolve(fileDir, declared);
 }
 
 /** Run a file and return one result entry for every top-level directive. */
@@ -27,7 +34,12 @@ export function runFileAllDirectives(
 ): QueryResult[] {
   const src = readFileSync(path, "utf8");
   const fileDir = dirname(resolve(path));
-  return runSourceAllDirectives(src, fuel, readImports(src, fileDir, dirname(fileDir)), opts);
+  return runSourceAllDirectives(
+    src,
+    fuel,
+    readImports(src, fileDir, fileImportRoot(src, fileDir)),
+    opts,
+  );
 }
 
 export * from "@mettascript/core";

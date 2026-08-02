@@ -652,4 +652,123 @@ describe("carried and symbolic values on the compiled fast path", () => {
       { numRuns: 60 },
     );
   }, 30_000);
+  // Compilation has to stay affordable on a program with a lot of equations, which is the case a large
+  // codebase is. Deriving the candidate name set inside the per-candidate check made the pass quadratic:
+  // 6400 nullary equations spent 1.25 of 1.5 seconds inside it, and 84% of the whole run's profile was that
+  // one line. Stated as a ratio of the time at 4x the equations, which needs no fixed machine speed: a
+  // quadratic pass costs about 16x there, a linear one about 4x.
+  it("compiles in time linear in how many equations the program has", () => {
+    const nullaryEquations = (n: number) =>
+      Array.from({ length: n }, (_, i) => `(= (pad-${i}) sym-${i})`).join("\n");
+    const compileTime = (n: number): number => {
+      const env = envWith(nullaryEquations(n));
+      const t0 = performance.now();
+      compileEnv(env);
+      return performance.now() - t0;
+    };
+    // Best of three at each size, so a scheduling hiccup on a loaded machine cannot fail the run. The
+    // threshold sits well clear of both outcomes it has to separate.
+    const best = (n: number): number => Math.min(compileTime(n), compileTime(n), compileTime(n));
+    best(200); // warm the JIT, so the first real measurement is not the slow one
+    const small = Math.max(1, best(800));
+    const large = best(3_200);
+    expect(large / small).toBeLessThan(10);
+  }, 30_000);
+  // A compiled clause that splices an argument into its result loses the binding the evaluator would have
+  // made for that parameter, so a variable arriving inside the argument is left with nothing recording it
+  // as live. Applying the same clause a second time then reuses the name the first application bound, and
+  // the pattern that should match no longer does. Fold twice through a `case` behind `if-error`: the
+  // second route took the fallback branch and reported an error where the evaluator answers with the route.
+  it("keeps a clause off the compiled path when it would splice an open argument", () => {
+    const program = `
+(= (install $routes)
+   (foldl-atom $routes True $state $route
+     (if-error $state
+       $state
+       (case $route
+         (((Route $kind $value) (added $kind $value))
+          ($_ (Error $route bad-route)))))))
+!(install ((Route a b) (Route c d)))`;
+    expect(runProgram(program, 1_000_000).at(-1)!.results.map(format)).toEqual(["(added c d)"]);
+  });
+  // A right-hand side that is itself a delimiter cannot be compiled: the evaluator continues such a
+  // right-hand side on its own stack, while a compiled result re-enters through a fresh evaluation, and
+  // the two routes do not charge the step counter alike. The counter is observable — it numbers fresh
+  // variables and names `&space-N` handles — so the drift is a wrong answer waiting to happen, and it
+  // showed up as one in three MeTTaSpeak files. `metta debug diff` reduces it to these two lines.
+  // Compiling must not change what the step counter reaches, because the counter is observable: it numbers
+  // fresh variables and names `&space-N` handles. Stated as the property rather than as expected handles,
+  // so the assertion is "compiling changed nothing" and not a number that shifts with unrelated work.
+  //
+  // Each program used to fail it. `if-error`'s right-hand side is headed by `function` and `car-atom`'s by
+  // `chain`; a compiled result of that shape re-enters evaluation by a different route than the rule it
+  // stands for and charged one step more. A functional holder charged NO steps when no limit was set, on
+  // the premise that the count was unobservable.
+  it("reaches the same step count compiled as interpreted", () => {
+    const DECLINE = {
+      declineCompiled: {
+        kinds: [
+          "functional",
+          "scalar",
+          "symbolic",
+          "imperative",
+          "rewrite",
+          "nondet",
+          "choiceUnion",
+          "pipeline",
+        ],
+      },
+    };
+    const handle = (src: string, opts = {}): string[] =>
+      runProgram(`${src}\n!(new-space)`, 1_000_000, new Map(), opts).at(-1)!.results.map(format);
+    for (const src of [
+      `(= (check $x) (if-error $x done nope))\n!(check (f 1))`,
+      `(= (head2 $xs) (car-atom $xs))\n!(head2 (a b))`,
+      `(= (twice $n) (* 2 $n))\n(= (sum4 $n) (+ (twice $n) (twice $n)))\n!(sum4 21)`,
+    ])
+      expect([src, handle(src)]).toEqual([src, handle(src, DECLINE)]);
+  });
+  // A program's own definitions usually live in modules, and the compiler only ever read the equations
+  // loaded statically. An `import!` therefore used to take the compiled path away from the whole program:
+  // the same 20000-call numeric loop cost 1ms in one file and 300ms across two, and a corpus Fibonacci
+  // went from 0.2s to 56s purely for being split. `ensureCompiled` now snapshots the `&self` equations the
+  // import added and compiles from those too.
+  it("compiles a program whose definitions arrive by import", () => {
+    const definitions = `
+(= (fibm $n) (if (< $n 2) $n (+ (fibm (- $n 1)) (fibm (- $n 2)))))
+(= (spin $n) (if (== $n 0) done (spin (- $n 1))))`;
+    const queries = `!(fibm 21)\n!(spin 20000)`;
+    const inline = runProgram(`${definitions}\n${queries}`, 99_000_000);
+    const imported = runProgram(
+      `!(import! &self mod)\n${queries}`,
+      99_000_000,
+      new Map([["mod", atoms(definitions)]]),
+    );
+    // The import prints its own unit result first, so the answers line up one directive apart.
+    expect(imported.slice(1).map((r) => r.results.map(format))).toEqual(
+      inline.map((r) => r.results.map(format)),
+    );
+
+    // And it really is compiled, not merely correct: an env holding only the imported equations builds the
+    // same holders as one that loaded them statically.
+    const statics = envWith(definitions);
+    const viaImport = envWith("");
+    const equations = new Map<string, Array<[Atom, Atom]>>();
+    for (const a of atoms(definitions)) {
+      if (a.kind !== "expr") continue;
+      const lhs = a.items[1]!;
+      const head = lhs.kind === "expr" ? lhs.items[0]! : lhs;
+      if (head.kind !== "sym") continue;
+      equations.set(head.name, [[lhs, a.items[2]!]]);
+    }
+    viaImport.compileSelfRules = equations;
+    const staticHolders = compileEnv(statics);
+    const importedHolders = compileEnv(viaImport);
+    for (const name of ["fibm", "spin"])
+      expect([name, importedHolders.get(name)?.kind]).toEqual([
+        name,
+        staticHolders.get(name)?.kind,
+      ]);
+    expect(importedHolders.get("fibm")?.kind).toBe("functional");
+  }, 30_000);
 });

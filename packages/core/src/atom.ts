@@ -6,11 +6,14 @@ import { canonInt, type IntVal } from "./number";
 
 /**
  * The MeTTa term model. A discriminated union on `kind` (convention C1).
- * Every variant declares ALL seven fields in the SAME order so V8 keeps one
+ * Every variant declares ALL nine fields in the SAME order so V8 keeps one
  * hidden class across atoms (monomorphic property access on the hot path).
  * Unused fields are `undefined`, never absent, never deleted (C1).
  */
 export type MetaType = "Symbol" | "Variable" | "Expression" | "Grounded";
+
+/** The shared empty variable list: every closed atom carries this exact array. */
+const noVars: readonly string[] = [];
 
 export interface SymAtom {
   readonly kind: "sym";
@@ -21,6 +24,7 @@ export interface SymAtom {
   readonly exec: undefined;
   readonly match: undefined;
   readonly ground: true;
+  vars: readonly string[] | undefined;
 }
 export interface VarAtom {
   readonly kind: "var";
@@ -31,6 +35,7 @@ export interface VarAtom {
   readonly exec: undefined;
   readonly match: undefined;
   readonly ground: false;
+  vars: readonly string[] | undefined;
 }
 export interface ExprAtom {
   readonly kind: "expr";
@@ -43,6 +48,7 @@ export interface ExprAtom {
   /** True iff no variable occurs anywhere inside (a precomputed ground flag): lets `applySubst`,
    *  `atomVars`, and `occurs` short-circuit instantly on closed terms. Computed once at construction. */
   readonly ground: boolean;
+  vars: readonly string[] | undefined;
 }
 /** A grounded value (LeaTTa `Ground`). Numbers track int vs float so `3` and `3.0` stay distinct. */
 export type Ground =
@@ -65,6 +71,7 @@ export interface GndAtom {
   readonly exec: GroundedExec | undefined;
   readonly match: GroundedMatch | undefined;
   readonly ground: true;
+  vars: readonly string[] | undefined;
 }
 export type Atom = SymAtom | VarAtom | ExprAtom | GndAtom;
 
@@ -131,6 +138,7 @@ export function sym(name: string): SymAtom {
       exec: undefined,
       match: undefined,
       ground: true,
+      vars: noVars,
     };
     SYM_INTERN.set(name, s);
   }
@@ -148,6 +156,9 @@ export function variable(name: string): VarAtom {
     exec: undefined,
     match: undefined,
     ground: false,
+    // Left unfilled: a trail cell (`mkCell`) is structurally a variable whose name is assigned after
+    // construction, so a variable's own one-element list is rebuilt per ask rather than memoised.
+    vars: undefined,
   };
 }
 
@@ -167,6 +178,7 @@ export function expr(items: readonly Atom[]): ExprAtom {
     exec: undefined,
     match: undefined,
     ground,
+    vars: ground ? noVars : undefined,
   };
 }
 
@@ -324,7 +336,17 @@ export function gnd(
   exec?: GroundedExec,
   match?: GroundedMatch,
 ): GndAtom {
-  return { kind: "gnd", name: undefined, items: undefined, value, typ, exec, match, ground: true };
+  return {
+    kind: "gnd",
+    name: undefined,
+    items: undefined,
+    value,
+    typ,
+    exec,
+    match,
+    ground: true,
+    vars: noVars,
+  };
 }
 
 /** Grounded literal constructors. */
@@ -420,37 +442,76 @@ export function atomVars(a: Atom, out: string[] = []): string[] {
   return out;
 }
 
-const noVars: readonly string[] = [];
+/** Past this many distinct variables, deduplicating a cache entry by scanning the accumulated list
+ *  costs more than hashing it. Below it the scan wins outright and allocates nothing: an expression
+ *  carries 5.9 distinct variables on average through a MeTTaSpeak schema registration, and the `Set`
+ *  a general dedupe needs was being allocated 4.4M times for that handful of names. */
+export const VARS_SCAN_LIMIT = 16;
 
-/** Which distinct variable names occur in an expression, first-seen order, cached by object identity.
+/** Which distinct variable names occur in an expression, first-seen order, memoised in the atom's own
+ *  `vars` slot on first ask.
+ *
  *  Sound forever (not just for one call), unlike a per-call memo: an atom is immutable, so "which vars
- *  occur in me" cannot change after construction — the same reasoning that already justifies the
- *  precomputed `ground` flag. `instantiate` shares unchanged subterms by reference, so a rewrite-heavy
- *  search walks a DAG, not a tree: the same expression object recurs as a stack/continuation is threaded
- *  through many interpreter steps (scopeVars/chainLiveVars below). Without this cache, `collectVars` re-walks
- *  a shared node once per occurrence instead of once ever, the same exponential-paths-vs-linear-nodes
- *  blowup as the (now-fixed) unmemoized `occursThrough` and `instantiate` — this was the dominant cost left
- *  after fixing those two (77% of CPU on a backward-chaining search that should run in well under a second). */
-const exprVarsCache = new WeakMap<ExprAtom, readonly string[]>();
-
+ *  occur in me" cannot change after construction. That is the reasoning that already justifies the
+ *  precomputed `ground` flag, and the reason a saturation prover caches a term's weight and variable count
+ *  on the term record when it is created (Vampire's shared `Term` carries `_weight`/`_vars`).
+ *
+ *  The slot replaces a side `WeakMap`. Identity caching earns its keep on the shared subterms `instantiate`
+ *  hands back by reference, since a rewrite-heavy search walks a DAG, not a tree: without any cache
+ *  `collectVars` re-walks a shared node once per path instead of once ever, the exponential-paths-vs-linear-
+ *  nodes blowup that was 77% of CPU on a backward-chaining search. But the atoms callers ASK about are
+ *  mostly freshly built, so the map missed about half the time: a MeTTaSpeak saturation ran 9.8M top-level
+ *  queries against 9.5M misses, paying 29M map operations to serve them. A slot costs a load and a store. */
 function atomVarsOf(a: Atom): readonly string[] {
-  if (a.ground) return noVars;
-  if (a.kind === "var") return [a.name];
-  if (a.kind !== "expr") return noVars;
-  const cached = exprVarsCache.get(a);
+  const cached = a.vars;
   if (cached !== undefined) return cached;
-  const out: string[] = [];
-  const seen = new Set<string>();
+  // Only a variable and a non-ground expression reach here: every closed atom is built carrying `noVars`.
+  if (a.kind !== "expr") return a.kind === "var" ? [a.name] : noVars;
+  // `names` is the union so far and may still BE a child's list; `mine` is that same list once this
+  // expression owns a copy it can push into. The first non-ground child's list is adopted whole rather
+  // than copied, so an expression that wraps a single open subterm, say `(Rel wolf ($x))` or `(quote $x)`
+  // or most of a rule body, allocates nothing at all, and a later child adding no new name leaves the
+  // adopted list in place. Callers already treat the answer as shared and immutable: `varNamesOf` hands
+  // out the entry itself, and `atomVars` copies before returning it.
+  let names: readonly string[] | null = null;
+  let mine: string[] | null = null;
+  // Grows only if this expression turns out to carry more variables than a scan handles well.
+  let seen: Set<string> | undefined;
   for (const it of a.items) {
-    for (const v of atomVarsOf(it)) {
-      if (!seen.has(v)) {
-        seen.add(v);
-        out.push(v);
+    if (it.ground) continue;
+    if (names !== null && seen === undefined && names.length > VARS_SCAN_LIMIT)
+      seen = new Set(names);
+    // A variable child is added by name rather than through the recursive call, which would allocate a
+    // single-element array for each one, 2.9M of them on a schema registration.
+    if (it.kind === "var") {
+      if (names === null) {
+        names = mine = [it.name];
+        continue;
       }
+      if (seen !== undefined ? seen.has(it.name) : names.includes(it.name)) continue;
+      // Copy on first write: an adopted list belongs to a child and must not be extended in place.
+      if (mine === null) names = mine = [...names];
+      seen?.add(it.name);
+      mine.push(it.name);
+      if (seen === undefined && mine.length > VARS_SCAN_LIMIT) seen = new Set(mine);
+      continue;
+    }
+    const sub = it.vars ?? atomVarsOf(it);
+    if (names === null) {
+      names = sub;
+      continue;
+    }
+    for (const v of sub) {
+      if (seen !== undefined ? seen.has(v) : names.includes(v)) continue;
+      if (mine === null) names = mine = [...names];
+      seen?.add(v);
+      mine.push(v);
+      if (seen === undefined && mine.length > VARS_SCAN_LIMIT) seen = new Set(mine);
     }
   }
-  exprVarsCache.set(a, out);
-  return out;
+  const vars = names ?? noVars;
+  a.vars = vars;
+  return vars;
 }
 
 /** Collect an atom's variable names into `out`, deduping via the shared `seen` set (O(1) membership instead
@@ -462,6 +523,47 @@ export function collectVars(a: Atom, out: string[], seen: Set<string>): void {
       seen.add(v);
       out.push(v);
     }
+  }
+}
+
+/** The distinct variable names of `a`, first-seen order, straight from the shared cache. Do not mutate
+ *  the result: it is the cache entry itself, shared with every other caller. `atomVars` returns a copy.
+ *  Callers testing a property of a term's variables use this to avoid rebuilding the list. */
+export function varNamesOf(a: Atom): readonly string[] {
+  return atomVarsOf(a);
+}
+
+/** The names a filtered collection is looking for: a list while it is short enough that scanning beats
+ *  hashing, a set once it is not. A rewrite-heavy program spans both — a schema registration carries 3
+ *  binding names, a forward-chaining saturation carries 108 over a live set of 436. */
+export type VarProbe = readonly string[] | ReadonlySet<string>;
+
+/** Append the variables of `a` that occur in `want`, in `collectVars` order and without duplicates.
+ *  `want` and `out` hold a binding's variables, which stay small (3.0 on average through a MeTTaSpeak
+ *  schema registration), so a linear scan beats the `Set` that `collectVars` needs for its unbounded
+ *  live set — and nothing is allocated per call. */
+export function collectVarsAmong(a: Atom, want: VarProbe, out: string[]): void {
+  if (Array.isArray(want)) {
+    for (const v of atomVarsOf(a)) if (want.includes(v) && !out.includes(v)) out.push(v);
+    return;
+  }
+  const set = want as ReadonlySet<string>;
+  for (const v of atomVarsOf(a)) if (set.has(v) && !out.includes(v)) out.push(v);
+}
+
+/** `collectSubstitutedVars` filtered to `want`, in the same order. */
+export function collectSubstitutedVarsAmong(
+  template: Atom,
+  name: string,
+  value: Atom,
+  want: VarProbe,
+  out: string[],
+): void {
+  const has = (v: string): boolean =>
+    Array.isArray(want) ? want.includes(v) : (want as ReadonlySet<string>).has(v);
+  for (const v of atomVarsOf(template)) {
+    if (v === name) collectVarsAmong(value, want, out);
+    else if (has(v) && !out.includes(v)) out.push(v);
   }
 }
 

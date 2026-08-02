@@ -5,7 +5,7 @@
 ;
 ; Adapted from PeTTa examples/pln_roman.metta for MeTTa-TS (Hyperon) conventions.
 
-!(import! &self ../lib/lib_pln)
+!(import! &self (library lib_pln))
 
 (= (STV A) (stv 0.5 0.9))
 (= (STV B) (stv 0.25 0.9))

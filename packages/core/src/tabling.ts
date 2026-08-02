@@ -118,14 +118,17 @@ export interface RuleWalk {
   readonly bodies: Map<string, Atom[]>;
 }
 
-export function buildRuleWalk(env: MinEnv): RuleWalk {
+export function buildRuleWalk(
+  env: MinEnv,
+  extra?: ReadonlyMap<string, Array<[Atom, Atom]>>,
+): RuleWalk {
   const headDeps = new Map<string, Set<string>>();
   const callDeps = new Map<string, Set<string>>();
   const bodies = new Map<string, Atom[]>();
-  for (const [k, eqs] of env.ruleIndex) {
-    const heads = new Set<string>();
-    const calls = new Set<string>();
-    const bs: Atom[] = [];
+  const add = (k: string, eqs: ReadonlyArray<[Atom, Atom]>): void => {
+    const heads = headDeps.get(k) ?? new Set<string>();
+    const calls = callDeps.get(k) ?? new Set<string>();
+    const bs = bodies.get(k) ?? [];
     for (const [, rhs] of eqs) {
       headSymbols(rhs, heads);
       callHeads(rhs, calls);
@@ -134,7 +137,11 @@ export function buildRuleWalk(env: MinEnv): RuleWalk {
     headDeps.set(k, heads);
     callDeps.set(k, calls);
     bodies.set(k, bs);
-  }
+  };
+  for (const [k, eqs] of env.ruleIndex) add(k, eqs);
+  // `extra` carries the `&self` equations an `import!` added, which the compiler compiles from and so must
+  // also analyse. Tabling passes nothing and sees exactly the static program it always did.
+  if (extra !== undefined) for (const [k, eqs] of extra) add(k, eqs);
   return { headDeps, callDeps, bodies };
 }
 
@@ -223,7 +230,8 @@ export function functorCallCount(
  *  rewrites to `unify`, and `unify` returns the chosen branch for the caller to evaluate, so those
  *  positions do become redexes. */
 export function inertArgumentPositions(env: MinEnv): (head: string, index: number) => boolean {
-  return (head) => head === "Error" && !env.ruleIndex.has("Error");
+  return (head) =>
+    head === "Error" && !env.ruleIndex.has("Error") && env.compileSelfRules?.has("Error") !== true;
 }
 
 /** Pure functors worth automatic tabling. A recursive SCC is worth tabling when some rule body branches

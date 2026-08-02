@@ -19,5 +19,11 @@
 !(test (repr (f 42))
        "(f 42)")
 
-!(test (collapse (get-atoms &self))
+; Hyperon 0.2.10 (verified 2026-08-02): remove-atom is exact, so the bare-variable removal clears every
+; ground atom but a rule whose atom carries variables survives (the match candidate is freshened, and the
+; freshened copy is not the stored atom). PeTTa's empty-space answer is PeTTa-only. The two invariants
+; that hold under Hyperon semantics:
+!(test (collapse (match &self (friend $a $b) found))
        ())
+!(test (f 1)
+       42)

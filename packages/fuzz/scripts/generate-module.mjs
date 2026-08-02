@@ -109,6 +109,8 @@ for (const name of fragments) {
   }
 }
 
+// REUSE-IgnoreStart
+// The header below is emitted into the generated module, not a declaration about this script.
 const generated = await format(
   [
     "// SPDX-FileCopyrightText: 2026 MesTTo",
@@ -121,6 +123,7 @@ const generated = await format(
   ].join("\n"),
   { parser: "typescript" },
 );
+// REUSE-IgnoreEnd
 
 if (check) {
   let current;

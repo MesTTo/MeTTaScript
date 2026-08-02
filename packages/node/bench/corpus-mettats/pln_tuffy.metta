@@ -5,7 +5,7 @@
 ;
 ; Adapted from PeTTa examples/pln_tuffy.metta for MeTTa-TS (Hyperon) conventions.
 
-!(import! &self ../lib/lib_pln)
+!(import! &self (library lib_pln))
 
 (= (STV (Concept Anna)) (stv 0.1667 0.9))
 (= (STV (Concept Bob)) (stv 0.1667 0.9))

@@ -5,7 +5,7 @@
 ;
 ; Adapted from PeTTa examples/nars_tuffy.metta for MeTTa-TS (Hyperon) conventions.
 
-!(import! &self ../lib/lib_nars)
+!(import! &self (library lib_nars))
 
 (= (kb)
    ((Sentence ((==> (--> (× $1 $2) friend)

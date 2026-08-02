@@ -43,7 +43,7 @@ import {
 } from "./bindings";
 import { addVarBinding, matchAtoms, matchAtomsScoped, merge } from "./match";
 import { instantiate } from "./instantiate";
-import { IMPURE_OPS } from "./tabling";
+import { IMPURE_OPS, analyzePurity, buildRuleWalk } from "./tabling";
 import {
   type IntVal,
   addInt,
@@ -56,7 +56,7 @@ import {
   cmpIntVal,
 } from "./number";
 import { callGrounded } from "./builtins";
-import { type MinEnv, type St } from "./eval";
+import { isEmbeddedOp, type MinEnv, type St } from "./eval";
 import {
   DEFAULT_MAX_STACK_DEPTH,
   EVALUATION_TRAMPOLINE_DEPTH,
@@ -65,6 +65,63 @@ import {
   EvaluationDepthHandoff,
   EvaluationDepthOverflow,
 } from "./eval-depth";
+
+// ---------- the rules the compiler compiles from ----------
+//
+// `env.ruleIndex` holds only the equations loaded statically. A runtime `import!` puts a module's equations
+// in the space instead, where the evaluator finds them through the world's rule index. `ensureCompiled`
+// snapshots those into `env.compileSelfRules` and rebuilds whenever the world says they changed, so the
+// four readers below can hand the compiler the whole program rather than the half of it that happened to be
+// in the entry file. Order matches `candidatesW`: static equations first, then the imported ones.
+//
+// For a single-file program the snapshot is empty and each of these is the plain `ruleIndex` read it
+// replaces, returning the very same array.
+
+function importedEquations(env: MinEnv, functor: string): Array<[Atom, Atom]> | undefined {
+  const eqs = env.compileSelfRules?.get(functor);
+  return eqs !== undefined && eqs.length > 0 ? eqs : undefined;
+}
+
+/** Every equation defining `functor` that the compiler may build a holder from. */
+function compilableEquations(env: MinEnv, functor: string): Array<[Atom, Atom]> | undefined {
+  const statics = env.ruleIndex.get(functor);
+  const imported = importedEquations(env, functor);
+  if (imported === undefined) return statics;
+  return statics === undefined ? imported : [...statics, ...imported];
+}
+
+/** Whether `name` is defined by equations at all. Its negation is what marks a constructor, so a head this
+ *  misses is compiled as inert data and never reduces. */
+function hasEquations(env: MinEnv, name: string): boolean {
+  return env.ruleIndex.has(name) || importedEquations(env, name) !== undefined;
+}
+
+/** How many equations define `name`, for the checks that a prelude form still has its standard shape. */
+function visibleEquationCount(env: MinEnv, name: string): number {
+  return (env.ruleIndex.get(name)?.length ?? 0) + (env.compileSelfRules?.get(name)?.length ?? 0);
+}
+
+/** Every head a holder may be built for. */
+function compilableHeads(env: MinEnv): string[] {
+  const imported = env.compileSelfRules;
+  if (imported === undefined || imported.size === 0) return [...env.ruleIndex.keys()];
+  const out = new Set(env.ruleIndex.keys());
+  for (const [k, eqs] of imported) if (eqs.length > 0) out.add(k);
+  return [...out];
+}
+
+/** The pure functors the compiler may build value holders for.
+ *
+ *  `env.pureFunctors` answers this for tabling, which a runtime rule addition deliberately empties so that
+ *  memoisation falls back to its versioned runtime gates. Compilation stays on, so once a module has
+ *  contributed equations the purity fixpoint is re-run over the rules the compiler can actually see. A
+ *  program with no imported equations reuses the tabling set untouched and runs no extra analysis. */
+function compilerPureFunctors(env: MinEnv): ReadonlySet<string> {
+  const imported = env.compileSelfRules;
+  if (imported === undefined || imported.size === 0) return env.pureFunctors ?? new Set<string>();
+  env.compilePureFunctors ??= analyzePurity(env, undefined, buildRuleWalk(env, imported));
+  return env.compilePureFunctors;
+}
 
 /** Thrown by a compiled node when it meets a case it cannot handle faithfully (division by zero);
  *  the caller catches it (along with a native stack `RangeError`) and re-runs the call in the
@@ -982,7 +1039,7 @@ function singleClauseHead(
   env: MinEnv,
   functor: string,
 ): { params: ParamPat[]; body: Atom } | undefined {
-  const eqs = env.ruleIndex.get(functor);
+  const eqs = compilableEquations(env, functor);
   if (eqs === undefined || eqs.length !== 1) return undefined;
   const [lhs, body] = eqs[0]!;
   if (lhs.kind !== "expr" || lhs.items.length === 0 || lhs.items[0]!.kind !== "sym")
@@ -1300,7 +1357,7 @@ function runRewriteRule(
 }
 
 function compileRewrite(env: MinEnv, functor: string): RewriteHolder | undefined {
-  const eqs = env.ruleIndex.get(functor);
+  const eqs = compilableEquations(env, functor);
   if (eqs === undefined || eqs.length === 0) return undefined;
   const rules: RewriteRule[] = [];
   let arity: number | undefined;
@@ -1376,6 +1433,8 @@ interface SymClause {
   readonly pats: readonly SymPat[];
   readonly tpl: SymTpl;
   readonly nslots: number;
+  /** Parameter slots the RHS splices in whole. */
+  readonly embedded: ReadonlySet<number>;
 }
 
 /** Compile an LHS pattern, assigning each new variable the next slot. Returns undefined for a repeated
@@ -1466,6 +1525,12 @@ function matchSymPatQuery(
   }
 }
 
+/** The parameter slots an RHS template splices in whole. */
+function collectTplSlots(tpl: SymTpl, out: Set<number>): void {
+  if (tpl.tag === "slot") out.add(tpl.slot);
+  else if (tpl.tag === "expr") for (const t of tpl.items) collectTplSlots(t, out);
+}
+
 /** Build an RHS template into an atom. `expr()` recomputes the ground flag exactly as `instantiate`'s
  *  rebuild does, so a result carrying a fresh variable is correctly non-ground. */
 function buildSymTpl(tpl: SymTpl, slots: readonly Atom[], suffix: string): Atom {
@@ -1488,7 +1553,7 @@ function buildSymTpl(tpl: SymTpl, slots: readonly Atom[], suffix: string): Atom 
  *  leaves, which keeps calls like tilepuzzle's `(move $state $_)` on the compiled path. */
 function compileSymbolic(env: MinEnv, functor: string): SymbolicHolder | undefined {
   if (env.varRulesVar.length !== 0) return undefined;
-  const eqs = env.ruleIndex.get(functor);
+  const eqs = compilableEquations(env, functor);
   if (eqs === undefined || eqs.length === 0) return undefined;
   const clauses: SymClause[] = [];
   let arity: number | undefined;
@@ -1505,7 +1570,23 @@ function compileSymbolic(env: MinEnv, functor: string): SymbolicHolder | undefin
       if (p === undefined) return undefined;
       pats.push(p);
     }
-    clauses.push({ pats, tpl: compileSymTpl(rhs, slots), nslots: slots.size });
+    // A right-hand side headed by an embedded instruction cannot be compiled. The evaluator pushes such a
+    // right-hand side onto the stack it is already running; a compiled result re-enters through a fresh
+    // evaluation instead, and the two routes do not charge the step counter alike. That counter is
+    // observable, since it numbers fresh variables and names `&space-N` handles, so the drift is a wrong
+    // answer waiting to happen: every later name shifts, and eventually a shifted one meets a name that is
+    // still live. `metta debug diff` shows both halves of it directly.
+    //
+    //   !(if-error True True (noeval forall))   ;; right-hand side headed by `function`
+    //   !(new-space)                            ;; &space-2 interpreted, &space-3 compiled
+    //
+    // and the prelude's `car-atom`, whose right-hand side is headed by `chain`, was charging 37 extra steps
+    // across one MeTTaSpeak goal search.
+    if (isEmbeddedOp(rhs)) return undefined;
+    const tpl = compileSymTpl(rhs, slots);
+    const embedded = new Set<number>();
+    collectTplSlots(tpl, embedded);
+    clauses.push({ pats, tpl, nslots: slots.size, embedded });
   }
   if (arity === undefined) return undefined;
   const clauseCount = clauses.length;
@@ -1529,6 +1610,19 @@ function compileSymbolic(env: MinEnv, functor: string): SymbolicHolder | undefin
         if (bnds.length === 0) break;
       }
       if (bnds.length > 0) {
+        // Decline when the clause would splice an argument that still carries variables into its result.
+        // Applying the rule for real binds each parameter to its argument and carries those bindings on
+        // with the result, so a variable that arrives inside an argument stays reachable through the
+        // binding set and scope restriction keeps its name live. A compiled clause returns no bindings for
+        // its parameters and splices the argument straight into the term, so nothing records those names
+        // as live; from the second application through the same code path they collide with the first's.
+        //   (foldl-atom ((Route a b) (Route c d)) True $s $r
+        //     (if-error $s $s (case $r (((Route $k $v) (added $k $v)) ($_ (Error $r bad))))))
+        // answers `(added c d)` through the evaluator and took the fallback branch compiled, because the
+        // second `case` met `$k` already bound to `a`. A clause that only matches an open argument against
+        // its pattern leaves is unaffected: those variables come back as bindings, which is what the
+        // evaluator does too, and that is what keeps the tile puzzle's `(move $state $_)` compiled.
+        for (const slot of clause.embedded) if (slots[slot]?.ground === false) return undefined;
         const atom = buildSymTpl(clause.tpl, slots, "#" + (counter + i));
         for (const bnd of bnds)
           results.push({
@@ -1639,7 +1733,7 @@ function scalarCandidate(env: MinEnv, functor: string): ScalarCandidate | undefi
     if (declaredReturn === undefined) return undefined;
     declaredArity = signature.length - 1;
   }
-  const eqs = env.ruleIndex.get(functor);
+  const eqs = compilableEquations(env, functor);
   if (eqs === undefined || eqs.length === 0) return undefined;
   let arity: number | undefined;
   const clauses: ScalarClauseCandidate[] = [];
@@ -1732,7 +1826,7 @@ function scalarBodyReturnHint(
   if (scalarNames.has(op)) return scalarReturns.get(op) ?? "unknown";
   const functionalReturn = functional.get(op)?.retType;
   if (functionalReturn !== undefined) return isNumberType(functionalReturn) ? "number" : "atom";
-  if (KNOWN_OPS.has(op) || env.ruleIndex.has(op) || env.gt.has(op) || env.agt.has(op))
+  if (KNOWN_OPS.has(op) || hasEquations(env, op) || env.gt.has(op) || env.agt.has(op))
     return "unknown";
   return "atom";
 }
@@ -1795,7 +1889,7 @@ function hasScalarCallUnderConstructor(
     (!KNOWN_OPS.has(op) &&
       !scalarNames.has(op) &&
       !functional.has(op) &&
-      !env.ruleIndex.has(op) &&
+      !hasEquations(env, op) &&
       !env.gt.has(op) &&
       !env.agt.has(op));
   return atom.items.some((item) =>
@@ -1840,12 +1934,11 @@ function scalarCandidateAddsNativeWork(
   candidate: ScalarCandidate,
   returnType: "number" | "atom",
   returns: ReadonlyMap<string, "number" | "atom">,
-  candidates: ReadonlyMap<string, ScalarCandidate>,
+  scalarNames: ReadonlySet<string>,
   functional: FunctionalFns,
 ): boolean {
   if (candidate.declaredReturn !== undefined) return true;
   if (returnType === "number") return true;
-  const scalarNames = new Set(candidates.keys());
   const hints = candidate.clauses.map((clause) =>
     scalarBodyReturnHint(env, clause.body, clause, returns, functional, scalarNames),
   );
@@ -1973,7 +2066,7 @@ function compileScalarAtom(
     op !== undefined &&
     (KNOWN_OPS.has(op) ||
       holders.has(op) ||
-      env.ruleIndex.has(op) ||
+      hasEquations(env, op) ||
       env.gt.has(op) ||
       env.agt.has(op))
   )
@@ -2067,10 +2160,21 @@ function compileScalarHolders(
 
   const holders = new Map<string, ScalarHolder>();
   const values = new Map<string, ValueHolder>(functional);
+  // Built once for the whole pass rather than per candidate. Deriving it inside the check made compilation
+  // quadratic in how many scalar candidates a program has: 6400 nullary equations spent 1.25 of 1.5 seconds
+  // rebuilding this set, and none of the candidates can change while the pass runs.
+  const candidateNames = new Set(candidates.keys());
   for (const [functor, candidate] of candidates) {
     const retType = scalarReturns.get(functor)!;
     if (
-      !scalarCandidateAddsNativeWork(env, candidate, retType, scalarReturns, candidates, functional)
+      !scalarCandidateAddsNativeWork(
+        env,
+        candidate,
+        retType,
+        scalarReturns,
+        candidateNames,
+        functional,
+      )
     )
       continue;
     const holder: ScalarHolder = {
@@ -2199,7 +2303,7 @@ type ChoiceUnionClause =
 const CHOICE_UNION_NUMERIC_OPS = new Set(["+", "-", "*"]);
 
 function choiceUnionConstructor(env: MinEnv, name: string): boolean {
-  return !env.ruleIndex.has(name) && !env.gt.has(name) && !env.agt.has(name) && !env.sigs.has(name);
+  return !hasEquations(env, name) && !env.gt.has(name) && !env.agt.has(name) && !env.sigs.has(name);
 }
 
 function signaturePrefix(
@@ -2219,9 +2323,9 @@ function signaturePrefix(
 }
 
 function choiceUnionBuiltinsUnchanged(env: MinEnv): boolean {
-  if ((env.ruleIndex.get("if")?.length ?? 0) !== 2) return false;
+  if (visibleEquationCount(env, "if") !== 2) return false;
   for (const name of ["superpose", "empty", ...CHOICE_UNION_NUMERIC_OPS, ">"])
-    if ((env.ruleIndex.get(name)?.length ?? 0) !== 0 || !env.gt.has(name) || env.agt.has(name))
+    if (visibleEquationCount(env, name) !== 0 || !env.gt.has(name) || env.agt.has(name))
       return false;
   return (
     signaturePrefix(env, "if", ["Bool", "Atom", "Atom"], 4) &&
@@ -2362,7 +2466,7 @@ function choiceUnionParameter(lhs: Atom, functor: string): string | undefined {
  *  product with two identical `(- $depth 1)` recursive calls. Both heads are catch-all variables, so every
  *  call runs both clauses in source order. Other nondeterministic rule shapes stay on the general compiler. */
 function compileChoiceUnion(env: MinEnv, functor: string): NondetHolder | undefined {
-  const equations = env.ruleIndex.get(functor);
+  const equations = compilableEquations(env, functor);
   if (env.varRulesVar.length !== 0 || equations?.length !== 2 || !choiceUnionBuiltinsUnchanged(env))
     return undefined;
 
@@ -2479,7 +2583,7 @@ interface QuotedRenderer {
 }
 
 function standardQuoteUnchanged(env: MinEnv): boolean {
-  const rules = env.ruleIndex.get("quote");
+  const rules = compilableEquations(env, "quote");
   if (rules?.length !== 1 || !signaturePrefix(env, "quote", ["Atom", "Atom"])) return false;
   const [lhs, rhs] = rules[0]!;
   return (
@@ -2560,10 +2664,7 @@ function compileQuotedRendererClause(
   if (calls.length === 0) return undefined;
   const template = quotedBody(rhs.items[2]!);
   if (template === undefined || hasVariableOutsideSlots(template, slots)) return undefined;
-  if (
-    (env.ruleIndex.get("let*")?.length ?? 0) !== 1 ||
-    (env.ruleIndex.get("let")?.length ?? 0) !== 1
-  )
+  if (visibleEquationCount(env, "let*") !== 1 || visibleEquationCount(env, "let") !== 1)
     return undefined;
   return {
     pat,
@@ -2578,7 +2679,7 @@ function compileQuotedRendererClause(
 
 function compileQuotedRenderer(env: MinEnv, functor: string): QuotedRenderer | undefined {
   if (env.sigs.has(functor) || !standardQuoteUnchanged(env)) return undefined;
-  const equations = env.ruleIndex.get(functor);
+  const equations = compilableEquations(env, functor);
   if (equations === undefined || equations.length === 0) return undefined;
   const clauses: QuotedRendererClause[] = [];
   for (const [lhs, rhs] of equations) {
@@ -2672,16 +2773,16 @@ function synthesisPipeline(
   if (
     env.sigs.has(functor) ||
     !standardQuoteUnchanged(env) ||
-    (env.ruleIndex.get("if")?.length ?? 0) !== 2 ||
-    (env.ruleIndex.get("let")?.length ?? 0) !== 1 ||
+    visibleEquationCount(env, "if") !== 2 ||
+    visibleEquationCount(env, "let") !== 1 ||
     !signaturePrefix(env, "if", ["Bool", "Atom", "Atom"], 4) ||
     !signaturePrefix(env, "let", ["Atom", "%Undefined%", "Atom"], 4) ||
-    (env.ruleIndex.get("empty")?.length ?? 0) !== 0 ||
+    visibleEquationCount(env, "empty") !== 0 ||
     !env.gt.has("empty") ||
     env.agt.has("empty")
   )
     return undefined;
-  const equations = env.ruleIndex.get(functor);
+  const equations = compilableEquations(env, functor);
   if (equations?.length !== 1) return undefined;
   const [lhs, rhs] = equations[0]!;
   if (
@@ -3000,7 +3101,7 @@ function nondetIsData(env: MinEnv, a: Atom): boolean {
   if (h.kind === "expr" && h.items.length > 0) return false;
   if (
     h.kind === "sym" &&
-    (env.ruleIndex.has(h.name) || env.gt.has(h.name) || IMPURE_OPS.has(h.name))
+    (hasEquations(env, h.name) || env.gt.has(h.name) || IMPURE_OPS.has(h.name))
   )
     return false;
   return a.items.every((x) => nondetIsData(env, x));
@@ -3023,7 +3124,7 @@ function nondetArgOk(env: MinEnv, a: Atom): boolean {
   if (h.kind === "sym") {
     if (ARITH_FOLD.has(h.name)) {
       if (a.items.length !== 3) return false;
-    } else if (env.ruleIndex.has(h.name) || env.gt.has(h.name) || IMPURE_OPS.has(h.name))
+    } else if (hasEquations(env, h.name) || env.gt.has(h.name) || IMPURE_OPS.has(h.name))
       return false;
   }
   return a.items.every((x) => nondetArgOk(env, x));
@@ -3362,7 +3463,7 @@ const NONDET_INLINE = new Set([
 function collectCalledFunctors(env: MinEnv, a: Atom, into: Set<string>): void {
   if (a.kind !== "expr" || a.items.length === 0) return;
   const h = a.items[0]!;
-  if (h.kind === "sym" && !NONDET_INLINE.has(h.name) && env.ruleIndex.has(h.name)) into.add(h.name);
+  if (h.kind === "sym" && !NONDET_INLINE.has(h.name) && hasEquations(env, h.name)) into.add(h.name);
   for (const it of a.items) collectCalledFunctors(env, it, into);
 }
 
@@ -3373,7 +3474,7 @@ function discoverNondetGroup(env: MinEnv, root: string): Set<string> {
   const queue = [root];
   while (queue.length > 0) {
     const fn = queue.pop()!;
-    for (const [, rhs] of env.ruleIndex.get(fn) ?? []) {
+    for (const [, rhs] of compilableEquations(env, fn) ?? []) {
       const called = new Set<string>();
       collectCalledFunctors(env, rhs, called);
       for (const g of called)
@@ -3397,14 +3498,14 @@ function compileNondetGroup(
   requireDirectForModed = false,
 ): Map<string, NondetHolder> | undefined {
   if (env.varRulesVar.length !== 0) return undefined;
-  if ((env.ruleIndex.get(root)?.length ?? 0) === 0) return undefined;
+  if (visibleEquationCount(env, root) === 0) return undefined;
   const group = discoverNondetGroup(env, root);
   const clausesByFn = new Map<string, NondetClause[]>();
   const arityByFn = new Map<string, number>();
   let anyCalls = false;
   let preferDirectForModed = false;
   for (const fn of group) {
-    const eqs = env.ruleIndex.get(fn);
+    const eqs = compilableEquations(env, fn);
     if (eqs === undefined || eqs.length === 0) return undefined;
     const clauses: NondetClause[] = [];
     let arity: number | undefined;
@@ -4330,7 +4431,7 @@ function impEvalArgs(
 }
 
 function isDataSymbol(env: MinEnv, name: string): boolean {
-  return !dataDeny().has(name) && !env.ruleIndex.has(name) && !env.gt.has(name);
+  return !dataDeny().has(name) && !hasEquations(env, name) && !env.gt.has(name);
 }
 
 /** The `Scope.isData` test: a bare symbol stands for itself only when nothing can reduce it. `isDataSymbol`
@@ -4372,7 +4473,7 @@ function compileImpGrounded(
   scope: ImpScope,
   holders: ImperativeFns,
 ): ImpCompiled | undefined {
-  if (env.ruleIndex.has(op)) return undefined;
+  if (hasEquations(env, op)) return undefined;
   const parts = args.map((arg) => compileImpAtom(env, arg, scope, holders));
   if (parts.some((part) => part === undefined)) return undefined;
   const compiled = parts as ImpCompiled[];
@@ -4468,7 +4569,7 @@ function compileImpIf(
   holders: ImperativeFns,
   tail: boolean,
 ): ImpCompiled | undefined {
-  if (args.length !== 3 || (env.ruleIndex.get("if")?.length ?? 0) !== 2) return undefined;
+  if (args.length !== 3 || visibleEquationCount(env, "if") !== 2) return undefined;
   const addIfAbsent = compileImpAddIfAbsent(env, args, scope);
   if (addIfAbsent !== undefined) return addIfAbsent;
   const cond = compileImpAtom(env, args[0]!, scope, holders);
@@ -4503,7 +4604,7 @@ function compileImpLet(
   holders: ImperativeFns,
   tail: boolean,
 ): ImpCompiled | undefined {
-  if (args.length !== 3 || args[0]!.kind !== "var" || (env.ruleIndex.get("let")?.length ?? 0) !== 1)
+  if (args.length !== 3 || args[0]!.kind !== "var" || visibleEquationCount(env, "let") !== 1)
     return undefined;
   const value = compileImpAtom(env, args[1]!, scope, holders);
   if (value === undefined) return undefined;
@@ -4544,8 +4645,8 @@ function compileImpLetStar(
   if (
     args.length !== 2 ||
     args[0]!.kind !== "expr" ||
-    (env.ruleIndex.get("let*")?.length ?? 0) !== 1 ||
-    (env.ruleIndex.get("let")?.length ?? 0) !== 1
+    visibleEquationCount(env, "let*") !== 1 ||
+    visibleEquationCount(env, "let") !== 1
   )
     return undefined;
   let curScope = scope;
@@ -4703,7 +4804,7 @@ function compileImpCaseMatch(
   holders: ImperativeFns,
   tail: boolean,
 ): ImpCompiled | undefined {
-  if (args.length !== 2 || (env.ruleIndex.get("case")?.length ?? 0) !== 1) return undefined;
+  if (args.length !== 2 || visibleEquationCount(env, "case") !== 1) return undefined;
   const scrut = impCaseMatchScrutinee(args[0]!);
   if (scrut === undefined) return undefined;
   const pairs = args[1]!;
@@ -4947,7 +5048,7 @@ function buildImpScope(params: readonly ParamPat[]): ImpScope | undefined {
 function compileImperative(env: MinEnv, compiled: CompiledFns): void {
   if (env.varRulesVar.length !== 0) return;
   const cand: Cand = new Map();
-  for (const f of env.ruleIndex.keys()) {
+  for (const f of compilableHeads(env)) {
     if (compiled.has(f)) continue;
     const h = singleClauseHead(env, f);
     if (h !== undefined && h.params.every((p) => typeof p === "string")) cand.set(f, h);
@@ -5034,7 +5135,7 @@ function compileImperative(env: MinEnv, compiled: CompiledFns): void {
  *  Phase 1 infers return types (fixpoint, optimistic over recursion). Phase 2 compiles bodies with
  *  those types and drops any that fail end-to-end (a call to an uncompilable function fails too). */
 export function compileEnv(env: MinEnv): CompiledFns {
-  const pure = env.pureFunctors ?? new Set<string>();
+  const pure = compilerPureFunctors(env);
   const cand: Cand = new Map();
   for (const f of pure) {
     const h = singleClauseHead(env, f);
@@ -5145,12 +5246,12 @@ export function compileEnv(env: MinEnv): CompiledFns {
         const symbolic = compileSymbolic(env, f);
         if (symbolic !== undefined) compiled.set(f, symbolic);
       }
-      for (const f of env.ruleIndex.keys()) {
+      for (const f of compilableHeads(env)) {
         if (compiled.has(f)) continue;
         const choiceUnion = compileChoiceUnion(env, f);
         if (choiceUnion !== undefined) compiled.set(f, choiceUnion);
       }
-      for (const f of env.ruleIndex.keys()) {
+      for (const f of compilableHeads(env)) {
         if (compiled.has(f)) continue;
         const pipeline = compileSynthesisPipeline(env, f, compiled);
         if (pipeline !== undefined) compiled.set(f, pipeline);
@@ -5159,7 +5260,7 @@ export function compileEnv(env: MinEnv): CompiledFns {
       // Nondeterministic searching functors: let*-chain match functors and the mutually-recursive
       // proof-size-bounded chainers. A functor pulls its call-graph closure into one group holder, so
       // register every functor the group compiled.
-      for (const f of env.ruleIndex.keys()) {
+      for (const f of compilableHeads(env)) {
         if (compiled.has(f)) continue;
         const group = compileNondetGroup(env, f);
         if (group !== undefined) for (const [g, h] of group) compiled.set(g, h);
@@ -5229,13 +5330,12 @@ export function runCompiled(
         // `maxSteps` means the same thing whether or not a function compiled. A memoised run cannot: replaying
         // a memo's span is not what the interpreter would spend recomputing it.
         //
-        // Only under a step limit, though. Without one the count is not observable from a program at all,
-        // and reporting it costs a fresh `St` per compiled call where a zero delta reuses the caller's,
-        // measured at 3.9% of nilbc.
-        counterDelta:
-          holder.kind === "scalar" || (!holder.memoized && st.world.maxSteps > 0)
-            ? runtime.counterDelta
-            : 0,
+        // Reported whether or not a step limit is set. It used to be withheld without one, on the reasoning
+        // that the count is then unobservable and that a fresh `St` per compiled call costs 3.9% of nilbc.
+        // The count IS observable: it names `&space-N` handles, so withholding it made a compiled run hand
+        // back different space handles than the same program interpreted. A memoised run still cannot
+        // report one, since replaying a memo is not what the interpreter would spend recomputing it.
+        counterDelta: holder.kind === "scalar" || !holder.memoized ? runtime.counterDelta : 0,
       };
     } catch (e) {
       if (e instanceof EvaluationDepthHandoff) return undefined;

@@ -20,6 +20,7 @@ import {
   literalImportTarget,
   mettaEval,
   mettaEvalAsync,
+  promoteCompletedSelfImport,
   registerAsyncGroundedOperation,
 } from "./eval";
 import { stdTable } from "./builtins";
@@ -127,8 +128,17 @@ function buildDefaultEnv(imports: ImportMap, tabling: boolean, opts: RunOptions 
     stdTable(),
     staticCompactEnabled(opts),
   );
+  // Everything loaded so far is the library base; `get-atoms &self` enumerates the program's own
+  // atoms, which start here.
+  env.preloadBase = env.atoms.length;
   env.imports = withBuiltinModules(imports);
   if (opts.hostImport !== undefined) env.hostImport = opts.hostImport;
+  const decline = opts.declineCompiled;
+  if (decline !== undefined) {
+    const kinds = new Set(decline.kinds ?? []);
+    const functors = new Set(decline.functors ?? []);
+    env.declineCompiled = (functor, kind) => kinds.has(kind) || functors.has(functor);
+  }
   if (opts.trace !== undefined) env.trace = opts.trace;
   if (experimental?.hashCons === true) env.intern = createInternTable();
   if (experimental?.trail === true) env.useTrail = true;
@@ -207,6 +217,14 @@ export interface RunOptions {
   // decision (grounded dispatch, higher-order specialization, reduction step, stack-overflow cut). Off by
   // default at zero cost; used by the `metta-debug` CLI to explain evaluation.
   readonly trace?: TraceSink | undefined;
+  // Compiled holders to leave unbuilt, for differential debugging. `kinds` names holder kinds
+  // (`functional`, `scalar`, `symbolic`, `imperative`, `rewrite`, `nondet`, `choiceUnion`, `pipeline`) and
+  // `functors` names individual functions. Running a program as-is and again with one of them declined
+  // says whether compiling it is what changed the answer; tracing both says where.
+  readonly declineCompiled?: {
+    readonly kinds?: readonly string[];
+    readonly functors?: readonly string[];
+  };
   // Optional parallel branch evaluator for `(once (hyperpose …))`, supplied by hosts that can block the
   // caller while branch workers run. Node uses this for the CLI worker_threads path.
   readonly parEvalImpl?: (
@@ -232,8 +250,10 @@ function wireParallelEvaluation(
   if (opts.parEvalImpl === undefined && opts.parEvalAsyncImpl === undefined) return;
   env.pureFunctors ??= analyzePurity(env);
   // Re-evaluate a branch in a worker from the program's static (non-`!`) rules; a pure ground branch
-  // references only those, so this reproduces the in-line evaluation. Result strings are parsed back.
-  const rulesSrc = atoms
+  // references only those, so this reproduces the in-line evaluation. Held on the env so import
+  // promotion can extend it with a promoted module's definitions; read at call time. Result strings
+  // are parsed back.
+  env.parRulesSrc = atoms
     .filter((a) => !a.bang)
     .map((a) => format(a.atom))
     .join("\n");
@@ -244,12 +264,12 @@ function wireParallelEvaluation(
   const impl = opts.parEvalImpl;
   if (impl !== undefined) {
     env.parEval = (branchSrcs, firstOnly) =>
-      parseBranchResults(impl(rulesSrc, branchSrcs, firstOnly));
+      parseBranchResults(impl(env.parRulesSrc ?? "", branchSrcs, firstOnly));
   }
   const asyncImpl = opts.parEvalAsyncImpl;
   if (asyncImpl !== undefined) {
     env.parEvalAsync = async (branchSrcs, firstOnly) =>
-      parseBranchResults(await asyncImpl(rulesSrc, branchSrcs, firstOnly));
+      parseBranchResults(await asyncImpl(env.parRulesSrc ?? "", branchSrcs, firstOnly));
   }
 }
 
@@ -276,8 +296,11 @@ function evalSequentialInternal(
       if (includeNonBang) out.push({ query: atom, results: [] });
       continue;
     }
+    const preWorld = st.world;
     const [pairs, st2] = mettaEval(env, fuel, st, [], atom, opts.evaluationDepth);
-    st = st2;
+    // A completed top-level `&self` import is folded into the static env here, where exactly one world
+    // is alive, so the rest of the program evaluates as if the module had been part of the file.
+    st = promoteCompletedSelfImport(env, atom, preWorld, st2) ?? st2;
     out.push({ query: atom, results: resultsForQuery(pairs) });
   }
   return out;
@@ -346,6 +369,7 @@ export async function runProgramAsync(
       addAtomToEnv(env, atom);
       continue;
     }
+    const preWorld = st.world;
     const [pairs, st2] = await mettaEvalAsync(
       env,
       fuel,
@@ -355,7 +379,7 @@ export async function runProgramAsync(
       undefined,
       opts.evaluationDepth,
     );
-    st = st2;
+    st = promoteCompletedSelfImport(env, atom, preWorld, st2) ?? st2;
     out.push({ query: atom, results: resultsForQuery(pairs) });
   }
   return out;

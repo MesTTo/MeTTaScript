@@ -106,8 +106,11 @@ no-barrier files. The Hyperon-valid workload is `matespacefast`.
   (logicprog, scale).
 - superpose-as-union (mettaset, metta4_streams, casenew): LeaTTa cross-products the tuple, so an `(empty)`
   element empties the whole superpose.
-- overloaded-function dispatch (types_nondet): `(Error (f T1in) (BadArgType 1 Type2 Type1))` byte-identical
-  to the LeaTTa binary; PeTTa's answer is PeTTa-only.
+- overloaded-function dispatch (types_nondet): Hyperon 0.2.10 answers `(f T1in)` with `T1out` (verified
+  2026-08-02, identically in single-file and split-with-import layouts) and errors on `(f T2in)` inside the
+  body's `==`. The engine registers the first declared signature in both load paths and so matches Hyperon
+  on `(f T1in)`; the LeaTTa binary rejects it (conjunctive over all signatures), a LeaTTa-vs-Hyperon
+  divergence. Any-signature-admits typing is the remaining gap.
 
 ## Corpus adaptation conventions
 

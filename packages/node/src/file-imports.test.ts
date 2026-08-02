@@ -118,3 +118,46 @@ describe("file import parity", () => {
     expect(printed(path).at(-1)).toEqual(["a-ok"]);
   });
 });
+
+describe("import root configuration", () => {
+  it("reports an unresolvable import as an error instead of silently loading nothing", () => {
+    const path = fixture({
+      "index.metta": `!(import! &self not-there)\n!(after)\n`,
+    });
+    const out = printed(path);
+    expect(out[0]!.join(" ")).toContain("Failed to resolve module not-there");
+    expect(out.at(-1)).toEqual(["(after)"]);
+  });
+
+  it("a target above the default root fails loudly, and the file's own pragma widens the root", () => {
+    // The layout from the report: tests two levels down import shared utilities two levels up. The
+    // default root is one directory above the entry file, so ../../utils is outside it.
+    const files = {
+      "index.metta": "!(unused)\n",
+      "x/tests/entry.metta": `!(import! &self ../../utils/common-utils)\n!(shared-util 20)\n`,
+      "x/tests/entry-pragma.metta": `!(pragma! import-root ../..)\n!(import! &self ../../utils/common-utils)\n!(shared-util 20)\n`,
+      "utils/common-utils.metta": "(= (shared-util $x) (+ $x 1))\n",
+    };
+    const root = dirname(fixture(files));
+    const blocked = runFile(join(root, "x/tests/entry.metta")).map((g) => g.results.map(format));
+    expect(blocked[0]!.join(" ")).toContain("Failed to resolve module");
+    const allowed = runFile(join(root, "x/tests/entry-pragma.metta")).map((g) =>
+      g.results.map(format),
+    );
+    expect(allowed.at(-1)).toEqual(["21"]);
+  });
+
+  it("loads a registered library under its plain and its lib_ spelling, once", () => {
+    const path = fixture({
+      "index.metta": `
+        !(import! &self (library lib_spaces))
+        !(import! &self (library spaces))
+        (probe-atom here)
+        !(remove-all-atoms &self)
+        !(collapse (match &self (probe-atom $x) $x))
+      `,
+    });
+    const out = printed(path);
+    expect(out.at(-1)).toEqual(["()"]);
+  });
+});

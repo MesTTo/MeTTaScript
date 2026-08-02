@@ -62,8 +62,8 @@ export const JSON_MODULE_SRC = `
     (@return "Metta object"))
 `;
 
-const NATIVE_MODULE_NAMES = new Set(["concurrency", "json", "catalog", "fileio", "git"]);
-const moduleCache = new Map<string, Atom[]>();
+const NATIVE_MODULE_NAMES = new Set(["concurrency", "json", "catalog", "fileio", "git", "random"]);
+const moduleCache: ImportMap = new Map();
 const registry = new Map<string, string>();
 
 /** Register a built-in module source resolvable via `(import! &self <name>)`. Reserved native names cannot be shadowed. */
@@ -72,6 +72,24 @@ export function registerBuiltinModule(name: string, src: string): void {
   registry.set(name, src);
   moduleCache.clear();
 }
+
+/** The `random` module: Hyperon's random-number interface. The operations are grounded (in builtins.ts);
+ *  this source supplies their type signatures and documentation, so the Hyperon program shape
+ *  `!(import! &self random)` resolves here exactly as it does upstream. */
+export const RANDOM_MODULE_SRC = `
+  (: random-int (-> Number Number Number))
+  (: random-float (-> Number Number Number))
+
+  (@doc random-int
+    (@desc "A uniformly random integer in the half-open range [from, to); (Error ... RangeIsEmpty) when the range is empty")
+    (@params ((@param "Lower bound, inclusive") (@param "Upper bound, exclusive")))
+    (@return "A random integer in the range"))
+
+  (@doc random-float
+    (@desc "A uniformly random float in the half-open range [from, to); (Error ... RangeIsEmpty) when the range is empty")
+    (@params ((@param "Lower bound, inclusive") (@param "Upper bound, exclusive")))
+    (@return "A random float in the range"))
+`;
 
 /** The `catalog` module: module-catalog management (list/update/clear), mirroring hyperon-experimental.
  *  The operations are grounded (in builtins.ts) over a minimal in-memory catalog; this source supplies
@@ -173,15 +191,23 @@ function parseModule(src: string): Atom[] {
 }
 
 /** The built-in extension modules, by the name used in `(import! &self <name>)`. */
-export function builtinModules(): Map<string, Atom[]> {
+export function builtinModules(): ImportMap {
   if (moduleCache.size === 0) {
     moduleCache.set("concurrency", parseModule(CONCURRENCY_MODULE_SRC));
     moduleCache.set("json", parseModule(JSON_MODULE_SRC));
     moduleCache.set("catalog", parseModule(CATALOG_MODULE_SRC));
+    moduleCache.set("random", parseModule(RANDOM_MODULE_SRC));
     moduleCache.set("fileio", parseModule(FILEIO_MODULE_SRC));
     moduleCache.set("git", parseModule(GIT_MODULE_SRC));
     for (const [name, src] of registry) {
       moduleCache.set(name, parseModule(src));
+    }
+    // The PeTTa-convention spelling of a registered library resolves to the same module identity, so a
+    // program may import either name (or both: the shared id deduplicates the load).
+    for (const [name] of registry) {
+      const alias = "lib_" + name;
+      if (moduleCache.has(alias)) continue;
+      moduleCache.set(alias, { id: name, defs: moduleCache.get(name) as Atom[], imports: [] });
     }
   }
   return moduleCache;

@@ -105,7 +105,7 @@ const BASE_EXCLUSIONS = {
   metta4_streams:
     "PeTTa superpose-as-union: range is (= (range $K $N) (if (< $K $N) (superpose ($K (range (+ $K 1) $N))) (empty))). Under Hyperon/LeaTTa the tuple ($K (range ...)) is evaluated as a cross-product, so the (empty) base case makes {$K}x{} empty and (range 1 5) yields nothing (verified: LeaTTa gives (collapse (range 1 5)) = empty). PeTTa unions the elements instead, so range streams 1..N",
   spaces_removeallatoms:
-    "prelude-in-&self mismatch (same class as the LeaTTa oracle's f1_imports): remove-all-atoms = (collapse (match &self $x (remove-atom &self $x))) and the test asserts (collapse (get-atoms &self)) = (). This build ships the prelude/stdlib INSIDE &self, so get-atoms &self returns the thousands of prelude atoms and a bare-variable match enumerates them all. The test assumes &self holds only the user's atoms (PeTTa keeps stdlib in a separate space); it needs a separate stdlib space, not a code fix",
+    "PeTTa's remove-all leaves an empty space; Hyperon 0.2.10 does not (verified 2026-08-02: remove-atom is exact, so a rule whose atom carries variables survives the bare-variable removal). The file now asserts the Hyperon-verified invariants and passes; it stays out of the PeTTa output comparison because PeTTa's answers differ by design. get-atoms &self itself enumerates the program's atoms only since the same date, matching Hyperon keeping its stdlib behind a separate space",
   // PeTTa execution-model features that Hyperon-faithful @metta-ts deliberately lacks. Each reason was
   // verified against the authority (the LeaTTa binary or the Hyperon stdlib), not assumed — see the
   // "ran cases triaged" section of bench/TODO-parity.md. Same nature as the entries above.
@@ -116,7 +116,7 @@ const BASE_EXCLUSIONS = {
   casenew:
     "PeTTa superpose-as-union: (superpose ((wu1) (wu2))) with (wu1)->(empty). Hyperon/LeaTTa cross-product the tuple, so the empty element makes the whole superpose empty (@metta-ts returns empty, Hyperon-faithful). Same class as mettaset/metta4_streams",
   types_nondet:
-    "PeTTa overloaded-function dispatch: with (: f (-> Type1 Type1)) and (: f (-> Type2 Type2)), (f T1in) is (Error (f T1in) (BadArgType 1 Type2 Type1)) in BOTH @metta-ts and the LeaTTa binary (verified). PeTTa's T1out is PeTTa-only",
+    "PeTTa overloaded-function dispatch: with (: f (-> Type1 Type1)) and (: f (-> Type2 Type2)), Hyperon 0.2.10 answers (f T1in) with T1out (verified 2026-08-02, both single-file and split across an import) and then halts on (f T2in) with a BadArgType inside the body's ==. @metta-ts registers the FIRST signature (both load paths), so (f T1in) is T1out matching Hyperon, but (f T2in) errors at the call instead of inside the body and T2out/Tdefault differ from PeTTa. The LeaTTa binary rejects (f T1in) outright (it checks every declared signature conjunctively), which diverges from Hyperon here; full any-signature-admits typing is tracked separately",
   library:
     "imports lib_roman (cons-lists + =-unification) and tests cons-list map-flat — PeTTa-only matching",
   holbenchmark: "PeTTa cons-list matching: (= (map-flat $f (cons $x $xs)) ...) over a flat tuple",

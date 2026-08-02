@@ -23,7 +23,7 @@ import {
   type RunOptions,
 } from "@mettascript/core";
 import type { HostInterop } from "@mettascript/core/host";
-import { readImports } from "./file-imports";
+import { importRootPragma, readImports } from "./file-imports";
 
 // Deep effectful MeTTa recursion can exceed V8's default call stack. Re-exec once with a larger stack,
 // matching the reference interpreter's iterative driver. Set METTA_TS_STACK to skip (e.g. when embedding).
@@ -64,10 +64,11 @@ async function runToBuffer(
   fuel: number | undefined,
   opts: RunOptions | undefined,
   includeNonBang: boolean,
+  importRoot?: string,
 ): Promise<string> {
   const src = readFileSync(file, "utf8");
   const fileDir = dirname(resolve(file));
-  const imports = readImports(src, fileDir, dirname(fileDir));
+  const imports = readImports(src, fileDir, importRoot ?? cliFileImportRoot(src, fileDir));
   const buf: string[] = [];
   const prevOut = setOutputSink((line) => buf.push(line + "\n"));
   const prevRaw = setRawSink((text) => buf.push(text));
@@ -124,6 +125,7 @@ async function runInteropToBuffer(
   fuel: number | undefined,
   opts: RunOptions | undefined,
   modes: { readonly py: boolean; readonly prolog: boolean },
+  importRoot?: string,
 ): Promise<string> {
   const [{ composeHostInterops }, { runSourceAsync }] = await Promise.all([
     import("@mettascript/core/host"),
@@ -206,7 +208,7 @@ async function runInteropToBuffer(
       host.prelude === undefined ? src : `${host.prelude}\n${src}`,
       new Map(host.asyncOps ?? []),
       fuel,
-      readImports(src, fileDir, dirname(fileDir)),
+      readImports(src, fileDir, importRoot ?? cliFileImportRoot(src, fileDir)),
       {
         ...(opts ?? {}),
         ...(host.hostImport !== undefined ? { hostImport: host.hostImport } : {}),
@@ -219,6 +221,14 @@ async function runInteropToBuffer(
     setRawSink(prevRaw);
     await host.dispose?.();
   }
+}
+
+/** The root a program's own `!(pragma! import-root ...)` declares (resolved against the entry file's
+ *  directory), falling back to the default one-above-the-file root. A `--import-root` flag overrides
+ *  both: the operator's word beats the program's. */
+function cliFileImportRoot(src: string, fileDir: string): string {
+  const declared = importRootPragma(src);
+  return declared === undefined ? dirname(fileDir) : resolve(fileDir, declared);
 }
 
 /** The `metta run` / `metta-ts` runner. `argv` is the argument list after the runner is selected (for
@@ -235,6 +245,7 @@ export async function runCliMain(argv: string[], prog = "metta run"): Promise<vo
     options: {
       "max-steps": { type: "string" },
       "max-stack-depth": { type: "string" },
+      "import-root": { type: "string" },
       "hash-cons": { type: "boolean" },
       "flat-atomspace": { type: "boolean" },
       check: { type: "boolean" },
@@ -248,7 +259,7 @@ export async function runCliMain(argv: string[], prog = "metta run"): Promise<vo
   const file = positionals[0];
   if (file === undefined) {
     process.stderr.write(
-      `usage: ${prog} [--check [--json] [--undefined-symbols]] [--py] [--prolog] [--conformance] [--max-steps=N] [--max-stack-depth=N] [--hash-cons] <file.metta>\n`,
+      `usage: ${prog} [--check [--json] [--undefined-symbols]] [--py] [--prolog] [--conformance] [--max-steps=N] [--max-stack-depth=N] [--import-root=DIR] [--hash-cons] <file.metta>\n`,
     );
     process.exit(2);
   }
@@ -267,6 +278,11 @@ export async function runCliMain(argv: string[], prog = "metta run"): Promise<vo
     process.exit(exitCode);
   }
   const maxSteps = values["max-steps"] !== undefined ? Number(values["max-steps"]) : undefined;
+  // `import!` targets resolve against an import root: the entry file's grandparent directory unless the
+  // caller widens or narrows it here. A target outside the root fails to resolve, which the engine now
+  // reports as an error on the import.
+  const importRoot =
+    values["import-root"] !== undefined ? resolve(values["import-root"]) : undefined;
   const fuel = maxSteps !== undefined && maxSteps > DEFAULT_FUEL ? maxSteps : undefined;
   const maxStackDepth =
     values["max-stack-depth"] !== undefined ? Number(values["max-stack-depth"]) : undefined;
@@ -296,10 +312,16 @@ export async function runCliMain(argv: string[], prog = "metta run"): Promise<vo
   // Host interop evaluates asynchronously, so it takes its own path before the sync runner and its
   // big-stack reexec. These programs push the external work over IPC rather than deep MeTTa recursion.
   if (values.py === true || values.prolog === true) {
-    const output = await runInteropToBuffer(file, fuel, opts, {
-      py: values.py === true,
-      prolog: values.prolog === true,
-    });
+    const output = await runInteropToBuffer(
+      file,
+      fuel,
+      opts,
+      {
+        py: values.py === true,
+        prolog: values.prolog === true,
+      },
+      importRoot,
+    );
     process.stdout.write(output);
     return;
   }
@@ -308,11 +330,15 @@ export async function runCliMain(argv: string[], prog = "metta run"): Promise<vo
   // on a short run. Only a genuine stack overflow reexecs once with an 8 MB stack, re-running from the
   // buffered start so nothing prints twice.
   if (process.env.METTA_TS_STACK !== undefined) {
-    process.stdout.write(await runToBuffer(file, fuel, opts, values.conformance === true));
+    process.stdout.write(
+      await runToBuffer(file, fuel, opts, values.conformance === true, importRoot),
+    );
     return;
   }
   try {
-    process.stdout.write(await runToBuffer(file, fuel, opts, values.conformance === true));
+    process.stdout.write(
+      await runToBuffer(file, fuel, opts, values.conformance === true, importRoot),
+    );
   } catch (e) {
     if (!(e instanceof RangeError)) throw e;
     await reexecWithLargerStack();

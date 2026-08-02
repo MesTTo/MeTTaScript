@@ -5,7 +5,6 @@
 ;
 ; Adapted from PeTTa examples/tabling_fib.metta for MeTTa-TS (Hyperon) conventions.
 
-!(import! &self (library lib_tabling))
 
 !(tabled (fib $N))
 (= (fib $N)

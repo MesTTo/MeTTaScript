@@ -12,7 +12,7 @@ import { parseArgs } from "node:util";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DEFAULT_FUEL, format, setOutputSink, setRawSink } from "@mettascript/core";
-import { assembleQuery, explainCall } from "@mettascript/debug";
+import { assembleQuery, compareRuns, explainCall } from "@mettascript/debug";
 import { readImports } from "./file-imports";
 import { runSource } from "./source";
 
@@ -79,12 +79,22 @@ usage:
   ${prog} (--source '<metta>' | --file <path>) why '(<call>)' [--llm] [--max-steps N]
   ${prog} (--source '<metta>' | --file <path>) eval '(<expr>)' [--llm] [--max-steps N]
   ${prog} (--source '<metta>' | --file <path>) run [--llm] [--max-steps N]
+  ${prog} (--source '<metta>' | --file <path>) diff [--decline-kinds K,...] [--decline-functors F,...]
+                                                    [--context N] [--hunks N] [--substantive] [--llm] [--max-steps N]
 
 commands:
   why    run the call with the trace bus and report which grounded reducer fired, any higher-order
          specialization, any stack-overflow cut point, the reduction count, and the result.
   eval   evaluate one expression and print its result.
-  run    run the whole program and print each !-query's results.`;
+  run    run the whole program and print each !-query's results.
+  diff   run the program twice, once as-is and once with the named compiled holders declined, and report
+         the first trace event at which the two evaluations part company, plus both answers. This is how a
+         compiled/interpreted disagreement is localised: --decline-kinds names holder kinds (functional,
+         scalar, symbolic, imperative, rewrite, nondet, choiceUnion, pipeline), --decline-functors names
+         individual functions. Declining everything and getting a different answer means the compiler is
+         responsible; bisecting the list says which holder, and the trace says where. --substantive keeps
+         only the hunks where both runs did something and they still differ once fresh-variable numbering
+         is ignored, which drops the steps one run simply takes and the other does not.`;
 }
 
 /** The `metta debug` / `metta-debug` command. `argv` is the argument list after the debugger is selected.
@@ -97,6 +107,11 @@ export function runDebugMain(argv: string[], prog = "metta debug"): void {
       source: { type: "string" },
       file: { type: "string" },
       "max-steps": { type: "string" },
+      "decline-kinds": { type: "string" },
+      "decline-functors": { type: "string" },
+      context: { type: "string" },
+      hunks: { type: "string" },
+      substantive: { type: "boolean", default: false },
       llm: { type: "boolean", default: false },
       help: { type: "boolean", default: false },
     },
@@ -129,6 +144,56 @@ export function runDebugMain(argv: string[], prog = "metta debug"): void {
     const expr = positionals[1];
     if (expr === undefined) throw new Error(`usage: ${prog} eval '(<expr>)'`);
     emit(llm, { result: runQuery(loaded, expr, maxSteps).result });
+    return;
+  }
+  if (cmd === "diff") {
+    const list = (v: string | undefined): string[] =>
+      v === undefined || v === "" ? [] : v.split(",").map((x) => x.trim());
+    const kinds = list(values["decline-kinds"]);
+    const functors = list(values["decline-functors"]);
+    if (kinds.length === 0 && functors.length === 0)
+      throw new Error(
+        `usage: ${prog} diff --decline-kinds <kinds> | --decline-functors <functors>`,
+      );
+    setOutputSink(() => {});
+    setRawSink(() => {});
+    const imports = readImports(loaded.src, loaded.baseDir, dirname(loaded.baseDir));
+    const fuel = maxSteps !== undefined && maxSteps > DEFAULT_FUEL ? maxSteps : undefined;
+    const base = maxSteps === undefined ? {} : { maxSteps };
+    const cmp = compareRuns(
+      runSource,
+      loaded.src,
+      { fuel, imports, runOptions: base },
+      { fuel, imports, runOptions: { ...base, declineCompiled: { kinds, functors } } },
+      values.context === undefined ? 6 : Number(values.context),
+    );
+    const shown = values.hunks === undefined ? 3 : Number(values.hunks);
+    emit(llm, {
+      declining: { kinds, functors },
+      sameResult: cmp.sameResult,
+      hunkCount: cmp.hunks.length,
+      events: { asIs: cmp.leftEvents, declined: cmp.rightEvents },
+      sharedTail: cmp.sharedTail,
+      queriesThatDiffer: cmp.queryDiffs.length,
+      firstDifferingQuery: cmp.queryDiffs
+        .slice(0, 2)
+        .map(
+          (q) =>
+            `#${q.index} ${q.query}\n  as-is:    ${q.left.join(" | ")}\n  declined: ${q.right.join(" | ")}`,
+        ),
+      substantiveHunks: cmp.hunks.filter((h) => h.substantive).length,
+      hunks: (values.substantive === true ? cmp.hunks.filter((h) => h.substantive) : cmp.hunks)
+        .slice(0, shown)
+        .map((h) =>
+          [
+            `@ as-is ${h.leftAt}, declined ${h.rightAt}`,
+            ...h.left.map((x) => `  as-is only: ${x}`),
+            ...h.right.map((x) => `  declined only: ${x}`),
+          ].join("\n"),
+        ),
+      asIsResult: cmp.leftResult,
+      declinedResult: cmp.rightResult,
+    });
     return;
   }
   if (cmd === "run") {

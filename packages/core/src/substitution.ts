@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 // First-order substitution, a faithful port of LeaTTa `Core/Substitution.lean`.
-import { type Atom, variable } from "./atom";
+import { type Atom, expr, variable } from "./atom";
 
 /** A substitution: an association list of variable name to atom. */
 export type Subst = ReadonlyArray<readonly [string, Atom]>;
@@ -50,7 +50,9 @@ export function applySubst(s: Subst, a: Atom): Atom {
           items.push(r);
         }
       }
-      return items === null ? a : { ...a, items };
+      // Rebuild through `expr()`, never `{ ...a, items }`. The spread carries the old node's derived fields, its
+      // `ground` flag and its memoised variable list, onto a node whose children just changed.
+      return items === null ? a : expr(items);
     }
     default:
       return a;

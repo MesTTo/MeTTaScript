@@ -25,6 +25,58 @@ function answers(src: string, conjNested: boolean): Atom[] {
   );
 }
 
+// A space is a multiset, so a repeated atom answers repeatedly. MOPS page 12 enumerates Transform over the
+// knowledge base's occurrences (`k = {K1[t1]..Kn[tn]}` yields `{K1[uσ1]} ++ .. ++ {Kn[uσn]}`), and hyperon
+// 0.2.10 agrees: with `(p a)` and `(q a)` each stored twice it answers `(a a a a)` for the conjunction as
+// well as for the nested loop. The WCO join indexes each relation into a trie keyed by value, which is a
+// SET, so a goal whose candidates repeat has to stay off it. This pinned the wrong answer `(a)` before
+// `splitConjGoals` learned to decline a repeating goal, and neither differential above could see it: they
+// compare conjNested on against off, and an explicit `(, …)` reaches the same join either way.
+describe("a repeated atom answers repeatedly", () => {
+  const collapse = (space: string, body: string) =>
+    runProgram(`${space}\n!(collapse ${body})`, 1_000_000, new Map(), {})
+      .flatMap((r) => r.results)
+      .map(format)
+      .join();
+
+  it("matches hyperon on duplicate facts, for every query form", () => {
+    const one = "(p a)\n(p a)";
+    expect(collapse(one, "(match &self (p $x) $x)")).toBe("(a a)");
+    expect(collapse(`${one}\n(q a)`, "(match &self (p $x) (match &self (q $x) $x))")).toBe("(a a)");
+    expect(collapse(`${one}\n(q a)`, "(match &self (, (p $x) (q $x)) $x)")).toBe("(a a)");
+
+    const both = "(p a)\n(p a)\n(q a)\n(q a)";
+    expect(collapse(both, "(match &self (p $x) (match &self (q $x) $x))")).toBe("(a a a a)");
+    expect(collapse(both, "(match &self (, (p $x) (q $x)) $x)")).toBe("(a a a a)");
+  });
+
+  it("keeps the nested and conjunctive forms agreeing on multiplicity", () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.tuple(fc.integer({ min: 0, max: 2 }), fc.integer({ min: 0, max: 2 })), {
+          minLength: 1,
+          maxLength: 6,
+        }),
+        fc.array(fc.tuple(fc.integer({ min: 0, max: 2 }), fc.integer({ min: 0, max: 2 })), {
+          minLength: 1,
+          maxLength: 6,
+        }),
+        (ps, qs) => {
+          const space = [
+            ...ps.map(([k, v]) => `(p k${k} v${v})`),
+            ...qs.map(([k, v]) => `(q k${k} v${v})`),
+          ].join("\n");
+          const nested = collapse(space, "(match &self (p $k $v) (match &self (q $k $v) ($k $v)))");
+          const conj = collapse(space, "(match &self (, (p $k $v) (q $k $v)) ($k $v))");
+          const bag = (s: string) => (s.match(/\([^()]*\)/g) ?? []).sort().join("");
+          expect(bag(conj), space).toEqual(bag(nested));
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+});
+
 // The flag-on results must be byte-identical to the flag-off reference, in order.
 function sameBothWays(src: string): void {
   const off = answers(src, false).map(format);
