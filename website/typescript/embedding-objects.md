@@ -5,49 +5,51 @@ SPDX-License-Identifier: MIT
 
 # Embedding TypeScript objects
 
-In the Python bindings you reach for `py-atom` to put a Python object into the atomspace across the FFI. Here there is no FFI: the engine is TypeScript, so a TypeScript object can be a grounded atom directly. This is the analogue of `py-atom`, `py-list`, and `py-dict`, but without any boundary to cross.
+In the Python bindings you reach for `py-atom` to carry a Python object across the FFI into the atomspace. Here there is no FFI to cross. The engine is TypeScript, so a TypeScript object simply _is_ an atom, and the object you put in is the object you get back, the same reference, not a copy and not a serialisation.
 
-## A value as an atom
+## An object as an atom
 
-`ValueAtom` wraps any TypeScript value as a grounded atom. Primitives become MeTTa primitives; anything else (an object, a `Map`, a class instance) rides as an opaque grounded value:
+`ValueAtom` wraps any TypeScript value. Primitives become MeTTa primitives; anything else rides along as an opaque grounded value:
 
-```ts
-import { MeTTa, S, E, ValueAtom, type GroundedAtom, type Atom } from "@mettascript/hyperon";
+```ts twoslash
+import { MeTTa, S, E, ValueAtom, type Atom, type GroundedAtom } from "@mettascript/hyperon";
 
 const metta = new MeTTa();
-const account = { owner: "Tom", balance: 100 }; // a plain TS object
+const account = { owner: "Tom", balance: 100 };
 
 metta.registerOperation("balance-of", (args: Atom[]) => [
   ValueAtom((args[0] as GroundedAtom).jsValue<{ balance: number }>().balance),
 ]);
 
-// pass the object straight into a query
-const accAtom = ValueAtom(account);
-console.log(metta.evaluateAtom(E(S("balance-of"), accAtom)).map(String)); // [ '100' ]
+console.log(metta.evaluateAtom(E(S("balance-of"), ValueAtom(account))).map(String)); // [ '100' ]
 ```
 
-`jsValue<T>()` gives you the object back, typed. The object is the same reference you put in, not a copy or a serialization.
+`jsValue<T>()` hands the object back, typed. A class instance, a `Map`, a DOM node, a database handle: all of them travel this way, because none of them has to be turned into anything else first.
 
-## Storing objects in the space
+## Keeping objects in the space
 
-A grounded object is an atom like any other, so it can live in the space and be retrieved by a query:
+A grounded object is an atom, so it can live in the space and come back out of a query:
 
-```ts
+```ts twoslash
 import { MeTTa, S, E, V, ValueAtom, type GroundedAtom } from "@mettascript/hyperon";
 
 const metta = new MeTTa();
 metta.space().addAtom(E(S("account"), S("tom"), ValueAtom({ owner: "Tom", balance: 100 })));
 
 const set = metta.space().query(E(S("account"), S("tom"), V("a")));
-const obj = (set.frames[0]!.resolve(V("a")) as GroundedAtom).jsValue<{ balance: number }>();
-console.log(obj.balance); // 100
+const found = (set.frames[0]!.resolve(V("a")) as GroundedAtom).jsValue<{ balance: number }>();
+console.log(found.balance); // 100
 ```
 
-## Custom unification
+You now have a knowledge base whose facts point at live objects. The rules reason about the symbols; the objects stay whole.
 
-An embedded object is opaque to the matcher by default: it unifies by equality, not by its fields. If you want the engine to match _into_ a TypeScript type, subclass `MatchableObject` and override `match_`. The core matcher will call it. For example, a `Range` that matches any integer within its bounds:
+## Matching into a type
 
-```ts
+By default an embedded object is opaque to the matcher: it unifies by equality and nothing more. Sometimes you want the engine to look _inside_, so that a range matches any number within it.
+
+Subclass `MatchableObject` and override `match_`. The matcher calls it, and you answer with one empty binding for "yes" or no bindings at all for "no":
+
+```ts twoslash
 import { G, MatchableObject, type Atom, type GroundedAtom } from "@mettascript/hyperon";
 import { gint, matchAtoms } from "@mettascript/core";
 
@@ -65,10 +67,13 @@ class Range extends MatchableObject {
 }
 
 const range = G(new Range(1, 10));
-matchAtoms(range.catom, gint(5)).length; // 1: matches
-matchAtoms(range.catom, gint(20)).length; // 0: does not
+console.log(matchAtoms(range.catom, gint(5)).length); // 1: inside the range, so it matches
+console.log(matchAtoms(range.catom, gint(20)).length); // 0: outside, so it does not
 ```
 
-Return one (empty) binding to signal a match, or none to signal no match. This is the same hook the standard library's grounded values use for custom matching.
+This is the same hook the standard library's own grounded values use. It lets a TypeScript type participate in unification as a pattern rather than as an opaque value.
 
-Next: do real I/O from MeTTa with **[Async MeTTa](/typescript/async)**.
+## Where to go next
+
+- [Async MeTTa](/typescript/async) is what you need once an operation has to await.
+- [The space, as a collection](/edsl/spaces) reads the space from TypeScript with far less ceremony.

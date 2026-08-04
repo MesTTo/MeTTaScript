@@ -1,6 +1,6 @@
 {
   "name": "@mettascript/grapher",
-  "version": "3.1.2",
+  "version": "3.2.0",
   "author": "MesTTo",
   "license": "MIT",
   "description": "MeTTa visual editor and reduction renderer for browser and Node.js, with node-graph and nested-block views.",
@@ -27,18 +27,30 @@
       "types": "./dist/node.d.ts",
       "default": "./dist/node.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./element": {
+      "types": "./dist/element.d.ts",
+      "default": "./dist/element.js"
+    },
+    "./embed": {
+      "types": "./dist/embed.d.ts",
+      "default": "./dist/embed.js"
+    },
+    "./gifenc-types": {
+      "types": "./gifenc-types.d.ts"
+    }
   },
   "files": [
     "dist",
-    "LLMS.md"
+    "LLMS.md",
+    "gifenc-types.d.ts"
   ],
   "engines": {
     "node": ">=20"
   },
   "sideEffects": false,
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts --clean --platform browser && tsup src/node.ts --format esm --dts --platform node"
+    "build": "tsup src/index.ts src/element.ts src/embed.ts --format esm --dts --clean --platform browser && tsup src/embed.ts --format iife --global-name MeTTaGrapherEmbed --minify --platform browser && tsup src/node.ts --format esm --dts --platform node"
   },
   "dependencies": {
     "@mettascript/hyperon": "workspace:*"

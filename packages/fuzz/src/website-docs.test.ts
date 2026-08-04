@@ -75,6 +75,18 @@ describe.each(pages)("%s", (page, firstSectionOnly) => {
     const all = outcomes.join("\n");
     for (const field of documentedFields(text))
       expect(all, `the page prints ${field}`).toContain(field);
+
+    // A whole printed answer, `[done]` or `[120]`, is the CLI's own output format and the most literal
+    // claim a page makes. Every one of those has to be an answer some query actually produced. The Fuzz
+    // checks above only reach outcomes shaped like `(FuzzPassed (Property ...))`, so a page could print
+    // any other result wrongly and nothing noticed.
+    const answers = new Set(printed(metta.join("\n")).map((result) => result.join(", ")));
+    for (const block of markdownBlocks(text, "text"))
+      for (const line of block.split("\n")) {
+        const whole = /^\[([^[\]]*)\]$/.exec(line.trim());
+        if (whole === null) continue;
+        expect(answers, `the page prints ${line.trim()} as an answer`).toContain(whole[1]!);
+      }
   });
 
   it("names only operations the library actually has", () => {

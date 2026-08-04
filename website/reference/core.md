@@ -13,7 +13,7 @@ npm install @mettascript/core
 
 ## Running programs
 
-```ts
+```ts signatures
 function runProgram(
   src: string,
   fuel?: number,
@@ -24,7 +24,7 @@ function runProgram(
 
 Parse and evaluate a MeTTa source string. Non-bang atoms are added to the knowledge base; each `!`-query is evaluated. Returns one `QueryResult` per `!`-query, in order. `fuel` bounds evaluation steps (default 100000). `imports` backs `import!` (pre-read by the caller). `opts` is a `RunOptions` bag that toggles tabling, the experimental interpreter flags such as `flatAtomspace`, the initial `maxStackDepth`, and the optional execution trace sink.
 
-```ts
+```ts signatures
 function runProgramAsync(
   src: string,
   asyncOps?: Map<string, AsyncGroundFn>,
@@ -36,7 +36,7 @@ function runProgramAsync(
 
 Like `runProgram`, but `!`-queries are awaited so async grounded operations (passed in `asyncOps`) can do I/O. A program with no async operations gives identical results to `runProgram`. `opts` is the same `RunOptions` bag used by the sync runner.
 
-```ts
+```ts signatures
 interface QueryResult {
   readonly query: Atom; // the !-query atom
   readonly results: Atom[]; // its (nondeterministic) results
@@ -55,7 +55,7 @@ function collectImports(src: string): string[]; // import! targets referenced by
 
 ### Execution trace
 
-```ts
+```ts signatures
 type TraceSink = (event: TraceEvent) => void;
 type TraceEvent =
   | { readonly kind: "reduce"; readonly atom: string }
@@ -68,7 +68,7 @@ Pass `trace` in `RunOptions` to collect internal evaluator decisions. The runner
 
 ## Parsing and formatting
 
-```ts
+```ts signatures
 function parse(src: string, tk: Tokenizer): Atom | undefined; // the first atom
 function parseAll(src: string, tk: Tokenizer): TopAtom[]; // every top-level atom, each with its bang flag
 function format(a: Atom): string; // render an atom as MeTTa text
@@ -88,14 +88,14 @@ interface TopAtom {
 
 An `Atom` is a discriminated union of four kinds:
 
-```ts
+```ts signatures
 type Atom = SymAtom | VarAtom | ExprAtom | GndAtom;
 type MetaType = "Symbol" | "Variable" | "Expression" | "Grounded";
 ```
 
 Constructors:
 
-```ts
+```ts signatures
 function sym(name: string): SymAtom;
 function variable(name: string): VarAtom;
 function expr(items: readonly Atom[]): ExprAtom;
@@ -110,7 +110,7 @@ const emptyExpr: ExprAtom;
 
 A grounded atom carries a `Ground` value plus an optional type, an optional `exec` (makes it callable as an operation), and an optional `match` (custom unification):
 
-```ts
+```ts signatures
 type GroundedExec = (args: readonly Atom[]) => readonly Atom[] | Promise<readonly Atom[]>;
 type GroundedMatch = (other: Atom) => readonly unknown[];
 function groundType(v: Ground): Atom; // the default type of a ground value
@@ -119,7 +119,7 @@ function groundEq(a: Ground, b: Ground): boolean;
 
 Inspection:
 
-```ts
+```ts signatures
 function metaType(a: Atom): MetaType
 function atomEq(a: Atom, b: Atom): boolean       // structural equality
 function atomSize(a: Atom): number               // node count
@@ -130,7 +130,7 @@ const isExpr, isVar, isSym, isGnd: (a: Atom) => a is ...  // type guards
 
 ## Matching and unification
 
-```ts
+```ts signatures
 function matchAtoms(l: Atom, r: Atom): Bindings[]; // every way l matches r
 function matchAtomsWith(custom: GroundMatcher | undefined, l: Atom, r: Atom): Bindings[];
 function unifyTop(a: Atom, b: Atom): Subst | null; // most general unifier, or null
@@ -143,7 +143,7 @@ type GroundMatcher = (left: Atom, right: Atom) => Bindings[];
 
 `Bindings` is an immutable frame of variable associations; a match returns a list of frames (nondeterminism):
 
-```ts
+```ts signatures
 type Bindings = readonly BindingRel[];
 const emptyBindings: Bindings;
 function lookupVal(b: Bindings, x: string): Atom | undefined;
@@ -156,7 +156,7 @@ function bindingsToSubst(b: Bindings): Subst;
 
 A `Subst` is the simpler variable-to-atom substitution used by unification:
 
-```ts
+```ts signatures
 type Subst = ReadonlyArray<readonly [string, Atom]>;
 function applySubst(s: Subst, a: Atom): Atom;
 function extendSubst(s: Subst, x: string, a: Atom): Subst;
@@ -167,7 +167,7 @@ function lookupSubst(s: Subst, x: string): Atom | undefined;
 
 A grounded operation returns a `ReduceResult`:
 
-```ts
+```ts signatures
 type ReduceResult =
   | { tag: "ok"; results: Atom[] }
   | { tag: "noReduce" }
@@ -187,7 +187,7 @@ class AsyncInSyncError extends Error     // thrown if a sync run reaches an asyn
 
 For incremental evaluation below `runProgram`, build an environment and evaluate atoms directly:
 
-```ts
+```ts signatures
 function buildEnv(atoms: Atom[], gt: GroundingTable): MinEnv;
 function emptyEnv(gt: GroundingTable): MinEnv;
 function addAtomToEnv(env: MinEnv, x: Atom): void; // index one atom (rules, types, clause index)
@@ -207,7 +207,7 @@ function getTypes(env: MinEnv, a: Atom): Atom[];
 
 ## Spaces
 
-```ts
+```ts signatures
 interface Space { /* add, remove, atoms, query, ... */ }
 class InMemorySpace implements Space
 ```
@@ -218,7 +218,7 @@ The program runner uses indexed static atoms plus a compact runtime `&self` stor
 
 ## Standard library and modules
 
-```ts
+```ts signatures
 function preludeAtoms(): Atom[]; // the prelude (cached)
 function stdlibAtoms(): Atom[]; // the standard library, always loaded (cached)
 function builtinModules(): Map<string, Atom[]>; // opt-in modules, e.g. "concurrency"
@@ -231,7 +231,7 @@ const CONCURRENCY_MODULE_SRC: string;
 
 For large, mostly-ground knowledge bases, `FlatKB` stores atoms as interned `Int32` tokens:
 
-```ts
+```ts signatures
 class FlatKB {
   readonly interner: Interner;
   add(a: Atom): void;
@@ -261,7 +261,7 @@ const TAG_ARITY, TAG_SYMBOL, TAG_NEWVAR, TAG_VARREF: number;
 
 ### Frequent-subpattern mining
 
-```ts
+```ts signatures
 function williamTopK(kb: FlatKB, k: number, refCost?: number): HeavyPattern[];
 interface HeavyPattern {
   pattern: Atom;

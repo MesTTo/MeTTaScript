@@ -6,3 +6,9 @@ packages:
 allowBuilds:
   esbuild: true
   protobufjs: true
+
+# One Vue for the whole site. VitePress and floating-vue (the hover UI twoslash renders through) both
+# accept the same range, but pnpm resolved them to separate copies, and floating-vue rendered against the
+# wrong one: "Cannot destructure property 'popperId' of 'undefined'" on every hover in the static render.
+overrides:
+  vue: 3.5.40

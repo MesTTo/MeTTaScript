@@ -15,7 +15,7 @@ npm install @mettascript/libraries
 
 ## API
 
-```ts
+```ts signatures
 function registerLibraries(): void;
 const LIBRARY_MODULE_SRCS: Readonly<Record<string, string>>;
 ```
@@ -24,13 +24,13 @@ const LIBRARY_MODULE_SRCS: Readonly<Record<string, string>>;
 
 The package registers itself as a side effect when imported:
 
-```ts
+```ts twoslash
 import "@mettascript/libraries";
 ```
 
 You can also call the function explicitly:
 
-```ts
+```ts twoslash
 import { registerLibraries } from "@mettascript/libraries";
 
 registerLibraries();
@@ -53,7 +53,7 @@ See [Standard libraries](/learn/standard-libraries) for worked MeTTa examples fo
 
 ## Example
 
-```ts
+```ts twoslash
 import { format, runProgram } from "@mettascript/core";
 import { registerLibraries } from "@mettascript/libraries";
 

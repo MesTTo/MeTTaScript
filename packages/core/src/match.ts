@@ -191,6 +191,28 @@ export function merge(a: Bindings, b: Bindings, seen?: ReconcileSeen): Bindings[
 // would grow this table forever for an ~always-miss rate.
 const matchExprCache = new WeakMap<Atom, WeakMap<Atom, Bindings[]>>();
 
+/** Sound, allocation-free proof that two atoms cannot unify: a position where both sides hold symbols or
+ *  plain grounded values that differ, or expressions of different arity. Variables are wildcards, and so is
+ *  a grounded value carrying its own matcher, which may accept a term it is not equal to. Mirrors the kind
+ *  dispatch in `matchAtomsWith` below, so `true` means that function must return no bindings.
+ *
+ *  This is what keeps a large `match` cheap. A scan is almost all failures: one keyed answer among a million
+ *  facts. Without the check each failure binds the head variable, allocates a frame, merges it, and then
+ *  writes the empty result into `matchExprCache` — a million insertions nothing ever reads, which is where
+ *  the scan's time and most of its garbage went. The established precedent is `canMatchShallow` in eval.ts,
+ *  which does the same for rule application but compares only arity and the head. */
+function cannotMatch(l: Atom, r: Atom): boolean {
+  if (l.kind === "var" || r.kind === "var") return false;
+  // `matchAtomsWith` consults the LEFT ground's matcher and never the right one, so mirror that order.
+  if (l.kind === "gnd") return l.match === undefined && !atomEq(l, r);
+  if (r.kind === "gnd") return r.match === undefined && !atomEq(r, l);
+  if (l.kind === "sym") return r.kind !== "sym" || l.name !== r.name;
+  if (r.kind !== "expr" || r.items.length !== l.items.length) return true;
+  for (let i = 0; i < l.items.length; i++)
+    if (cannotMatch(l.items[i] as Atom, r.items[i] as Atom)) return true;
+  return false;
+}
+
 /** Match atoms in the official left/right style (LeaTTa `matchAtomsWith`). `leftSuffix` (default empty)
  *  scopes the LEFT atom's variables: a left variable `$x` is treated as `$x<suffix>`, so a rule LHS can be
  *  matched without first cloning it with freshened variables. */
@@ -217,6 +239,10 @@ export function matchAtomsWith(
       const cached = matchExprCache.get(l)?.get(r);
       if (cached !== undefined) return cached;
     }
+    // After the cache probe, so a repeated pair keeps its hit, and before anything allocates. A provably
+    // impossible pair is deliberately not memoised: re-deriving it costs one early-exiting walk, whereas
+    // caching every failure of a million-fact scan is what filled the table.
+    if (custom === undefined && cannotMatch(l, r)) return [];
     const result = matchAll(custom, [emptyBindings], l.items, r.items, leftSuffix);
     if (cacheable) {
       let inner = matchExprCache.get(l);

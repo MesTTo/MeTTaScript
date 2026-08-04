@@ -257,9 +257,11 @@ A corpus file that cannot be read stops the run with exit code 2. Quietly skippi
 
 Results are atoms, so you can work with them in MeTTa. If you are driving from TypeScript, the package hands you a typed view:
 
-```ts
+```ts twoslash
+import { runProgram } from "@mettascript/core";
 import { decodeFuzzOutcome, exitCodeForOutcomes, renderOutcomeLine } from "@mettascript/fuzz";
-
+const resultAtom = runProgram("!(+ 1 2)").at(-1)!.results[0]!;
+// ---cut---
 const outcome = decodeFuzzOutcome(resultAtom);
 if (outcome.kind === "failed") console.log(renderOutcomeLine(outcome));
 process.exit(exitCodeForOutcomes([outcome]));

@@ -13,7 +13,7 @@ npm install @mettascript/edsl
 
 ## A first taste
 
-```ts
+```ts twoslash
 import { mettaDB, names, vars, If, gt, mul, sub } from "@mettascript/edsl";
 
 const db = mettaDB();
@@ -32,7 +32,7 @@ db.evalJs(fact(5)); // [120]
 
 The shortest spelling of a term is an array. `[parent, Tom, Bob]` is `(parent Tom Bob)`, nesting is free, and a program is therefore data you build with ordinary array code.
 
-```ts
+```ts twoslash
 import { mettaDB, names, vars } from "@mettascript/edsl";
 
 const db2 = mettaDB();
@@ -49,7 +49,7 @@ MeTTa has no array type of its own: `(1 2 3)` is an expression, so reading a Jav
 
 `names()` returns a proxy that mints a symbol or functor per property, and `vars()` one that mints a fresh logic variable per property. A bare name grounds to its symbol; a called name applies it. Destructure what you use.
 
-```ts
+```ts twoslash
 import { names, vars, rule, e } from "@mettascript/edsl";
 
 const { swap, check, Pair } = names();
@@ -65,7 +65,7 @@ Type a variable's unwrapped value with `vars<{ x: number }>()`. The special form
 
 `m\`...\``is the general escape hatch. It runs the real parser, so it expresses every MeTTa form, and`${value}` interpolations are auto-grounded:
 
-```ts
+```ts twoslash
 import { mettaDB, m } from "@mettascript/edsl";
 const db = mettaDB();
 db.add(m`(= (gp $x $z) (match &self (parent $x $y) (match &self (parent $y $z) $z)))`);
@@ -75,7 +75,7 @@ db.add(m`(= (gp $x $z) (match &self (parent $x $y) (match &self (parent $y $z) $
 
 Any value that is not already an atom is grounded automatically, by every builder and by template interpolation. A grounded function bridges the other way with `db.fn`: arguments are auto-unwrapped to JS and the result auto-grounded, so a plain typed function is all you write.
 
-```ts
+```ts twoslash
 import { mettaDB, names, m } from "@mettascript/edsl";
 
 const db = mettaDB();
@@ -96,7 +96,7 @@ Use `db.fns({ ... })` to register several at once, `db.asyncFn` for I/O, and the
 - `query(pattern)` does `match &self` over stored atoms and returns binding rows (keys inferred from the pattern, or typed by an explicit `vars` map).
 - `eval(atom)` rewrites with the `=` rules and returns the (nondeterministic) result atoms. `evalJs` unwraps each to a JavaScript value.
 
-```ts
+```ts twoslash
 import { mettaDB, names, vars } from "@mettascript/edsl";
 
 const db = mettaDB();
@@ -110,7 +110,13 @@ db.query(Likes(Ada, thing)); // [{ thing: "Coffee" }, { thing: "Chocolate" }]
 
 `db.call.<name>(...)` evaluates `(<name> ...args)` and returns each result unwrapped to JS; bracket access handles hyphenated names. `db.import("name")` returns a callable.
 
-```ts
+```ts twoslash
+import { mettaDB, names, vars, If, gt, mul, sub } from "@mettascript/edsl";
+const db = mettaDB();
+const { fact } = names();
+const { x } = vars();
+db.rule(fact(x), If(gt(x, 0), mul(x, fact(sub(x, 1))), 1));
+// ---cut---
 db.call.fact(5); // [120]
 db.call["is-even"](4); // hyphenated names
 const factorial = db.import("fact"); // a callable
@@ -120,7 +126,9 @@ const factorial = db.import("fact"); // a callable
 
 Pass a schema to `mettaDB` and `call`, `import`, and `fn` become statically typed; with no schema they stay permissive. Both an `interface` and a `type` schema work.
 
-```ts
+```ts twoslash
+import { mettaDB } from "@mettascript/edsl";
+// ---cut---
 interface Api {
   fact: (n: number) => number;
   isEven: (n: number) => boolean;
@@ -135,7 +143,10 @@ db.fn("fact", (n: number) => n + 1); // checked against the schema
 
 `db.q("...")` runs `match &self` from a plain source string and types the result rows by the pattern's `$`-variables, extracted at compile time. The keys are known and autocompleted, and a key that is not a variable in the source is a compile error.
 
-```ts
+```ts twoslash
+import { mettaDB } from "@mettascript/edsl";
+const db = mettaDB();
+// ---cut---
 const rows = db.q("(Likes Ada $thing)"); // Array<{ thing: unknown }>
 rows[0]!.thing; // ok, autocompleted
 ```
@@ -146,7 +157,9 @@ This types the variable structure, not the result values (those come from runtim
 
 `db.useJson()` enables the JSON module, then the `jsonEncode`/`jsonDecode`/`dictSpace`/`getKeys`/`getValue` builders bridge JSON and MeTTa spaces. `json-decode` turns a JSON object into a dict-space of `(key value)` pairs, so a fetched payload becomes a queryable space.
 
-```ts
+```ts twoslash
+import { mettaDB, jsonEncode, jsonDecode, getValue } from "@mettascript/edsl";
+// ---cut---
 const db = mettaDB().useJson();
 db.evalJs(jsonEncode(42)); // ["42"]
 const doc = jsonDecode('{"name": "Ada", "age": 36}'); // a dict-space
@@ -159,7 +172,7 @@ The eDSL has helper subpaths for Python and Prolog host interop. They only
 construct atoms. The runtime still has to be registered explicitly through
 `@mettascript/py`, `@mettascript/prolog`, a CLI flag, or a browser host runner.
 
-```ts
+```ts twoslash
 import { vars } from "@mettascript/edsl";
 import { pyCall } from "@mettascript/edsl/py";
 import { prologCall, importPrologFunction } from "@mettascript/edsl/prolog";

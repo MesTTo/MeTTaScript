@@ -24,7 +24,7 @@ npm install @mettascript/prolog
 
 Then register the Node adapter:
 
-```ts
+```ts twoslash
 import { MeTTa } from "@mettascript/hyperon";
 import { registerPrologInterop } from "@mettascript/prolog";
 import { swiPrologBridge } from "@mettascript/prolog/swi-node";
@@ -62,7 +62,7 @@ Use `@mettascript/prolog/swi-wasm` when Prolog should run in the browser. The ro
 package stays runtime-agnostic, and the WASM runtime is only pulled in when you
 import the SWI-WASM subpath.
 
-```ts
+```ts twoslash
 import { createBrowserRunner, createBrowserTextLoader } from "@mettascript/browser/host";
 import { createSwiWasmInterop } from "@mettascript/prolog/swi-wasm";
 

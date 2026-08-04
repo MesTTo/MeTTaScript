@@ -76,14 +76,14 @@ describe("a head that is a grounded string, the eDSL's own commonest trap", () =
   it("names the metatype clash and the twin the space actually holds", () => {
     expect(db.explain(["Likes", "Ada", x])).toBe(
       '("Likes" "Ada" $x) matched nothing: the head is Grounded "Likes" and the space holds Symbol ' +
-        'Likes, which never match — spell it sym("Likes") or names("Likes")',
+        'Likes, which never match. Spell it sym("Likes") or names("Likes")',
     );
   });
 
   it("says so even with no twin stored, since no space could rescue it", () => {
     expect(db.explain(["get-atoms", "&self"])).toBe(
       '("get-atoms" "&self") matched nothing: the head is Grounded "get-atoms", not a Symbol, so ' +
-        'nothing matches it and no rule fires — spell it sym("get-atoms") or names("get-atoms")',
+        'nothing matches it and no rule fires. Spell it sym("get-atoms") or names("get-atoms")',
     );
   });
 
@@ -199,6 +199,6 @@ describe("a head that could not have been written as a symbol", () => {
   it("still suggests one when the head is a plain word", () => {
     const db = mettaDB();
     const { x } = vars("x");
-    expect(db.explain(["get-atoms", x])).toContain('spell it sym("get-atoms")');
+    expect(db.explain(["get-atoms", x])).toContain('Spell it sym("get-atoms")');
   });
 });

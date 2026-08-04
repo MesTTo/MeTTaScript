@@ -1,3 +1,107 @@
+# MeTTaScript 3.2.0
+
+A deep loop finishes instead of stopping halfway, the visual editor drops into a page with one script
+tag, property testing is opt-in, and every TypeScript example in the documentation is compiled while the
+site builds.
+
+## A long loop runs to the end
+
+A tail loop the compiler cannot take is interpreted, and every transfer costs a reduction. The library's
+default budget of 100,000 cut a legitimate loop at roughly 20,000 iterations and reported it as
+`StackOverflow`, which sent you looking at the call stack. Nothing had overflowed: the failure did not
+move when you changed `--stack-size`, and the debugger put the cut at exactly 100,000 reductions.
+
+`metta run` now defaults to the budget the benchmark runner was already passing by hand, so the loop
+finishes:
+
+```metta
+(= (loop $n) (if (== $n 0) done (let* (($m (- $n 1))) (loop $m))))
+!(loop 50000)
+```
+
+```text
+[done]
+```
+
+`--max-steps=N` still moves it in either direction, and a program embedding the engine as a library keeps
+the smaller default and should pass `maxSteps` itself. The benchmark corpus's own `scale.metta`, which
+loads 1,000,000 atoms, could not be run through the CLI at all before this.
+
+## Matching proves a failure before paying for it
+
+A scan is almost all failures: one keyed answer among a million facts. Each failure still bound the
+pattern's head variable, allocated a frame, merged it, failed at the next position, and then wrote the
+empty result into the match cache, where nothing would ever read it again. A profile of a
+million-fact query spent 31% of the run in garbage collection.
+
+The matcher now compares arity and the symbols and plain grounded values at each position first, and
+returns no bindings without allocating. Measured on 1,000,000 atoms, alternating builds on one machine: a
+variable-headed keyed query went 507 ms to 133 ms, and `nilbc`, the backward-chaining benchmark the cache
+was added for, went 804 ms to 703 ms. A query whose every candidate matches is unchanged within noise.
+
+Grounded values carrying their own matcher are left alone, since one can accept a term it is not equal
+to. Both ways the check could be wrong are pinned by tests that fail when it is deliberately broken.
+
+## The visual editor goes in a page with one script tag
+
+```html
+<script
+  type="module"
+  src="https://cdn.jsdelivr.net/npm/@mettascript/grapher/dist/embed.js"
+></script>
+
+<metta-grapher height="440px">
+  (= (fact $n) (if (> $n 0) (* $n (fact (- $n 1))) 1)) (fact 5)
+</metta-grapher>
+```
+
+The program goes inside the tag, the way Mermaid takes its diagram from the element's own text, so the
+source stays visible in your markup and a Markdown code block becomes an editor without moving the code
+anywhere. Loading the script registers the element, so there is nothing to call and a client-side
+navigation needs no re-run. `height`, `code` and `src` are the attributes it reads.
+
+Two fixes came with it. Visualising a nondeterministic search no longer hangs: the reduction was reading
+the program's rule bodies back through `match`, whose template it then evaluated, so a subset-sum example
+searched instead of drawing, and it now reads them quoted. And a rule firing shows the substitution as its
+own step before the rewrite, rather than both at once.
+
+## Property testing is opt-in
+
+`@mettascript/hyperon` no longer registers the `fuzz` module. It is a large MeTTa source, about a third of
+a browser bundle, and most programs never call it.
+
+If your program uses `(import! &self fuzz)`, add the import once, anywhere in your entry point:
+
+```ts
+import "@mettascript/fuzz";
+```
+
+The `metta fuzz` and `metta reach` commands are unaffected.
+
+## The documentation is compiled, not trusted
+
+Every TypeScript example on the website is now compiled by twoslash while the site builds, against
+`packages/*/src` rather than a published build, so an example and the API cannot drift apart. Readers get
+the type on hover. A block that is meant not to compile, like the typed eDSL showing a wrong column type
+being caught, is now required to fail with the error the prose claims.
+
+It found four examples that had never worked: a `setTimeout` handed a bigint, a `DasLiveSpace` built with
+no arguments where the constructor takes an agent address, a gateway transport whose one required method
+was written as a comment, and an untyped rest parameter. The site build runs in CI now rather than only on
+a push to the default branch.
+
+Alongside that, `gifenc` ships no type declarations, so the GIF call the documentation tells you to write
+was an implicit `any` in a strict project. `@mettascript/grapher/gifenc-types` now carries the
+declaration, opt-in through tsconfig `types` or a triple-slash reference:
+
+```json
+{ "compilerOptions": { "types": ["@mettascript/grapher/gifenc-types"] } }
+```
+
+The package READMEs stop repeating the guide and point at it instead, and the scaling page leads with what
+a reader can act on: the engine indexes as you add, a query that names its relation answers a
+million-atom space in 0.05 ms, and one that leaves the head a variable does not.
+
 # MeTTaScript 3.1.2
 
 Every built-in operation is documented. `get-doc` answered nothing for 25 of them before this.

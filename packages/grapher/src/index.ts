@@ -8,6 +8,9 @@
 
 export { MeTTaGrapher, type GrapherOptions, type VizOverlay } from "./editor";
 
+// The embeddable element: `<metta-grapher>` for any page, framework or none.
+export { MeTTaGrapherElement, defineMeTTaGrapherElement } from "./element";
+
 // Driving the graph's appearance from MeTTa, through an isolated `&grapher` space.
 export {
   bindVizSpace,

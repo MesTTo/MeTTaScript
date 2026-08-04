@@ -38,7 +38,7 @@ Prolog, or their optional dependencies.
 
 ### API
 
-```ts
+```ts signatures
 function runFile(path: string, fuel?: number, opts?: RunOptions): QueryResult[];
 function readImports(src: string, baseDir: string): Map<string, Atom[]>;
 class ParallelFlatMatcher {
@@ -56,7 +56,7 @@ class ParallelFlatMatcher {
 npm install @mettascript/browser
 ```
 
-```ts
+```ts signatures
 function run(src: string, files?: Map<string, string>, fuel?: number): QueryResult[];
 function vfsImports(src: string, files: Map<string, string>): Map<string, Atom[]>;
 ```
@@ -69,7 +69,7 @@ WASM, which is exactly what powers the [playground](/playground).
 
 For optional host runtimes, use `@mettascript/browser/host`:
 
-```ts
+```ts twoslash
 import { createBrowserRunner, createBrowserTextLoader } from "@mettascript/browser/host";
 import { createPyodideInterop } from "@mettascript/py/pyodide";
 import { createSwiWasmInterop } from "@mettascript/prolog/swi-wasm";

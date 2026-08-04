@@ -21,7 +21,7 @@ uses the separate `@mettascript/grapher/node` entry with optional `sharp` and
 
 `grapher(el)` is the quickest way in, in the same style as the [eDSL](/reference/edsl). Every building step returns the handle, so a chain reads as one sentence; the terminal steps `source()`, `gif()`, and `destroy()` end it.
 
-```ts
+```ts twoslash
 import { grapher } from "@mettascript/grapher";
 
 const view = grapher("#app")
@@ -49,7 +49,7 @@ const view = grapher("#app")
 
 ## The MeTTaGrapher class
 
-```ts
+```ts twoslash
 import { MeTTaGrapher } from "@mettascript/grapher";
 
 const editor = new MeTTaGrapher(document.getElementById("app")!, { source: "(+ 10 (* 25 2))" });
@@ -122,8 +122,21 @@ Leave it off (the default) to get the editor gestures the docs pages use.
 
 ### Browser GIF export
 
-```ts
+```ts twoslash
+/// <reference types="@mettascript/grapher/gifenc-types" />
+import { MeTTaGrapher } from "@mettascript/grapher";
+const editor = new MeTTaGrapher(document.getElementById("app")!, { source: "(+ 10 (* 25 2))" });
+// ---cut---
 const blob = await editor.exportReductionGif(await import("gifenc"), { width: 720, holdMs: 260 });
+```
+
+`gifenc` ships no type declarations, so `await import("gifenc")` is an implicit `any` and a strict project
+rejects it. The package carries the declaration for you, opt-in rather than imposed, since a library that
+declares a module it does not own imposes that shape on everyone. Reference it once, either with the
+triple-slash line above or in `tsconfig.json`:
+
+```json
+{ "compilerOptions": { "types": ["@mettascript/grapher/gifenc-types"] } }
 ```
 
 `exportReductionGif(encoder, opts?)` returns an `image/gif` `Blob` (or `null` if there is nothing to animate). `GifOptions` covers `width`, `morphMs` (how long one step's morph spans; the editor fills it in with its current trace duration, so the GIF glides exactly like the live view), `framesPerStep` (an explicit frame count that overrides `morphMs`), `maxFrames`, and `holdMs` (how long to hold each settled state, which a host maps from its playback speed).
@@ -172,7 +185,7 @@ Install the optional Node renderer and encoder beside the grapher:
 npm install @mettascript/grapher sharp gifenc
 ```
 
-```ts
+```ts twoslash
 import { writeFile } from "node:fs/promises";
 import { renderReductionGif } from "@mettascript/grapher/node";
 

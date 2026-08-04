@@ -7,7 +7,10 @@
  * `hyperon.runner`. TypeScript surface over `@metta-ts/core`.
  */
 import "@mettascript/libraries";
-import "@mettascript/fuzz";
+// The property-testing library is NOT registered here. It is a large MeTTa source — a third of a browser
+// bundle — and most programs never call it, so a page that only runs MeTTa should not pay for it. A host
+// that wants `(import! &self fuzz)` to resolve adds `import "@mettascript/fuzz";` once, anywhere in its
+// own entry point; the import registers the module for the whole process.
 import * as core from "@mettascript/core";
 import { Atom } from "./atoms";
 import { Bindings, BindingsSet } from "./bindings";

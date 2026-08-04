@@ -13,7 +13,7 @@ npm install @mettascript/fuzz
 
 Importing the package registers the `fuzz` module and its private grounded operations, so bare `@mettascript/core` resolves `(import! &self fuzz)` once the package has been imported anywhere. `registerFuzz()` is exported for a host that would rather register explicitly; it is idempotent, so calling it after the import changes nothing.
 
-```ts
+```ts twoslash
 import { registerFuzz } from "@mettascript/fuzz";
 
 registerFuzz();

@@ -5,41 +5,47 @@ SPDX-License-Identifier: MIT
 
 # Async MeTTa
 
-MeTTa evaluation is synchronous by default. But a grounded operation often wants to do I/O, a fetch, a database lookup, a timer, and for that the evaluator needs to wait. MeTTaScript lets you register asynchronous grounded operations and evaluate a program along an async path that awaits them.
+MeTTa evaluation is synchronous by default, and most of the time that is what you want. But a grounded operation often needs to wait: a fetch, a database read, a timer. For that the evaluator has to be able to pause.
 
-## Registering an async operation
+You get that by registering the operation as asynchronous and running the program along the async path.
 
-Use `registerAsyncOperation`: the function returns a `Promise` of result atoms. Then run the program with `runAsync` (or evaluate a single atom with `evaluateAtomAsync`):
+## An operation that awaits
 
-```ts
-import { MeTTa, ValueAtom } from "@mettascript/hyperon";
+```ts twoslash
+import { MeTTa, ValueAtom, type Atom, type GroundedAtom } from "@mettascript/hyperon";
 
 const metta = new MeTTa();
-metta.registerAsyncOperation("fetch-temperature", async () => {
-  const res = await fetch("https://example.com/temp"); // any real I/O
-  return [ValueAtom(await res.json())];
+metta.registerAsyncOperation("slow-double", async (args: Atom[]) => {
+  await new Promise((r) => setTimeout(r, 5));
+  return [ValueAtom((args[0] as GroundedAtom).jsValue<number>() * 2)];
 });
 
-const out = await metta.runAsync("!(fetch-temperature)");
-console.log(out[0].map(String));
+const out = await metta.runAsync("!(slow-double 21)");
+console.log(out[0]!.map(String)); // [ '42' ]
 ```
 
-A program with no async operations gives identical results whether you call `run` or `runAsync`; the async path only differs once an async operation is actually reached. So you can write ordinary MeTTa and only pay for asynchrony where you use it.
+Two differences from a synchronous operation, and no others: it is registered with `registerAsyncOperation`, and it returns a promise. The MeTTa side is unchanged, and `(slow-double 21)` is written and composed exactly like `(double 21)`.
 
-## How it works, briefly
+Use `runAsync` for a program, or `evaluateAtomAsync` for a single atom.
 
-The interpreter's drivers are generators. The synchronous `run` advances them to completion in one tick; `runAsync` awaits at each suspension point. This is the generator-based dual-driver pattern (the same idea behind libraries like gensync), and it means there is a single evaluator, not two copies, so sync and async stay in lockstep. Making the whole core `async` would have taxed every step and is unsound to run to completion on a single tick, so the engine keeps a fast synchronous path and suspends only when an async operation is hit.
+**You only pay for it where you use it.** A program that reaches no async operation gives identical results through `run` and `runAsync`. So you can write ordinary MeTTa and let one operation be slow without making the whole language asynchronous.
+
+## What happens underneath
+
+The interpreter's drivers are generators. The synchronous runner advances them to completion in one go; the async runner awaits at each suspension point. There is one evaluator, not two, which is what keeps the sync and async paths from drifting apart.
+
+Making the core `async` throughout would have taxed every step of every program, and could not be run to completion on a single tick. Keeping a fast synchronous path and suspending only when an async operation is actually reached is the trade the engine makes.
 
 ## From the core package
 
-If you are using `@mettascript/core` directly rather than the class API, the async entry point is `runProgramAsync`, which takes a map of async operations:
+If you are using `@mettascript/core` directly rather than the runner class, the entry point is `runProgramAsync`, which takes your async operations as a map:
 
-```ts
+```ts twoslash
 import { runProgramAsync, format, gint, type AsyncGroundFn } from "@mettascript/core";
 
 const wait: AsyncGroundFn = async (args) => {
   const n = args[0]!.kind === "gnd" && args[0]!.value.g === "int" ? args[0]!.value.n : 0;
-  await new Promise((r) => setTimeout(r, n));
+  await new Promise((r) => setTimeout(r, Number(n)));
   return { tag: "ok", results: [gint(n)] };
 };
 
@@ -47,6 +53,8 @@ const results = await runProgramAsync("!(wait 10)", new Map([["wait", wait]]));
 console.log(results[0]!.results.map(format)); // [ '10' ]
 ```
 
-Async operations are the foundation for the **[concurrency primitives](/advanced/concurrency)** (`par`, `race`, `once`, `with-mutex`), which run branches concurrently and combine their results.
+The core API works in atoms rather than wrapped values, so an argument is inspected by its `kind` and a result is returned as `{ tag: "ok", results }`.
 
-Next: call straight into the host runtime with **[JavaScript interop](/typescript/js-interop)**.
+## Where to go next
+
+Async operations are what the [concurrency primitives](/advanced/concurrency) are built on. Once evaluation can wait, `par` can run branches together, `race` can take the first to finish, and `with-mutex` can keep two of them off the same resource.

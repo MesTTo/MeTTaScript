@@ -12,12 +12,16 @@
   "dependencies": {
     "@metta-ts/core": "workspace:*",
     "@metta-ts/grapher": "workspace:*",
+    "@mettascript/grapher": "workspace:*",
     "codejar": "^4.2.0",
     "gifenc": "^1.0.3"
   },
   "devDependencies": {
     "@shikijs/themes": "^2.5.0",
     "@shikijs/types": "^2.5.0",
-    "vitepress": "^1.6.3"
+    "@shikijs/vitepress-twoslash": "^4.4.1",
+    "pythonia": "^1.2.6",
+    "vitepress": "^1.6.3",
+    "zod": "^4.4.3"
   }
 }

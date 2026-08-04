@@ -16,14 +16,14 @@ This is optional and lives in two packages:
 
 A DAS query is network I/O, so it is asynchronous. An `AsyncSpace` exposes `queryAsync(pattern)`, and `matchAsync` is the async analogue of `(match space pattern template)`: it queries the space and instantiates a template under each binding.
 
-```ts
+```ts twoslash
 import { DasLiveSpace, matchAsync } from "@mettascript/das-client";
-import { sym, expr, variable } from "@mettascript/core";
+import { sym, expr, variable, type Atom } from "@mettascript/core";
 
-const A = (...xs) => expr(xs);
+const A = (...xs: Atom[]): Atom => expr(xs);
 
-// connect a live DAS space (transport/connection details depend on your deployment)
-const space = new DasLiveSpace(/* connection */);
+// the Query Agent's address, from `das-cli qa start`
+const space = new DasLiveSpace("127.0.0.1:40002");
 
 // "who are Tom's children?": every $c such that (parent Tom $c) is in the DAS
 const results = await matchAsync(space, A(sym("parent"), sym("Tom"), variable("c")));
@@ -52,12 +52,21 @@ Then point a `DasLiveSpace` at `127.0.0.1:40002`. Two things to know:
 
 A browser cannot speak the DAS wire protocol directly, so `@mettascript/das-gateway` sits in front of a `das-client` server-side and exposes the query over an injected transport (Connect, which works over HTTP). You provide the transport; the gateway encodes the pattern, sends it, and decodes the bindings:
 
-```ts
-import { queryDas, type GatewayTransport } from "@mettascript/das-gateway";
+```ts twoslash
+import { queryDas, type GatewayTransport, type QueryResponse } from "@mettascript/das-gateway";
 import { parse, standardTokenizer } from "@mettascript/core";
 
+// One method, taking { space, pattern } and answering { bindings }. A Connect client goes here in
+// production; over plain HTTP it is this small.
 const transport: GatewayTransport = {
-  /* query(request) => Promise<QueryResponse>, e.g. a Connect client */
+  query: async (req) => {
+    const res = await fetch("/das/query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(req),
+    });
+    return (await res.json()) as QueryResponse;
+  },
 };
 
 const pattern = parse("(Parent $x Bob)", standardTokenizer())!;

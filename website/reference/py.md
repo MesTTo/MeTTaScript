@@ -19,7 +19,7 @@ npm install @mettascript/py pyodide
 
 ## Registering Python interop
 
-```ts
+```ts signatures
 interface PyBridge {
   callBuiltin(name: string, args: PyValue[]): Promise<PyValue>;
   callModule(module: string, fn: string, args: PyValue[]): Promise<PyValue>;
@@ -44,7 +44,7 @@ class MockPyBridge implements PyBridge
 
 The root package also exports the conversion helpers:
 
-```ts
+```ts signatures
 function atomToPy(atom: Atom, bridge: PyBridge): PyValue
 function pyToAtom(v: PyValue, bridge: PyBridge): Atom
 class PyObjectValue extends ValueObject
@@ -54,7 +54,7 @@ class PyObjectValue extends ValueObject
 
 ## Runtime adapters
 
-```ts
+```ts signatures
 // @mettascript/py/pythonia
 interface PythoniaLike {
   (name: string): Promise<unknown>;
@@ -98,7 +98,7 @@ function createPyodideInterop(options?: PyodideInteropOptions): Promise<HostInte
 
 ## Example
 
-```ts
+```ts twoslash
 import { MeTTa } from "@mettascript/hyperon";
 import { registerPyInterop } from "@mettascript/py";
 import { pythoniaBridge } from "@mettascript/py/pythonia";

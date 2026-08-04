@@ -65,7 +65,7 @@ A MeTTa script is read atom by atom. Atoms without a leading `!` are added to th
 
 The same program, evaluated from TypeScript with `runProgram`:
 
-```ts
+```ts twoslash
 import { runProgram, format } from "@mettascript/core";
 
 const results = runProgram(`
@@ -85,7 +85,7 @@ for (const { query, results: rs } of results) {
 
 If you prefer an object you can hold and feed incrementally, use the `MeTTa` runner from `@mettascript/hyperon`:
 
-```ts
+```ts twoslash
 import { MeTTa } from "@mettascript/hyperon";
 
 const metta = new MeTTa();
@@ -97,7 +97,7 @@ console.log(metta.run("!(greet World)")[0].map(String)); // [ '(Hello World)' ]
 
 If you would rather not write MeTTa as strings, `@mettascript/edsl` builds the same atoms from typed TypeScript:
 
-```ts
+```ts twoslash
 import { mettaDB, names, vars, If, gt, mul, sub } from "@mettascript/edsl";
 
 const db = mettaDB();

@@ -6,7 +6,7 @@ import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { matchAtoms, matchAtomsScoped, merge, addVarBinding, addVarEquality } from "./match";
 import { type Bindings, hasLoop, hasLoopFromBase, lookupVal } from "./bindings";
-import { sym, variable, expr, gint, gfloat, atomEq, type Atom } from "./atom";
+import { sym, variable, expr, gint, gfloat, gnd, atomEq, type Atom } from "./atom";
 import { applySubst } from "./substitution";
 import { bindingsToSubst } from "./instantiate";
 
@@ -244,5 +244,76 @@ describe("hasLoopFromBase is equivalent to hasLoop on merge outputs", () => {
       expect(hasLoopFromBase(m, base)).toBe(hasLoop(m));
       expect(hasLoop(m)).toBe(true);
     }
+  });
+});
+
+// `matchAtomsWith` proves a pair cannot unify before it allocates, so a million-fact scan stops paying a
+// binding, a merge, and a cache insertion per failure. These pin the two ways that proof could be wrong:
+// claiming an impossible match for a pair that really does unify, and forgetting that a grounded value
+// carrying its own matcher accepts terms it is not equal to.
+describe("the pre-unification impossibility check stays conservative", () => {
+  // A grounded value that matches any integer in [lo, hi], not just one equal to itself.
+  const range = (lo: number, hi: number): Atom =>
+    gnd({ g: "int", n: BigInt(lo) }, sym("Number"), undefined, (other: Atom) =>
+      other.kind === "gnd" &&
+      other.value.g === "int" &&
+      Number(other.value.n) >= lo &&
+      Number(other.value.n) <= hi
+        ? [[]]
+        : [],
+    );
+
+  it("a custom grounded matcher in the pattern still matches a value it does not equal", () => {
+    expect(matchAtoms(expr([sym("f"), range(1, 10)]), expr([sym("f"), gint(5n)])).length).toBe(1);
+    expect(matchAtoms(expr([sym("f"), range(1, 10)]), expr([sym("f"), gint(50n)])).length).toBe(0);
+  });
+
+  it("a custom matcher nested several levels down is not short-circuited away", () => {
+    const pattern = expr([sym("f"), expr([sym("g"), expr([sym("h"), range(1, 10)])])]);
+    const atom = expr([sym("f"), expr([sym("g"), expr([sym("h"), gint(7n)])])]);
+    expect(matchAtoms(pattern, atom).length).toBe(1);
+  });
+
+  it("a repeated variable is left to the binding merge, not rejected structurally", () => {
+    expect(
+      matchAtoms(expr([variable("x"), variable("x")]), expr([sym("a"), sym("a")])).length,
+    ).toBe(1);
+    expect(
+      matchAtoms(expr([variable("x"), variable("x")]), expr([sym("a"), sym("b")])).length,
+    ).toBe(0);
+  });
+
+  // The property that matters: a pattern always matches its own ground instance. An impossibility check
+  // that ever fired on a pair that really unifies would show up here as an empty result.
+  it("a pattern always matches an instance of itself", () => {
+    const groundArb: fc.Arbitrary<Atom> = fc.oneof(
+      fc.constantFrom("a", "b", "c").map((n) => sym(n)),
+      fc.integer({ min: 0, max: 5 }).map((n) => gint(BigInt(n))),
+    );
+    const { node } = fc.letrec<{ node: Atom }>((tie) => ({
+      node: fc.oneof(
+        { depthSize: "small", withCrossShrink: true },
+        fc.constantFrom("x", "y", "z").map((n) => variable(n)),
+        groundArb,
+        fc.array(tie("node"), { minLength: 0, maxLength: 3 }).map((items) => expr(items)),
+      ),
+    }));
+    const instantiate = (a: Atom, env: Map<string, Atom>): Atom => {
+      if (a.kind === "var") {
+        const seen = env.get(a.name);
+        if (seen !== undefined) return seen;
+        const fresh = sym("v" + String(env.size));
+        env.set(a.name, fresh);
+        return fresh;
+      }
+      if (a.kind === "expr") return expr(a.items.map((i) => instantiate(i, env)));
+      return a;
+    };
+    fc.assert(
+      fc.property(node, (pattern) => {
+        expect(matchAtoms(pattern, instantiate(pattern, new Map())).length).toBeGreaterThan(0);
+      }),
+      { numRuns: 2000 },
+    );
   });
 });

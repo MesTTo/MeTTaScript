@@ -29,7 +29,7 @@ npm install @mettascript/py pythonia
 
 Then build a bridge, register the ops, and run:
 
-```ts
+```ts twoslash
 import { MeTTa } from "@mettascript/hyperon";
 import { registerPyInterop } from "@mettascript/py";
 import { pythoniaBridge } from "@mettascript/py/pythonia";
@@ -159,7 +159,7 @@ Use `@mettascript/py/pyodide` when Python should run in the browser through
 Pyodide. The normal `@mettascript/py` import stays runtime-agnostic. The Pyodide
 runtime is only pulled in when you import the Pyodide subpath.
 
-```ts
+```ts twoslash
 import { createBrowserRunner, createBrowserTextLoader } from "@mettascript/browser/host";
 import { createPyodideInterop } from "@mettascript/py/pyodide";
 

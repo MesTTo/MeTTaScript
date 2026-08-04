@@ -15,7 +15,7 @@ Use the client when Node can host the inbound DAS bus node. Use the gateway when
 
 ## Client spaces and transports
 
-```ts
+```ts signatures
 interface DasTransport {
   query(pattern: Atom): Bindings[];
   add(atom: Atom): void;
@@ -38,7 +38,7 @@ class DasSpace implements Space {
 
 `DasSpace` implements the core `Space` interface by delegating to a `DasTransport`. `MockTransport` keeps tests and offline examples on the same path without a remote DAS.
 
-```ts
+```ts twoslash
 import { DasSpace, MockTransport } from "@mettascript/das-client";
 import { expr, format, instantiate, sym, variable, type Atom } from "@mettascript/core";
 
@@ -53,7 +53,7 @@ console.log(bindings.map((b) => format(instantiate(b, child)))); // ["Ada"]
 
 ## Query tokens and live queries
 
-```ts
+```ts signatures
 type Pattern =
   | { kind: "node"; type: string; name: string }
   | { kind: "var"; name: string }
@@ -68,7 +68,7 @@ function encodeQuery(p: Pattern, linkType?: string): string[];
 
 `node`, `variable`, and `expr` build the DAS pattern tree. `encodeQuery` turns it into the prefix token stream used by DAS pattern matching. A link with any nested variable becomes a `LINK_TEMPLATE`; a ground link becomes a `LINK`.
 
-```ts
+```ts signatures
 interface QueryOptions {
   readonly proxyHost?: string;
   readonly agentAddress: string;
@@ -91,7 +91,7 @@ function queryPatternMatching(opts: QueryOptions): Promise<QueryResult>;
 
 The client exports the lower-level bus and answer helpers for hosts that need the protocol boundary:
 
-```ts
+```ts signatures
 class BusNode {
   constructor(address: string, onMessage?: MessageHandler);
   start(): Promise<void>;
@@ -119,7 +119,7 @@ const ABORT: string;
 
 ## Hashing
 
-```ts
+```ts signatures
 function computeHash(input: string): string;
 function namedTypeHash(name: string): string;
 function terminalHash(type: string, name: string): string;
@@ -131,7 +131,7 @@ These helpers reproduce DAS atom-handle hashing. Query handles must match the ha
 
 ## Async spaces
 
-```ts
+```ts signatures
 interface AsyncSpace {
   queryAsync(pattern: Atom): Promise<Bindings[]>;
 }
@@ -147,7 +147,7 @@ function matchAsync(space: AsyncSpace, pattern: Atom, template?: Atom): Promise<
 
 `DasLiveSpace` queries a live DAS Query Agent and resolves returned handles through the answer's MeTTa mapping. `matchAsync` is the async analogue of `(match space pattern template)`.
 
-```ts
+```ts twoslash
 import { DasLiveSpace, matchAsync } from "@mettascript/das-client";
 import { expr, sym, variable, type Atom } from "@mettascript/core";
 
@@ -160,7 +160,7 @@ console.log(results.map(String));
 
 ## Gateway
 
-```ts
+```ts signatures
 interface QueryRequest {
   readonly space: string;
   readonly pattern: string;
@@ -181,7 +181,7 @@ function queryDas(transport: GatewayTransport, space: string, pattern: Atom): Pr
 
 `queryDas` encodes the query pattern as MeTTa source, sends it through the transport, and decodes each returned binding value as exactly one MeTTa atom. Blank, malformed, bang-prefixed, and multi-atom binding values throw at decode time.
 
-```ts
+```ts twoslash
 import { queryDas, type GatewayTransport } from "@mettascript/das-gateway";
 import { parse, standardTokenizer } from "@mettascript/core";
 

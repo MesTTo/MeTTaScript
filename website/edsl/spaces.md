@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT
 
 `db.space` is the program's atoms read as an ordinary TypeScript collection. It has `size`, `add`, `delete`, `deleteAll`, `has`, `clear`, iteration, and the array methods over plain TypeScript functions.
 
-```ts
+```ts twoslash
 import { mettaDB, names } from "@mettascript/edsl";
 
 const db = mettaDB();
@@ -29,7 +29,13 @@ It reads atoms **as stored**, where `(get-atoms sp)` reduces them on the way out
 
 A space is mutable and a batch of writes is not atomic on its own: build half a graph, hit a bad row, and the half is already stored.
 
-```ts
+```ts twoslash
+import { mettaDB, names } from "@mettascript/edsl";
+const db = mettaDB();
+const { Likes } = names("Likes");
+db.add([Likes, "Ada", "Coffee"], [Likes, "Bob", "Tea"]);
+const somethingWrong = false;
+// ---cut---
 db.transaction((tx) => {
   tx.add([Likes, "Ada", "Coffee"]);
   tx.add([Likes, "Bob", "Tea"]);
@@ -53,7 +59,12 @@ The `changes` in a report are recorded as they happen, not worked out by compari
 
 The same record is available with no transaction in sight:
 
-```ts
+```ts twoslash
+import { mettaDB, names } from "@mettascript/edsl";
+const db = mettaDB();
+const { Likes } = names("Likes");
+db.add([Likes, "Ada", "Coffee"], [Likes, "Bob", "Tea"]);
+// ---cut---
 const stop = db.onChange((c) => console.log(c.op, c.space, String(c.atom)));
 ```
 
@@ -65,7 +76,7 @@ Recording also reaches a store that could never be compared. A remote atomspace 
 
 A named space can be stored somewhere other than the interpreter's own store. `Space` is four methods, add, remove, query and atoms, and anything implementing it can back one.
 
-```ts
+```ts twoslash
 import { mettaDB, PersistentSpace } from "@mettascript/edsl";
 
 const shelf = new PersistentSpace();
@@ -87,7 +98,14 @@ It is a trade, not a free win. Against the interpreter's own store it measures a
 
 ## Live queries
 
-```ts
+```ts twoslash
+import { mettaDB, names } from "@mettascript/edsl";
+const db = mettaDB();
+const { Likes } = names("Likes");
+db.add([Likes, "Ada", "Coffee"], [Likes, "Bob", "Tea"]);
+const pattern = [Likes, "Ada", "Coffee"] as const;
+const render = (rows: unknown[]): void => void rows;
+// ---cut---
 const stop = db.watch(pattern, (rows) => render(rows));
 ```
 

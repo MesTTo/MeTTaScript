@@ -13,7 +13,7 @@ npm install @mettascript/debug
 
 ## Trace summaries
 
-```ts
+```ts signatures
 type TraceEvent = import("@mettascript/core").TraceEvent;
 
 interface TraceSummary {
@@ -30,7 +30,7 @@ function summarize(events: readonly TraceEvent[]): TraceSummary;
 
 ## Running through an injected runner
 
-```ts
+```ts signatures
 type TraceRunner = (
   program: string,
   fuel: number | undefined,
@@ -64,7 +64,7 @@ function explainCall(
 
 ## Example
 
-```ts
+```ts twoslash
 import { explainCall } from "@mettascript/debug";
 import { runSource } from "@mettascript/node/source";
 

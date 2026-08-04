@@ -25,6 +25,9 @@ import {
 import type { HostInterop } from "@mettascript/core/host";
 import { importRootPragma, readImports } from "./file-imports";
 
+/** Default reduction budget for `metta run`, matching the corpus bench's `--max-steps` default. */
+const CLI_STEP_BUDGET = 100_000_000;
+
 // Deep effectful MeTTa recursion can exceed V8's default call stack. Re-exec once with a larger stack,
 // matching the reference interpreter's iterative driver. Set METTA_TS_STACK to skip (e.g. when embedding).
 // The reexec re-runs the actual process entry (`process.argv[1]`, the `metta` or `metta-ts` bin) with the
@@ -283,7 +286,14 @@ export async function runCliMain(argv: string[], prog = "metta run"): Promise<vo
   // reports as an error on the import.
   const importRoot =
     values["import-root"] !== undefined ? resolve(values["import-root"]) : undefined;
-  const fuel = maxSteps !== undefined && maxSteps > DEFAULT_FUEL ? maxSteps : undefined;
+  // `metta run` is a program runner, not a sandbox. A tail loop the compiler cannot take is interpreted,
+  // and every transfer costs a reduction (a `let*` step costs about five), so the library's 100,000
+  // default cuts a legitimate loop at roughly 20,000 iterations and reports it as `StackOverflow` even
+  // though nothing overflowed. `packages/node/bench/corpus-bench.mjs` already overrides the budget to
+  // this value "so deep finite programs complete"; the runner needs the same headroom by default.
+  // `--max-steps` still narrows or widens it.
+  const budget = maxSteps ?? CLI_STEP_BUDGET;
+  const fuel = budget > DEFAULT_FUEL ? budget : undefined;
   const maxStackDepth =
     values["max-stack-depth"] !== undefined ? Number(values["max-stack-depth"]) : undefined;
   const hashCons =

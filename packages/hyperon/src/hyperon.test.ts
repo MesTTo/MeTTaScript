@@ -3,6 +3,8 @@
 // SPDX-License-Identifier: MIT
 
 import { describe, it, expect } from "vitest";
+// The opt-in a host performs to make `(import! &self fuzz)` resolve; see the module test below.
+import "@mettascript/fuzz";
 import {
   Atom,
   S,
@@ -162,7 +164,11 @@ describe("parser", () => {
 });
 
 describe("MeTTa runner", () => {
-  it("auto-registers the deterministic fuzz module", () => {
+  it("resolves the fuzz module once a host has imported the package", () => {
+    // The runner does not register the property-testing library itself. It is a large MeTTa source and
+    // most programs never call it, so a page that only runs MeTTa does not carry it: a third of a browser
+    // bundle. `import "@mettascript/fuzz"` at the top of this file is the whole opt-in, and it registers
+    // the module for the process, which is why `(import! &self fuzz)` resolves below.
     const m = new MeTTa();
     const out = m.run(`
       !(import! &self fuzz)

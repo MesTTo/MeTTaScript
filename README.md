@@ -328,42 +328,14 @@ This has been run end to end against a live DAS cluster (see [`@mettascript/das-
 | [`@mettascript/das-client`](packages/das-client)   | Optional client to SingularityNET's Distributed AtomSpace via a Connect gateway.              |
 | [`@mettascript/das-gateway`](packages/das-gateway) | Optional transport-agnostic gateway bridging the browser to a Distributed AtomSpace.          |
 
-## Compared with DataScript
+## Development
 
-DataScript is the standard immutable in-browser database. The two differ first in the data model:
-
-|                      | DataScript                                         | MeTTaScript                                                                               |
-| -------------------- | -------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Data model           | Flat entity-attribute-value datoms, a triple store | Metagraph: atoms nest, so a fact can be about another fact                                |
-| Code and data        | Queries and rules sit outside the datoms           | Rules are atoms in the same space; a program can query and rewrite its own rules          |
-| Computation          | Datalog query and `pull` over relations            | Term rewriting with nondeterministic evaluation; querying and computing are one mechanism |
-| Types                | Attribute schema: cardinality, refs, uniqueness    | Optional gradual dependent types: GADTs, dependent types, types as propositions           |
-| Host code in a query | None                                               | Grounded TypeScript calls inside rules, including async I/O and concurrency               |
-
-On DataScript's own workloads (120,000 edge records, five isolated Node processes per engine,
-medians, every result cross-checked between engines before timing), MeTTaScript 1.5.0 wins every
-declarative query at both tested sizes and under uniform and skewed distributions:
-
-| Workload, 120k records, uniform | DataScript 1.7.8 | MeTTaScript |            Winner |
-| ------------------------------- | ---------------: | ----------: | ----------------: |
-| Source lookup, declarative      |         14.14 ms |    0.011 ms | MeTTaScript 1349x |
-| Reverse lookup, declarative     |          4.25 ms |    0.010 ms |  MeTTaScript 422x |
-| Group lookup, declarative       |         14.47 ms |     1.72 ms |  MeTTaScript 8.4x |
-| One-percent range, declarative  |         42.32 ms |     2.08 ms | MeTTaScript 20.3x |
-| Anchored two-hop join           |         26.14 ms |     0.14 ms |  MeTTaScript 184x |
-| Count all edges                 |        114.31 ms |    0.002 ms |       MeTTaScript |
-| Triangle join count             |          3101 ms |     1079 ms |  MeTTaScript 2.9x |
-| Bulk build                      |         385.9 ms |    322.6 ms | MeTTaScript 1.20x |
-| Retained heap after build       |         48.8 MiB |    36.5 MiB | MeTTaScript 1.34x |
-| Peak process RSS                |         2493 MiB |    2037 MiB | MeTTaScript 1.22x |
-| Immutable insert, 1000 records  |          43.4 ms |     11.6 ms | MeTTaScript 3.75x |
-
-DataScript keeps its direct index APIs on microsecond point reads: entity by id (~1.9x), the
-`index_range` seek (its ordered-index specialty, ~118x over MeTTa's declarative range), the
-bound-value `datoms` seeks (within about 2x and noisy between sessions), and every cold first
-call on point rows, where MeTTaScript pays JIT warmup. Every MeTTaScript number comes from the default
-configuration, and each routing path behind them is differential-gated byte-identical to the
-reference evaluator, including result order.
+```bash
+pnpm install
+pnpm build
+pnpm test          # 270/270 Hyperon oracle gate + unit and property tests
+node packages/node/dist/cli.js examples/factorial.metta
+```
 
 ## Provenance
 

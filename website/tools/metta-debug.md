@@ -60,7 +60,7 @@ The fields have direct meanings. `grounded` counts native grounded operations by
 
 The same trace bus is available to embedders through `RunOptions.trace`:
 
-```ts
+```ts twoslash
 import { runProgram, format, type TraceEvent } from "@mettascript/core";
 
 const events: TraceEvent[] = [];

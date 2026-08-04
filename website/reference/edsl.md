@@ -13,7 +13,7 @@ npm install @mettascript/edsl
 
 ## Names, variables, and terms
 
-```ts
+```ts signatures
 type Term = Atom | Name | number | string | boolean | bigint | object | null | undefined;
 type Var<T = unknown> = VariableAtom & { __varType?: T };
 type Name = ((...args: Term[]) => ExpressionAtom) & {
@@ -36,7 +36,7 @@ function list(items: Term[], opts?: { cons?: string; nil?: Atom }): Atom; // (::
 
 ## Special-form and operator combinators
 
-```ts
+```ts signatures
 const rule: (head: Term, body: Term) => ExpressionAtom; //    (= head body)
 const decl: (subject: Term, type: Term) => ExpressionAtom; // (: subject type)
 const arrow: (...types: Term[]) => ExpressionAtom; //         (-> A B ... R)
@@ -76,7 +76,7 @@ Each maps to the matching MeTTa form or grounded operation. Builders compose, so
 
 ## The tagged template and source parsing
 
-```ts
+```ts signatures
 function m(strings: TemplateStringsArray, ...values: Term[]): Atom; //      exactly one atom
 function mAll(strings: TemplateStringsArray, ...values: Term[]): Atom[]; // several atoms
 function parseSource(src: string): Atom; //                                one atom from a plain string
@@ -86,7 +86,7 @@ function parseSource(src: string): Atom; //                                one a
 
 ## The runner
 
-```ts
+```ts signatures
 const mettaDB: <S = {}>() => MettaDB<S>; // optional schema types the host bridge
 
 class MettaDB<S = {}> {
@@ -133,7 +133,7 @@ For annotations without a second import, the entry also re-exports `Atom`, `Grou
 The `@mettascript/edsl/py` and `@mettascript/edsl/prolog` subpaths build atoms for
 optional host runtimes. They do not import the runtime packages themselves.
 
-```ts
+```ts signatures
 // @mettascript/edsl/py
 function pyCall(path: string, ...args: Term[]): ExpressionAtom; // (py-call (<path> ...args))
 function pyCall(spec: Term): ExpressionAtom; //                 (py-call <spec>)
@@ -147,7 +147,7 @@ function pyDict(pairs: ReadonlyArray<readonly [Term, Term]> | Term): ExpressionA
 function pyChain(items: readonly Term[] | Term): ExpressionAtom;
 ```
 
-```ts
+```ts signatures
 // @mettascript/edsl/prolog
 type PrologGoal = Term | readonly Term[];
 const prologCall: (goal: PrologGoal) => ExpressionAtom;

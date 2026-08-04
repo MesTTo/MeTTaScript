@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT
 
 Building MeTTa from TypeScript is typed all the way down. Coming back used to mean `atomToJs` and index arithmetic, so this closes the loop.
 
-```ts
+```ts twoslash
 import { matchAtom, mettaDB, names, P } from "@mettascript/edsl";
 
 const { Likes, Age } = names("Likes", "Age");
@@ -29,8 +29,12 @@ The design is [ts-pattern](https://github.com/gvergnaud/ts-pattern)'s, which sol
 
 `P.when(pred, name?)` guards with a predicate, for what a shape check cannot say. `P.union([...], name?)` takes any one of several patterns, and `P.not(pat, name?)` whatever one refuses.
 
-```ts
-matchAtom(atom)
+```ts twoslash
+import { matchAtom, mettaDB, names, P } from "@mettascript/edsl";
+const { Likes, Age } = names("Likes", "Age");
+const atom: unknown = null;
+// ---cut---
+matchAtom(atom as never)
   .with([Age, P.str("who"), P.when((n: number) => n >= 18, "years")], ({ who }) => `${who} adult`)
   .with([Likes, P.union([P.str(), P.sym()], "what")], ({ what }) => `likes ${String(what)}`)
   .run();
@@ -40,9 +44,12 @@ A bare literal compares by the atom it grounds to, and a nested array matches a 
 
 Sometimes you want the predicate rather than the branch:
 
-```ts
-import { isMatching, matchBindings } from "@mettascript/edsl";
-
+```ts twoslash
+import { isMatching, matchBindings, names, P, type Term } from "@mettascript/edsl";
+const { Likes } = names("Likes");
+const atom: Term = Likes("Ada", "Coffee");
+const results: Term[] = [];
+// ---cut---
 results.filter((a) => isMatching([Likes, P._, P._], a));
 matchBindings([Likes, P.str("who"), P._], atom); // { who } or undefined
 ```
@@ -51,8 +58,13 @@ matchBindings([Likes, P.str("who"), P._], atom); // { who } or undefined
 
 `db.match(atom)` is the same matcher with one thing added: the runner knows which relation heads the schema declares, so it can insist every one of them has an arm.
 
-```ts
-db.match(atom)
+```ts twoslash
+import { mettaDB, names, P } from "@mettascript/edsl";
+const { Likes, Age } = names("Likes", "Age");
+const atom: unknown = null;
+const db = mettaDB<{ relations: { Likes: [string, string]; Age: [string, number] } }>();
+// ---cut---
+db.match(atom as never)
   .with([Likes, P.str("who"), P.str("drink")], ({ who, drink }) => `${who}: ${drink}`)
   .with([Age, P.str("who"), P.num("years")], ({ who, years }) => `${who}/${years}`)
   .exhaustive();
@@ -68,9 +80,12 @@ An atom from outside the declaration still reaches a `NonExhaustiveError` throw.
 
 MeTTa reports failure as a value rather than by throwing, so a failed evaluation arrives looking like a successful one. `(* "no" 2)` does not throw; it reduces to `(Error (* "no" 2) (BadArgType 1 Number String))`, which lands in the ordinary results and counts as an answer to anything counting them.
 
-```ts
-import { errorAtoms, errorText, isErrorAtom } from "@mettascript/edsl";
-
+```ts twoslash
+import { errorAtoms, errorText, isErrorAtom, mettaDB, names, vars } from "@mettascript/edsl";
+const db = mettaDB();
+const { risky } = names("risky");
+const { x } = vars("x");
+// ---cut---
 const results = db.eval(risky(x));
 if (results.some(isErrorAtom)) console.warn(errorText(errorAtoms(results)[0]!));
 ```
@@ -83,7 +98,11 @@ if (results.some(isErrorAtom)) console.warn(errorText(errorAtoms(results)[0]!));
 
 Results come from runtime rewriting, so `unknown` is the honest static type. Turning that into a checked one is what the JavaScript validation libraries already do, so `evalAs` takes a [Standard Schema](https://standardschema.dev) rather than a validator of its own.
 
-```ts
+```ts twoslash
+import { mettaDB, names } from "@mettascript/edsl";
+const db = mettaDB();
+const { fetchUser } = names("fetchUser");
+// ---cut---
 import { z } from "zod";
 db.evalAs(fetchUser(1), z.object({ name: z.string(), age: z.number() }));
 ```

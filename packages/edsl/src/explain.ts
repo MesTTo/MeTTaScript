@@ -121,14 +121,14 @@ function describe(pattern: Atom, misses: readonly NearMiss[], heads: readonly He
   if (misses.length === 0) {
     // The head itself differs by metatype: a JS string grounds to a grounded string everywhere, so
     // `["Likes", …]` builds `("Likes" …)` and the space holds `(Likes …)`. Naming this is the whole
-    // point — the two print almost alike and the arity message that used to come out here was false.
+    // point, since the two print almost alike and the arity message that used to come out here was false.
     if (head !== undefined && head.metatype === "Grounded") {
       const shadow =
         head.bare === undefined
           ? undefined
           : heads.find((h) => h.bare === head.bare && h.metatype === "Symbol");
       const spell =
-        head.bare === undefined ? "" : ` — spell it sym("${head.bare}") or names("${head.bare}")`;
+        head.bare === undefined ? "" : `. Spell it sym("${head.bare}") or names("${head.bare}")`;
       // No space can rescue this: MeTTa applies a rule and matches a functor by SYMBOL head, so a
       // grounded one matches nothing and reduces to itself whatever is stored.
       return shadow === undefined

@@ -9,7 +9,7 @@ MeTTa's own module system is file-based: `import!` resolves a path and binds the
 
 A module here records what to add and carries the type of what it declares.
 
-```ts
+```ts twoslash
 import { mettaDB, mettaModule, mul, names, vars } from "@mettascript/edsl";
 
 const { Likes } = names("Likes");
@@ -40,7 +40,9 @@ TypeScript cannot infer one type argument while you supply another, so a type ar
 
 A module is a file in MeTTa, so `source` lets one carry raw text. Its `!`-queries run when the module is used, and that is the only route by which `pragma!` or `bind!` can reach a module at all, since neither is an atom to add.
 
-```ts
+```ts twoslash
+import { mettaDB, mettaModule } from "@mettascript/edsl";
+// ---cut---
 const lib = mettaModule()
   .source(`(= (triple $x) (* 3 $x))\n!(bind! &limit 10)`)
   .declare("triple", ["Number"], "Number");
@@ -54,7 +56,11 @@ mettaDB().use(lib).call.triple(7); // [21], typed number[]
 
 `m.declarations()` hands back `(: Name (-> ...))` for everything the module declares, relations ending in `Type` and functions in their return type.
 
-```ts
+```ts twoslash
+import { mettaModule, names } from "@mettascript/edsl";
+const { Likes } = names("Likes");
+const data = mettaModule().relation("Likes", ["String", "String"]).atoms([Likes, "Ada", "Coffee"]);
+// ---cut---
 data.declarations().map(String); // ['(: Likes (-> String String Type))']
 ```
 

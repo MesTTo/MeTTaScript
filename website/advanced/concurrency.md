@@ -11,13 +11,13 @@ Once grounded operations can do [asynchronous I/O](/typescript/async), you can c
 
 `par` evaluates its branches concurrently and unions their results. With async operations, the whole thing takes about as long as the slowest branch, not the sum. Here `aw n` is an async operation that resolves to `n` after an `n`-millisecond delay:
 
-```ts
+```ts twoslash
 import { runProgramAsync, format, gint, type AsyncGroundFn } from "@mettascript/core";
 
 const aw: AsyncGroundFn = async (args) => {
   const a = args[0]!;
   const n = a.kind === "gnd" && a.value.g === "int" ? a.value.n : 0;
-  await new Promise((r) => setTimeout(r, n));
+  await new Promise((r) => setTimeout(r, Number(n)));
   return { tag: "ok", results: [gint(n)] };
 };
 
@@ -31,7 +31,16 @@ Branch effects (atoms added to a space) are merged back deterministically as a m
 
 `race` returns the first branch to produce a result and cancels the losers through an `AbortSignal`, so a cancelled branch's effects never land:
 
-```ts
+```ts twoslash
+import { runProgramAsync, format, gint, type AsyncGroundFn } from "@mettascript/core";
+const aw: AsyncGroundFn = async (args) => {
+  const a = args[0]!;
+  const n = a.kind === "gnd" && a.value.g === "int" ? a.value.n : 0;
+  await new Promise((r) => setTimeout(r, Number(n)));
+  return { tag: "ok", results: [gint(n)] };
+};
+const ops = new Map([["aw", aw]]);
+// ---cut---
 await runProgramAsync("!(race (aw 40) (aw 3))", new Map([["aw", aw]]));
 // the 3 ms branch wins -> [ '3' ]
 ```
@@ -60,7 +69,16 @@ Each worker re-evaluates its branch from the program's rules, so the parallel pa
 
 `with-mutex` takes a key and a body, and serializes bodies sharing the same key, so concurrent branches enter the critical section one at a time. Use it when several async branches touch the same external resource and must not interleave.
 
-```ts
+```ts twoslash
+import { runProgramAsync, format, gint, type AsyncGroundFn } from "@mettascript/core";
+const aw: AsyncGroundFn = async (args) => {
+  const a = args[0]!;
+  const n = a.kind === "gnd" && a.value.g === "int" ? a.value.n : 0;
+  await new Promise((r) => setTimeout(r, Number(n)));
+  return { tag: "ok", results: [gint(n)] };
+};
+const ops = new Map([["aw", aw]]);
+// ---cut---
 // Two branches both update "account"; with-mutex makes them run one after the other.
 await runProgramAsync(
   `!(par (with-mutex account (deposit 10))

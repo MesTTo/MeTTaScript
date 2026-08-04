@@ -7,12 +7,22 @@ SPDX-License-Identifier: MIT
 
 Grounded operations let MeTTa call _your_ TypeScript functions. The JavaScript interop layer goes one step further: it lets MeTTa reach into the host runtime itself, calling global functions and methods and building JavaScript values, with no glue code. Enable it with `registerJsInterop`.
 
-```ts
+```ts twoslash
 import { MeTTa, registerJsInterop } from "@mettascript/hyperon";
 
 const metta = new MeTTa();
 registerJsInterop(metta);
 ```
+
+::: warning
+This gives the running program the host's globals, so register it only for MeTTa source you trust.
+
+The known escalation paths are refused rather than resolved. A dotted path naming `eval`, `Function`,
+`constructor`, `prototype`, `__proto__`, `process`, `require`, `Reflect`, `globalThis`, `global`,
+`module`, `import`, or `child_process` fails with `access to '...' is blocked`, which stops arbitrary
+evaluation, process access, and prototype pollution. What remains is the ordinary host surface, `Math`,
+`JSON`, string methods and the like, and that is still plenty to hand to a program you did not write.
+:::
 
 ## js-atom: resolve and call a global
 

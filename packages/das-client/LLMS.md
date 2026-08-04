@@ -5,7 +5,7 @@ Client for SingularityNET's Distributed AtomSpace (DAS). Queries a remote shared
 ```ts
 import { DasLiveSpace, matchAsync } from "@mettascript/das-client";
 import { sym, expr, variable } from "@mettascript/core";
-const space = new DasLiveSpace(/* connection */);
+const space = new DasLiveSpace("127.0.0.1:40002"); // the Query Agent, from `das-cli qa start`
 const results = await matchAsync(space, expr([sym("parent"), sym("Tom"), variable("c")]));
 results.map(String);
 ```

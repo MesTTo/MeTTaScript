@@ -2,9 +2,13 @@
 //
 // SPDX-License-Identifier: MIT
 
-// The README's examples, run. It reads the file, runs every `metta` block in order against one
-// accumulating program, and checks each result is the outcome the prose claims. The blocks are
-// cumulative on purpose, so an example that needs relations shows them.
+// The README's example, run. It reads the file, runs the `metta` block, and checks the result is the
+// outcome the prose claims, down to the counts printed beside it.
+//
+// The README used to carry five cumulative examples and this test ran all of them. They live on the
+// website now, under `website/fuzz/overview.md`, where `website-docs.test.ts` runs them the same way and
+// has more room to explain them. What a README is read for is the first example, so that is what is left
+// here and what this checks.
 
 import "./index.js";
 import { readFileSync } from "node:fs";
@@ -22,43 +26,27 @@ const README = resolve(dirname(fileURLToPath(import.meta.url)), "..", "README.md
 const text = readFileSync(README, "utf8");
 const metta = markdownBlocks(text, "metta");
 
-describe("the README's examples", () => {
-  it("has the blocks this test expects to find", () => {
+describe("the README's example", () => {
+  it("has the block this test expects to find", () => {
     // A renamed heading or a dropped fence would otherwise make the checks below silently vacuous.
-    expect(metta).toHaveLength(5);
+    expect(metta).toHaveLength(1);
   });
 
-  it("runs every metta block and reports what the prose says it does", () => {
-    // One program: the declarations of each block are in scope for the ones after it.
+  it("runs, and prints the counts the README prints", () => {
     const outcomes = printed(metta.join("\n")).map((result) => result[0] ?? "");
-
-    // Generated lists, reversed twice, all equal to themselves.
-    expect(
-      outcomes.find((line) => line.startsWith("(FuzzPassed (Property reverse-involution)")),
-    ).toBeDefined();
+    const passed = outcomes.find((line) =>
+      line.startsWith("(FuzzPassed (Property reverse-involution)"),
+    );
+    expect(passed, "the documented property passes").toBeDefined();
 
     // Every count the README prints is read out of the document and checked against the run, so the two
-    // cannot drift.
+    // cannot drift. This is what pins the prose's "200 runs report 213 passes".
     const fields = documentedFields(text);
     expect(fields).toContain("(Random 200)");
+    expect(fields).toContain("(Passed 213)");
     const all = outcomes.join("\n");
     for (const field of fields) expect(all, `the README prints ${field}`).toContain(field);
 
-    // Exhaustive: both booleans, so the domain is covered rather than sampled.
-    const exhaustive = outcomes.find((line) => line.startsWith("(FuzzExhaustivelyVerified"));
-    expect(exhaustive).toContain("(Property small) (DomainCount 2)");
-
-    // The machine agrees with its model over every generated command sequence.
-    expect(
-      outcomes.find((line) => line.startsWith("(FuzzPassed (Property Counter)")),
-    ).toBeDefined();
-
-    // Reachability: (Count 3) is two transitions away, and the witness was replayed before reporting.
-    const reachable = outcomes.find((line) => line.startsWith("(FuzzReachable (Property Counter)"));
-    expect(reachable).toContain("(Depth 2)");
-    expect(reachable).toContain("(Target (quote (Count 3)))");
-
-    // Nothing in the README errors out or comes back undecided.
     for (const line of outcomes) {
       expect(line).not.toContain("FuzzInvalid");
       expect(line).not.toContain("FuzzKernelError");

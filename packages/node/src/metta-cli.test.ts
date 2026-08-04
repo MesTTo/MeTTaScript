@@ -48,6 +48,17 @@ describe("unified metta CLI", () => {
     );
   });
 
+  // A tail loop the compiler cannot take is interpreted, and each transfer costs a reduction. Under the
+  // library's 100,000-reduction default this loop was cut at about 20,000 iterations and reported as
+  // `StackOverflow`, which is what made `bench/corpus-mettats/scale.metta` unrunnable through the CLI.
+  it("runs a deep interpreted tail loop under the default budget", () => {
+    const file = mettaFixture(
+      "metta-deep-tail-",
+      "(= (loop $n) (if (== $n 0) done (let* (($m (- $n 1))) (loop $m))))\n!(loop 50000)\n",
+    );
+    expect(run(METTA, [file])).toContain("done");
+  });
+
   it("check passes a clean program and fails an arity error", () => {
     expect(status(METTA, ["check", mettaFixture("metta-ok-", "!(car-atom (a b))\n")])).toBe(0);
     expect(status(METTA, ["check", mettaFixture("metta-bad-", "!(car-atom 1 2)\n")])).toBe(1);

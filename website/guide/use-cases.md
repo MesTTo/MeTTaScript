@@ -15,7 +15,7 @@ You store facts in a space, query them by pattern, and write rules that derive n
 
 The join you write in DataScript's `:where` is a join here too:
 
-```ts
+```ts twoslash
 import { mettaDB, names, vars } from "@mettascript/edsl";
 
 const db = mettaDB();
@@ -50,7 +50,7 @@ Honestly: DataScript keeps its hand-tuned direct index reads. Entity-by-id, its 
 
 ## Instead of Prolog in the browser
 
-If what you want is logic programming, rules and unification, you might reach for [tau-prolog](http://tau-prolog.org/) or SWI-Prolog compiled to WebAssembly. MeTTaScript gives you rules, unification, and backward search too, but over a metagraph you also store, query, and mutate, with first-class TypeScript interop so a rule can call your functions and return plain JS.
+If what you want is logic programming, rules and unification, you might reach for [tau-prolog](http://tau-prolog.org/) or SWI-Prolog compiled to WebAssembly. MeTTaScript gives you rules, unification, and backward search too, but over a metagraph you also store, query, and mutate, and TypeScript interop direct enough that a rule can call your functions and return plain JS.
 
 How you use it differs. With tau-prolog you consult a Prolog program as a source string and query it as another string, reading answers back through callbacks. MeTTaScript is TypeScript-native: the [eDSL](/edsl/overview) builds facts, queries, and rules from typed proxies, and any JS value crosses the boundary as itself, with no string to assemble or parse. On declarative query workloads it is also faster. A transitive-closure reachability query runs about 13x faster at 60 edges and 25x at 180, the gap widening with size, because the query routes through an indexed join and recursive derivations are tabled rather than re-derived (five-run minimum, same machine).
 

@@ -113,11 +113,52 @@ A TARGET is either a node's name, like `if`, which reaches every `if` node, or t
 
 Nodes form a cycle-guarded graph, so a node can feed several parents and no cycle can form. Evaluating a node composes the atom for the tree it belongs to and shows the result beneath the top node.
 
+## Putting it in your own page
+
+If all you want is the editor on a page you are writing, you do not need a build step or an
+initialisation call. Load one script and use the `<metta-grapher>` tag:
+
+```html
+<script
+  type="module"
+  src="https://cdn.jsdelivr.net/npm/@mettascript/grapher/dist/embed.js"
+></script>
+
+<metta-grapher>
+  (= (fact $n) (if (> $n 0) (* $n (fact (- $n 1))) 1)) (fact 5)
+</metta-grapher>
+```
+
+The program goes _inside_ the tag, the way Mermaid takes its diagram from the element's own text. That
+keeps the source visible in your markup, leaves something readable for anyone without JavaScript, and
+lets a Markdown code block become an editor without moving the code somewhere else.
+
+Loading the script registers the element, so there is nothing to call afterwards. A custom element
+upgrades whatever is already in the document and whatever arrives later, so a page that navigates on the
+client does not need to re-run anything.
+
+Three attributes are worth knowing:
+
+- `height` sizes the editor, defaulting to `360px`. The canvas fills its host, so it needs a height.
+- `code` passes the program as an attribute. Setting it later re-renders.
+- `src` fetches the program from a URL, for when the source lives in a `.metta` file.
+
+Those three are the only ones the element reads, and the program is looked for in that order: `code`
+first, then the element's own text, and `src` only when neither supplied anything. So a tag with both
+text and a `src` shows the text.
+
+```html
+<metta-grapher height="500px" src="/examples/peano.metta"></metta-grapher>
+```
+
+If you would rather register the element under your own tag name, or drive the canvas yourself, the
+same entry point exports `defineMeTTaGrapherElement` and `MeTTaGrapher`.
+
 ## Using it from TypeScript
 
 The package is [`@mettascript/grapher`](https://github.com/MesTTo/MeTTaScript/tree/main/packages/grapher). The quickest way in is the fluent `grapher()` driver, in the same style as the [eDSL](/edsl/overview):
 
-```ts
+```ts twoslash
 import { grapher } from "@mettascript/grapher";
 
 const view = grapher("#app")
@@ -137,7 +178,7 @@ advance it.
 
 Because the view runs on atoms, anything that produces atoms feeds it, including the eDSL. Build the program with combinators and hand the atoms over:
 
-```ts
+```ts twoslash
 import { grapher } from "@mettascript/grapher";
 import { rule, names, vars, If, gt, mul, sub } from "@mettascript/edsl";
 
@@ -152,7 +193,9 @@ grapher("#app")
 
 Recolor the blocks with a built-in name or your own palette:
 
-```ts
+```ts twoslash
+import { grapher } from "@mettascript/grapher";
+// ---cut---
 grapher("#app").blocks().palette("teal"); // "site" (default), "teal", or a palette object
 ```
 
@@ -162,7 +205,10 @@ grapher("#app").blocks().palette("teal"); // "site" (default), "teal", or a pale
 driver uses browser Canvas and `Image`, so this form belongs in browser code.
 Install [`gifenc`](https://www.npmjs.com/package/gifenc) and pass it in.
 
-```ts
+```ts twoslash
+/// <reference types="@mettascript/grapher/gifenc-types" />
+import { grapher } from "@mettascript/grapher";
+// ---cut---
 const blob = await grapher("#app")
   .load("(+ 10 (* 25 2))")
   .gif(await import("gifenc"));
@@ -177,7 +223,7 @@ To create the same animation from `node app.js`, use the DOM-free
 
 For everything else, use the class directly:
 
-```ts
+```ts twoslash
 import { MeTTaGrapher } from "@mettascript/grapher";
 
 const editor = new MeTTaGrapher(document.getElementById("app")!, {

@@ -13,20 +13,32 @@
 // trace from reduceTrace stays a pure, one-rewrite-per-step sequence.
 
 import { E, S, V, ExpressionAtom, VariableAtom, type Atom, type MeTTa } from "@mettascript/hyperon";
+import { reduceStep } from "./reduce";
 
-/** Insert, after each linear rewrite `before -> after` that instantiates a rule body, the body with its
- *  bound values shown as hollow variables, so the next step fills them in. Grounded steps that bind nothing
- *  and nondeterministic (wide) frontiers are passed through unchanged. */
+/** Insert, after each rewrite that instantiates a rule body, the body with its bound values shown as hollow
+ *  variables, so the next step fills them in: the substitution gets a step of its own instead of happening
+ *  in the same frame as the rewrite.
+ *
+ *  Every term in the frontier is shaded, not just a lone one. Pairing by frontier index only works while the
+ *  trace stays one term wide, and it went quiet the moment a program branched — which is exactly when a
+ *  reduction is hardest to follow. Each term is instead paired with its own successor, so a search showing
+ *  sixteen branches shows the substitution in all sixteen. A term that does not instantiate a rule body (a
+ *  grounded step, a branch pick) or that fans out is left as it is; the frontier is only emitted when at
+ *  least one term has something to show. */
 export function withSilhouettes(frontiers: Atom[][], metta: MeTTa): Atom[][] {
   const out: Atom[][] = [];
+  const lazy: Map<string, Set<number>> = new Map();
   for (let i = 0; i < frontiers.length; i++) {
-    out.push(frontiers[i]!);
     const cur = frontiers[i]!;
-    const next = frontiers[i + 1];
-    if (next !== undefined && cur.length === 1 && next.length === 1) {
-      const body = skeletonize(cur[0]!, next[0]!, metta);
-      if (body !== null) out.push([body]);
-    }
+    out.push(cur);
+    if (frontiers[i + 1] === undefined) continue;
+    const shaded = cur.map((term) => {
+      const step = reduceStep(term, metta, lazy);
+      // Only a term with a single successor has one substitution to show; a fan-out has several, and
+      // drawing one of them would claim the branch was already chosen.
+      return step === null || step.length !== 1 ? null : skeletonize(term, step[0]!, metta);
+    });
+    if (shaded.some((body) => body !== null)) out.push(cur.map((term, j) => shaded[j] ?? term));
   }
   return out;
 }
@@ -62,13 +74,29 @@ function ruleBody(redex: Atom, reduct: Atom, metta: MeTTa): Atom | null {
   const kids = redex.children();
   if (kids.length < 2) return null;
   const pattern = E(kids[0]!, ...kids.slice(1).map((_, i) => V("v" + String(i))));
-  const bodies = metta.evaluateAtom(
-    E(S("match"), S("&self"), E(S("="), pattern, V("body")), V("body")),
-  );
+  // The template is quoted, and the quote stripped off the results. `match` EVALUATES its template, so a
+  // bare `$body` runs each rule body it found — with that rule's variables still unbound. For a recursive
+  // rule that never stops: `(gen-bin-list $xs)` matches its own recursive clause again, and again, and the
+  // heap is gone before anything returns. Quoting asks for the body as written, which is the whole point
+  // here: the silhouette is the rule as the author spelled it, not its value.
+  const bodies = metta
+    .evaluateAtom(
+      E(S("match"), S("&self"), E(S("="), pattern, V("body")), E(S("quote"), V("body"))),
+    )
+    .map(unquote);
   for (const cand of bodies)
     if (cand instanceof ExpressionAtom && hasVar(cand) && fits(cand, reduct))
       return cleanVars(cand);
   return null;
+}
+
+/** `(quote X)` back to `X`; anything else unchanged. */
+function unquote(atom: Atom): Atom {
+  if (atom instanceof ExpressionAtom) {
+    const items = atom.children();
+    if (items.length === 2 && items[0]!.toString() === "quote") return items[1]!;
+  }
+  return atom;
 }
 
 /** Whether a rule body `pattern` fits the ground `reduct`: its variables match anything, everything else

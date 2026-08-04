@@ -19,7 +19,7 @@ npm install @mettascript/prolog swipl-wasm
 
 ## Registering Prolog interop
 
-```ts
+```ts signatures
 interface PrologBridge {
   query(goal: Atom): Promise<Atom[]>;
   asserta(term: Atom): Promise<void>;
@@ -45,7 +45,7 @@ class MockPrologBridge implements PrologBridge
 
 The package also exports the term codec and operation result types:
 
-```ts
+```ts signatures
 type PrologTermJson =
   | { readonly type: "atom"; readonly name: string }
   | { readonly type: "int"; readonly value: string }
@@ -69,7 +69,7 @@ type PrologOperationReturn = AsyncOperationReturn;
 
 ## Runtime adapters
 
-```ts
+```ts signatures
 // @mettascript/prolog/swi-node
 interface SwiPrologBridgeOptions {
   readonly executable?: string;
@@ -112,7 +112,7 @@ function createSwiWasmInterop(options?: SwiWasmInteropOptions): Promise<HostInte
 
 ## Example
 
-```ts
+```ts twoslash
 import { MeTTa } from "@mettascript/hyperon";
 import { registerPrologInterop } from "@mettascript/prolog";
 import { swiPrologBridge } from "@mettascript/prolog/swi-node";

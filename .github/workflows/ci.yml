@@ -21,3 +21,9 @@ jobs:
       - run: pnpm format:check
       - run: pnpm typecheck
       - run: pnpm test # includes the 270/270 Hyperon oracle gate
+      # The site build is where the documentation's TypeScript examples are compiled, by twoslash, against
+      # packages/*/src. Until now it ran only on a push to main, so an example that no longer matched the
+      # API was found after merging rather than on the branch that broke it. It also catches the two ways
+      # the docs build has broken before: a dependency the subset build could not resolve, and prose that
+      # Vue parsed as a template tag.
+      - run: pnpm --filter @metta-ts/website docs:build

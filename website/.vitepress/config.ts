@@ -2,7 +2,10 @@
 //
 // SPDX-License-Identifier: MIT
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { transformerTwoslash } from "@shikijs/vitepress-twoslash";
 import githubDark from "@shikijs/themes/github-dark";
 import githubLight from "@shikijs/themes/github-light";
 import type { LanguageRegistration } from "@shikijs/types";
@@ -17,6 +20,34 @@ import { defineConfig } from "vitepress";
 // tokenize `!(...)`, `import!`, `&self`, or `$variables`, so library code came out nearly colourless.
 type TokenColor = { readonly scope: string; readonly settings: { readonly foreground: string } };
 type TextMateTheme = typeof githubLight & { readonly tokenColors?: readonly unknown[] };
+
+// Every package export subpath mapped to its source file, read from the package manifests rather than
+// duplicated here, so an example is checked against the tree it ships with.
+function sourcePaths(): Record<string, string[]> {
+  const repo = fileURLToPath(new URL("../..", import.meta.url));
+  const paths: Record<string, string[]> = {};
+  for (const pkg of readdirSync(join(repo, "packages"))) {
+    let json: { name?: string; exports?: Record<string, unknown> };
+    try {
+      json = JSON.parse(readFileSync(join(repo, "packages", pkg, "package.json"), "utf8")) as {
+        name?: string;
+        exports?: Record<string, unknown>;
+      };
+    } catch {
+      continue;
+    }
+    const name = json.name;
+    if (name === undefined || json.exports === undefined) continue;
+    for (const [sub, target] of Object.entries(json.exports)) {
+      if (sub === "./package.json" || typeof target !== "object" || target === null) continue;
+      const types = (target as { types?: string }).types;
+      if (types === undefined) continue;
+      const src = types.replace(/^\.\/dist\//, "./src/").replace(/\.d\.ts$/, ".ts");
+      paths[sub === "." ? name : `${name}/${sub.slice(2)}`] = [join(repo, "packages", pkg, src)];
+    }
+  }
+  return paths;
+}
 
 const mettaLanguage: LanguageRegistration = {
   ...(JSON.parse(
@@ -91,19 +122,44 @@ export default defineConfig({
     // The MeTTa-LSP TextMate grammar and its per-scope colours, so ```metta fences read like the editor.
     languages: [mettaLanguage],
     theme: { light: mettaLightTheme, dark: mettaDarkTheme },
+    // ```ts twoslash blocks are compiled while the site builds, against packages/*/src rather than a built
+    // dist, so an example that no longer matches the API fails the build instead of reaching a reader.
+    // Readers get the type on hover as well. `// ---cut---` compiles setup without showing it, and
+    // `// @errors: NNNN` marks a block that is meant not to compile, which the typed eDSL pages rely on to
+    // show that a wrong call is caught at compile time.
+    codeTransformers: [
+      transformerTwoslash({
+        twoslashOptions: {
+          compilerOptions: {
+            target: 9 /* ES2022 */,
+            module: 99 /* ESNext */,
+            moduleResolution: 100 /* bundler */,
+            strict: true,
+            // The eDSL's own tsconfig turns this off, because its name proxies index by design.
+            noUncheckedIndexedAccess: false,
+            exactOptionalPropertyTypes: true,
+            skipLibCheck: true,
+            // The docs use node globals (process, node:fs) as readily as browser ones.
+            types: ["node"],
+            paths: sourcePaths(),
+          },
+        },
+      }),
+    ],
   },
   themeConfig: {
     nav: [
       { text: "Guide", link: "/guide/introduction" },
       { text: "Use cases", link: "/guide/use-cases" },
-      { text: "TypeScript", link: "/typescript/running-metta" },
       { text: "Learn MeTTa", link: "/learn/evaluation/main-concepts" },
+      // The eDSL is the way in for a TypeScript reader, so it comes before the lower-level API.
       { text: "eDSL", link: "/edsl/overview" },
+      { text: "TypeScript", link: "/typescript/running-metta" },
       { text: "Tools", link: "/tools/cli" },
       { text: "Advanced", link: "/advanced/concurrency" },
-      { text: "Experimental", link: "/guide/experimental" },
       { text: "Reference", link: "/reference/packages" },
       { text: "Playground", link: "/playground" },
+      { text: "Experimental", link: "/guide/experimental" },
       { text: "GitHub", link: "https://github.com/MesTTo/MeTTaScript" },
     ],
     sidebar: [
@@ -114,14 +170,6 @@ export default defineConfig({
           { text: "Getting started", link: "/guide/getting-started" },
           { text: "Use cases", link: "/guide/use-cases" },
           { text: "Playground", link: "/playground" },
-        ],
-      },
-      {
-        text: "Experimental",
-        collapsed: false,
-        items: [
-          { text: "Overview", link: "/guide/experimental" },
-          { text: "Streaming grounded operations", link: "/experimental/streaming-operations" },
         ],
       },
       {
@@ -143,20 +191,14 @@ export default defineConfig({
             ],
           },
           { text: "Exercises", link: "/learn/exercises" },
-          { text: "Standard libraries", link: "/learn/standard-libraries" },
         ],
       },
       {
-        text: "Using MeTTa from TypeScript",
+        text: "Libraries",
         collapsed: false,
         items: [
-          { text: "Running MeTTa in TypeScript", link: "/typescript/running-metta" },
-          { text: "Grounded operations", link: "/typescript/grounded-operations" },
-          { text: "Embedding TypeScript objects", link: "/typescript/embedding-objects" },
-          { text: "Async MeTTa", link: "/typescript/async" },
-          { text: "JavaScript interop", link: "/typescript/js-interop" },
-          { text: "Python interop", link: "/typescript/python-interop" },
-          { text: "Prolog interop", link: "/typescript/prolog-interop" },
+          { text: "Standard libraries", link: "/learn/standard-libraries" },
+          { text: "Property testing", link: "/fuzz/overview" },
         ],
       },
       {
@@ -172,9 +214,17 @@ export default defineConfig({
         ],
       },
       {
-        text: "Property testing",
+        text: "Using MeTTa from TypeScript",
         collapsed: false,
-        items: [{ text: "Overview", link: "/fuzz/overview" }],
+        items: [
+          { text: "Running MeTTa in TypeScript", link: "/typescript/running-metta" },
+          { text: "Grounded operations", link: "/typescript/grounded-operations" },
+          { text: "Embedding TypeScript objects", link: "/typescript/embedding-objects" },
+          { text: "Async MeTTa", link: "/typescript/async" },
+          { text: "JavaScript interop", link: "/typescript/js-interop" },
+          { text: "Python interop", link: "/typescript/python-interop" },
+          { text: "Prolog interop", link: "/typescript/prolog-interop" },
+        ],
       },
       {
         text: "Tools",
@@ -211,6 +261,14 @@ export default defineConfig({
           { text: "@mettascript/libraries", link: "/reference/libraries" },
           { text: "@mettascript/debug", link: "/reference/debug" },
           { text: "@mettascript/das-client and das-gateway", link: "/reference/das" },
+        ],
+      },
+      {
+        text: "Experimental",
+        collapsed: true,
+        items: [
+          { text: "Overview", link: "/guide/experimental" },
+          { text: "Streaming grounded operations", link: "/experimental/streaming-operations" },
         ],
       },
     ],

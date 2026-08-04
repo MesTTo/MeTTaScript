@@ -13,7 +13,7 @@ npm install @mettascript/hyperon
 
 ## The MeTTa runner
 
-```ts
+```ts signatures
 class MeTTa {
   constructor();
   run(program: string, fuel?: number): Atom[][]; // one Atom[] per !-query
@@ -34,14 +34,14 @@ class MeTTa {
 
 `run` extends the knowledge base with non-bang atoms and evaluates each `!`-query. `space()` is live: atoms added through it are visible to the evaluator. A grounded operation registered with `registerOperation` that throws produces a MeTTa `(Error ...)` atom; throw `IncorrectArgumentError` instead to leave the call unevaluated so other rules can match.
 
-```ts
+```ts signatures
 class IncorrectArgumentError extends Error {}
 function standardTokenizer(): Tokenizer;
 ```
 
 ## Atoms
 
-```ts
+```ts signatures
 abstract class Atom {
   readonly catom: core.Atom; // the underlying core atom
   static fromCAtom(c: core.Atom): Atom;
@@ -70,7 +70,7 @@ class GroundedAtom extends Atom {
 
 Constructors:
 
-```ts
+```ts signatures
 const S: (name: string) => SymbolAtom
 const V: (name: string) => VariableAtom
 const E: (...children: Atom[]) => ExpressionAtom
@@ -84,7 +84,7 @@ const AtomType: { UNDEFINED, TYPE, ATOM, SYMBOL, VARIABLE, EXPRESSION, GROUNDED,
 
 ## Grounded objects
 
-```ts
+```ts signatures
 class GroundedObject {
   readonly content: unknown;
   readonly id?: string;
@@ -111,7 +111,7 @@ Subclass `MatchableObject` and override `match_` to define how a TypeScript type
 
 ## Spaces
 
-```ts
+```ts signatures
 class SpaceRef {
   addAtom(atom: Atom): void;
   removeAtom(atom: Atom): boolean;
@@ -127,7 +127,7 @@ class GroundingSpace extends SpaceRef {
 
 ## Bindings
 
-```ts
+```ts signatures
 class Bindings {
   resolve(variable: VariableAtom): Atom | undefined;
   pairs(): [VariableAtom, Atom][];
@@ -152,7 +152,7 @@ A `query` returns a `BindingsSet`: an empty set means no match; one empty frame 
 
 ## Parsing
 
-```ts
+```ts signatures
 class Tokenizer {
   constructor(ctok?: core.Tokenizer);
   registerToken(regex: RegExp, constr): void;
@@ -166,7 +166,7 @@ class SExprParser {
 
 ## Modules
 
-```ts
+```ts signatures
 function registerJsInterop(m: MeTTa): void   // js-atom / js-dot / js-list / js-dict
 function registerJsonModule(m: MeTTa): void  // dict-space / get-keys / get-value / json-decode / json-encode
 function registerCatalogModule(m: MeTTa, catalog: ModuleCatalog): void

@@ -13,7 +13,7 @@ You do not need to know the MeTTa language, OpenCog, or Hyperon to start. Everyt
 
 Here is the shape of it from TypeScript, with no MeTTa syntax. You store facts, run a single-pattern query, and join across patterns on a shared variable, which is the same query a Datalog store like DataScript runs, written as TypeScript:
 
-```ts
+```ts twoslash
 import { mettaDB, names, vars } from "@mettascript/edsl";
 
 const db = mettaDB();
@@ -35,7 +35,12 @@ The names come from a proxy, so the binding is the name and you never write a st
 
 A metagraph is the most expressive of the graph data models. A graph joins two nodes with an edge, a hypergraph joins any number of nodes, and a metagraph lets links contain other links, so a fact can be about another fact. Flat rows and RDF triples cannot nest that way:
 
-```ts
+```ts twoslash
+import { mettaDB, names, vars } from "@mettascript/edsl";
+const db = mettaDB();
+const { parent, Believes, Tom, Bob, Ann } = names();
+const { x } = vars();
+// ---cut---
 // the value of a fact is itself a fact
 db.add(Believes(Tom, parent(Bob, Ann)));
 db.query(Believes(x, parent(Bob, Ann))); // [{ x: "Tom" }]
@@ -43,9 +48,12 @@ db.query(Believes(x, parent(Bob, Ann))); // [{ x: "Tom" }]
 
 On top of the store you write rules that derive new facts, and a rule can query the space, so recursive derivations a plain store cannot express are a couple of lines. Transitive reachability, every node you can get to by following edges:
 
-```ts
-import { Match } from "@mettascript/edsl";
-
+```ts twoslash
+import { mettaDB, names, vars, Match } from "@mettascript/edsl";
+const db = mettaDB();
+const { edge, reach, A, B, C } = names();
+const { x, y } = vars();
+// ---cut---
 db.add(edge(A, B), edge(B, C));
 db.rule(reach(x), Match(edge(x, y), y)); // one hop
 db.rule(reach(x), Match(edge(x, y), reach(y))); // then keep going

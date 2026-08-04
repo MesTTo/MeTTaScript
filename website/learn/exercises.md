@@ -98,7 +98,7 @@ Two rules, a base case and a recursive case:
 
 Every exercise above can be written with the [typed eDSL](/edsl/overview) instead of source strings. Factorial, for example:
 
-```ts
+```ts twoslash
 import { mettaDB, names, vars, If, gt, mul, sub } from "@mettascript/edsl";
 
 const db = mettaDB();
