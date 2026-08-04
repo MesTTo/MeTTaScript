@@ -1,3 +1,31 @@
+# MeTTaScript 3.1.2
+
+Every built-in operation is documented. `get-doc` answered nothing for 25 of them before this.
+
+## The 25 that had no documentation
+
+`foldall`, `maplist`, `foldl`, `forall`, `all-true`, `iterate`, `reduce`, `find`, `match-count`,
+`progn`, `prog1`, `cons`, `concat`, `atom_concat`, `stringToChars`, `charsToString`, `implies`,
+`sort-atom`, `alpha-unique-atom`, `collapse-extract`, `partial`, `assert`, `check-types`, `test` and
+`empty` now carry a `@doc`, so `get-doc` describes each one, an editor shows its signature on hover, and
+completion offers it with a summary.
+
+```metta
+!(get-doc empty)
+```
+
+```text
+[(@doc-formal (@item empty) (@kind function) (@type %Undefined%) (@desc "Answers no results at all, which removes this branch from a nondeterministic evaluation. It is what a failed let reduces to, and what a pattern that does not match yields") (@params ()) (@return (@type %Undefined%) (@desc "Nothing")))]
+```
+
+The documentation lives with the rest of the standard library's rather than beside each definition,
+because doc atoms are held apart from the evaluation environment: a program that never calls `get-doc`
+does not load them.
+
+Nothing about how any of these evaluate changed. In particular none of them gained a type declaration,
+which would have: a declared `Atom` parameter is passed unevaluated, and `pragma! type-check auto`
+enforces whatever is declared.
+
 # MeTTaScript 3.1.1
 
 The lambda is documented, and the engine can be asked what a program is allowed to call.

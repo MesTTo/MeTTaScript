@@ -200,12 +200,24 @@ compile errors — including in a query written as a source string, which is par
 the type level:
 
 ```ts
-const Likes2 = rel<[person: string, drink: string]>("Likes");
-db.query(Likes2("Ada", thing)); // { drink: string }[]  ·  Likes2("Ada", 42) does not compile
+import { mettaDB, rel, vars } from "@mettascript/edsl";
 
-const typed = mettaDB<{ relations: { Likes: [string, string] } }>();
-typed.q('(Likes "Ada" $drink)'); // { drink: string }[]
+const store = mettaDB();
+const Drinks = rel<[person: string, drink: string]>("Drinks");
+const { thing } = vars();
+
+store.add(Drinks("Ada", "Coffee"));
+store.query(Drinks("Ada", thing)); // [{ thing: "Coffee" }], typed { thing: string }
+//     Drinks("Ada", 42) does not compile: 42 is not assignable to a String column
+
+const typed = mettaDB<{ relations: { Drinks: [string, string] } }>();
+typed.add(Drinks("Ada", "Coffee"));
+typed.q('(Drinks "Ada" $drink)'); // [{ drink: "Coffee" }], typed { drink: string }
 ```
+
+A row is keyed by the variable you queried with, not by the column's label, so the
+same relation answers `{ thing: string }` or `{ drink: string }` depending on how you
+ask. Column types come from the declaration either way.
 
 Beyond that: `mettaModule()` makes a program fragment a value you pass around, carrying
 its types; `matchAtom`/`db.match` take a result apart with the handler typed from the
@@ -301,26 +313,6 @@ console.log(animals.map(String));
 
 This has been run end to end against a live DAS cluster (see [`@mettascript/das-client`](packages/das-client) for the setup). MeTTaScript computes atom handles that match AtomDB byte for byte, so a TypeScript program, in Node today and the browser through [`@mettascript/das-gateway`](packages/das-gateway), can query the same distributed knowledge base the Rust and Python agents use.
 
-## What is implemented
-
-A faithful port of hyperon-experimental's minimal interpreter (the nondeterministic stack machine), with the standard library loaded as MeTTa source on top. The core passes **all 270 assertions** of Hyperon's oracle corpus: the full dependent-type tier (GADTs, dependent types, types-as-propositions), spaces and mutable state, nondeterminism, grounded operations, and documentation. Correctness is also cross-checked against [LeaTTa](https://github.com/MesTTo/LeaTTa), the machine-checked (Lean 4) MeTTa semantics, pinned to the same commit.
-
-Beyond the core: transactions, async evaluation, concurrency primitives (`par`, `race`, `once`, `hyperpose`, `with-mutex`), clause indexing that scales matching to millions of atoms, a flat interned knowledge base with a worker-thread parallel matcher, and a JavaScript interop layer (`js-atom`, `js-dot`, `js-list`, `js-dict`) that calls into the host runtime directly.
-
-Eight PeTTa standard libraries load on demand with `(import! &self <name>)`, kept off the prelude so they leave default behavior unchanged: `vector`, `roman`, `combinatorics`, `patrick`, `datastructures`, `spaces`, and the `nars` and `pln` reasoners. The core list operations `size-atom`, `map-atom`, `filter-atom`, and `foldl-atom` run in linear time on a constant native stack.
-
-The language engine is pure TypeScript. The core builds to a single ESM bundle
-(~23 KB gzipped) that runs in Node and the browser with no native addon and no
-required WASM. Optional host adapters are separate packages: Pyodide and
-SWI-WASM are only pulled into browser bundles that import their adapter subpaths.
-
-```bash
-pnpm install
-pnpm build
-pnpm test          # 270/270 Hyperon oracle gate + unit and property tests
-node packages/node/dist/cli.js examples/factorial.metta
-```
-
 ## Packages
 
 | Package                                            | What it is                                                                                    |
@@ -335,38 +327,6 @@ node packages/node/dist/cli.js examples/factorial.metta
 | [`@mettascript/grapher`](packages/grapher)         | MeTTaGrapher: a visual editor with browser and headless Node reduction-GIF rendering.         |
 | [`@mettascript/das-client`](packages/das-client)   | Optional client to SingularityNET's Distributed AtomSpace via a Connect gateway.              |
 | [`@mettascript/das-gateway`](packages/das-gateway) | Optional transport-agnostic gateway bridging the browser to a Distributed AtomSpace.          |
-
-## Performance
-
-The pure-MeTTa path stays TypeScript throughout, with no escape to native code,
-and is still fast: a functor-and-argument-keyed query over a 1,000,000-atom
-knowledge base resolves in about 0.2 to 1.4 ms.
-
-On the reproducible corpus benchmark
-([`corpus-bench.mjs`](packages/node/bench/corpus-bench.mjs) runs the PeTTa
-example corpus through both engines and checks each program’s `(test …)`
-assertions), MeTTaScript passes all 98 Hyperon-faithful shared programs and is
-**faster than PeTTa on every one**, median 1.55x, from pure TypeScript.
-
-The core list operations run in linear time. `size-atom`, `map-atom`,
-`filter-atom`, and `foldl-atom` over N elements are O(N) on a constant native
-stack, byte-identical to the prelude recursion up to variable renaming, and beat
-PeTTa 2.7x to 5.2x at N=100000.
-
-Deep recursion scales past the native stack. A deep reducible computation runs
-through a heap continuation instead of the host call stack, so a reduction tens
-of thousands of levels deep returns a value rather than a `StackOverflow`. The
-depth bound is a `max-stack-depth` limit you set, deterministic and independent
-of the V8 stack size, so the same program cuts at the same place in every
-runtime.
-
-The full per-program tables, memory figures, and the nondeterminism and
-bounded-backward-chaining benchmarks are in
-[`RESULTS.md`](packages/node/bench/RESULTS.md),
-[`RESULTS-corpus.md`](packages/node/bench/RESULTS-corpus.md), and
-[`RESULTS-listops.md`](packages/node/bench/RESULTS-listops.md). Each
-release’s notes in [`RELEASE_NOTES.md`](RELEASE_NOTES.md) describe the engine
-work behind that version’s numbers.
 
 ## Compared with DataScript
 
