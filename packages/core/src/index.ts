@@ -28,6 +28,7 @@ export * from "./host";
 export * from "./extensions";
 export * from "./grounded-extensions";
 export * from "./stdlib";
+export * from "./petta-stdlib";
 export * from "./flat-kb";
 export * from "./flat-atomspace";
 export * from "./pmap";

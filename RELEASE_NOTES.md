@@ -1,3 +1,34 @@
+# MeTTaScript 3.1.1
+
+The lambda is documented, and the engine can be asked what a program is allowed to call.
+
+## `get-doc` answers for the lambda
+
+`|->` and `lambda-alpha` shipped without documentation, so `(get-doc |->)` came back empty:
+
+```metta
+!((|-> ($x) (* $x 2)) 21)
+```
+
+```text
+[42]
+```
+
+Both now carry a `@doc`, which means `get-doc` describes them, an editor can show their signature on
+hover, and completion offers them. Nothing about how they evaluate changed.
+
+## Two exports a tool needs to enumerate the language
+
+`pettaStdlibAtoms` and `PETTA_STDLIB_SRC` are exported, alongside the `preludeAtoms`/`stdlibAtoms` that
+already were, so the whole standard library is reachable rather than two thirds of it. `builtinOpNames`
+is the complete set of names the interpreter grounds to a built-in function, which is not the same as
+the set declared in MeTTa source: `empty` and a dozen others are registered only in TypeScript, so
+reading the declarations alone misses them.
+
+Both exist because the editor tooling was guessing. Its builtin database was written by hand, describing
+147 operations while the engine shipped 229, so everything MeTTaScript adds on top of Hyperon's corelib,
+the lambda included, was reported as an undefined function. It is generated from the engine now.
+
 # MeTTaScript 3.1.0
 
 One lambda abstraction, spelled `|->`, and it now renames capture-avoidingly so a lambda can nest

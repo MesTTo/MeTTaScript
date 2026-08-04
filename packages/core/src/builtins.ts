@@ -1700,6 +1700,13 @@ const TABLE_UNSAFE_GROUNDED_OPS: ReadonlySet<string> = new Set([
   "test",
 ]);
 
+/** Every name the interpreter grounds to a built-in function. Some are also declared in MeTTa source and
+ *  some are not, so this is the only complete list of what a program can call without defining it — which
+ *  is what a tool documenting or completing the language needs. `pettaOpNames` is the PeTTa-compat subset. */
+export const builtinOpNames: ReadonlySet<string> = new Set(
+  [...mathEntries, ...coreEntries, ...stdEntries, ...pettaEntries].map(([n]) => n),
+);
+
 const tableSafeGroundedFns = new Map<string, GroundFn>();
 for (const [name, fn] of [...mathEntries, ...coreEntries, ...stdEntries, ...pettaEntries])
   if (!TABLE_UNSAFE_GROUNDED_OPS.has(name) && !tableSafeGroundedFns.has(name))
