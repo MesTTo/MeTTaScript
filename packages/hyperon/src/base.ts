@@ -70,6 +70,30 @@ export class SpaceRef {
     return this.removeAtom(atom);
   }
 
+  /** Remove several atoms at once, answering how many were there. Backends that can do it in one pass
+   *  do; the rest fall back to removing one at a time, which is what a caller would write by hand. */
+  removeAtoms(atoms: readonly Atom[]): number {
+    const many = (this.space as { removeMany?: (xs: readonly core.Atom[]) => number }).removeMany;
+    if (many !== undefined)
+      return many.call(
+        this.space,
+        atoms.map((a) => a.catom),
+      );
+    let n = 0;
+    for (const a of atoms) if (this.space.remove(a.catom)) n++;
+    return n;
+  }
+
+  /** Remove every atom. Backends that can empty themselves in one pass do; the rest lose their atoms
+   *  one at a time, which is what a caller would otherwise write by hand. */
+  clear(): void {
+    if (this.space.clear !== undefined) {
+      this.space.clear();
+      return;
+    }
+    for (const a of this.space.atoms()) this.space.remove(a);
+  }
+
   /** Every atom in the space. */
   getAtoms(): Atom[] {
     return this.space.atoms().map(Atom.fromCAtom);
@@ -117,7 +141,15 @@ class RunnerSpace implements core.Space {
     private readonly onAdd: (a: core.Atom) => void,
     private readonly onRemove: (a: core.Atom) => boolean,
     private readonly list: () => readonly core.Atom[],
+    private readonly onClear: () => void,
+    private readonly onRemoveMany: (xs: readonly core.Atom[]) => number,
   ) {}
+  removeMany(atoms: readonly core.Atom[]): number {
+    return this.onRemoveMany(atoms);
+  }
+  clear(): void {
+    this.onClear();
+  }
   add(atom: core.Atom): void {
     this.onAdd(atom);
   }
@@ -181,6 +213,12 @@ export class MeTTa {
   private readonly kb: core.Atom[] = [];
   private readonly _space: SpaceRef;
 
+  // Installed by `watchSpaceChanges`; `undefined` is the whole cost when nobody is listening.
+  private spaceChange: ((op: "add" | "remove", space: string, atom: core.Atom) => void) | undefined;
+
+  // Backends by space name, kept here rather than only on the env because a rebuild replaces the env.
+  private readonly spaceBackends = new Map<string, core.Space>();
+
   constructor() {
     this.gt = core.stdTable();
     this.tok = new Tokenizer(standardTokenizerC());
@@ -191,26 +229,121 @@ export class MeTTa {
       new RunnerSpace(
         (a) => this.addToKb(a),
         (a) => this.removeFromKb(a),
-        () => this.kb,
+        () => this.selfAtoms(),
+        () => {
+          this.clearKb();
+        },
+        (xs) => this.removeMany(xs),
       ),
     );
+  }
+
+  // What `&self` actually holds, which is not the same as the KB.
+  //
+  // The KB is what `run` and `space()` put in. An `(add-atom &self …)` performed DURING evaluation is an
+  // interpreter effect and lands in the evaluator's World instead, and a `(remove-atom &self …)` against
+  // a KB atom records a retraction there rather than splicing the KB. Reading the KB alone therefore
+  // disagreed with `(match &self …)` about the same space: `getAtoms()` missed atoms MeTTa had added,
+  // and `query()` returned no frames for them. Both go through this, so both now see one space.
+  private selfAtoms(): readonly core.Atom[] {
+    const world = this.st.world;
+    const added = core.hasRuntimeSelfAtoms(world);
+    const retracted = core.selfHasRetractions(world);
+    // The usual case is no runtime effects at all. Both questions are answered in constant time, so
+    // that case allocates nothing and never materialises the world's atoms.
+    if (!added && !retracted) return this.kb;
+    const kept = retracted ? this.kb.filter((a) => !core.selfAtomRetracted(world, a)) : this.kb;
+    // Caching the merge on the World's identity was MEASURED and is a pessimisation: a program doing
+    // `add-atom` replaces the World on every effect, so the cache never hits and only adds an object
+    // per read (0.37 -> 0.43 ms/iter on the async addAtom benchmark).
+    return added ? [...kept, ...core.runtimeSelfAtoms(world)] : kept;
   }
 
   // Add an atom to the KB and the interpreter env together.
   private addToKb(atom: core.Atom): void {
     this.kb.push(atom);
     core.addAtomToEnv(this.env, atom);
+    this.spaceChange?.("add", "&self", atom);
   }
 
   // Remove an atom from the KB; rebuild env from the prelude + remaining KB so retraction is real
   // (the env's rule/type indexes are derived, not incrementally removable).
   private removeFromKb(atom: core.Atom): boolean {
     const i = this.kb.findIndex((a) => core.atomEq(a, atom));
-    if (i < 0) return false;
+    if (i < 0) return this.removeRuntimeAtom(atom);
     this.kb.splice(i, 1);
+    this.rebuildEnv();
+    this.spaceChange?.("remove", "&self", atom);
+    return true;
+  }
+
+  // Remove several atoms with ONE env rebuild.
+  //
+  // `removeFromKb` rebuilds the interpreter env after each removal, because the env's rule and type
+  // indexes are derived from the whole KB rather than incrementally removable. Undoing a batch one atom
+  // at a time therefore costs one full rebuild per atom.
+  //
+  // Matching is by IDENTITY first: the caller undoing a batch holds the very atoms that were added, and
+  // the KB holds those same objects. Deleting from the set as each is found keeps multiplicity right,
+  // since a space is a multiset and two equal atoms are two distinct objects here. Anything left over —
+  // an atom the caller built afresh, or one a runtime `add-atom` put in the World — falls back to the
+  // single-atom path, which knows both.
+  removeMany(atoms: readonly core.Atom[]): number {
+    const wanted = new Set<core.Atom>(atoms);
+    const kept: core.Atom[] = [];
+    let removed = 0;
+    for (const a of this.kb) {
+      if (wanted.delete(a)) removed++;
+      else kept.push(a);
+    }
+    if (removed > 0) {
+      this.kb.length = 0;
+      this.kb.push(...kept);
+      this.rebuildEnv();
+      if (this.spaceChange !== undefined)
+        for (const a of atoms) if (!wanted.has(a)) this.spaceChange("remove", "&self", a);
+    }
+    for (const a of wanted) if (this.removeFromKb(a)) removed++;
+    return removed;
+  }
+
+  // Not in the KB, so it may be one a runtime `(add-atom &self …)` put in the World. Those are part of
+  // this space — `getAtoms()` lists them and `query()` matches them — so refusing to remove one made
+  // the space disagree with itself. The engine's own `(remove-atom &self …)` reaches them, and this is
+  // that same operation rather than a second implementation of it.
+  private removeRuntimeAtom(atom: core.Atom): boolean {
+    const w = core.removeRuntimeSelfAtom(this.st.world, atom);
+    if (w === undefined) return false;
+    this.st = { ...this.st, world: w };
+    this.spaceChange?.("remove", "&self", atom);
+    return true;
+  }
+
+  // Empty the space in one pass.
+  //
+  // Removing atom by atom is quadratic twice over: each removal scans the KB with a deep comparison AND
+  // rebuilds the env from the prelude, the stdlib and everything still stored. Measured at 10k atoms,
+  // clearing and refilling took 31 seconds; at 100k it did not finish. One truncation and one env build
+  // do the same job.
+  private clearKb(): void {
+    if (this.spaceChange !== undefined)
+      for (const a of this.selfAtoms()) this.spaceChange("remove", "&self", a);
+    this.kb.length = 0;
+    this.rebuildEnv();
+    this.st = {
+      ...this.st,
+      world: core.clearSelfSpace(this.env, this.st.world),
+    };
+  }
+
+  private rebuildEnv(): void {
     this.env = core.buildEnv([...core.preludeAtoms(), ...core.stdlibAtoms(), ...this.kb], this.gt);
     this.env.imports = core.withBuiltinModules();
-    return true;
+    // A rebuild replaces the env wholesale, so anything the host installed on it has to be put back.
+    // Missing this would have stopped a change listener silently, at the first removal, and detached
+    // every registered backend so its space quietly reverted to the interpreter's own store.
+    this.env.onSpaceChange = this.spaceChange;
+    if (this.spaceBackends.size > 0) this.env.spaceBackends = this.spaceBackends;
   }
 
   private shouldEvaluate(atom: core.Atom, bang: boolean): boolean {
@@ -318,6 +451,42 @@ export class MeTTa {
    *  atom retracts it from evaluation too. */
   space(): SpaceRef {
     return this._space;
+  }
+
+  /** Serve a named space from a {@link SpaceRef}'s backend instead of the interpreter's own store.
+   *
+   *      const shelf = new PersistentSpace();
+   *      metta.registerSpace("&shelf", shelf);
+   *      metta.run("!(add-atom &shelf (Likes Ada Coffee))");
+   *      shelf.snapshot();   // a value, held past anything the program does later
+   *
+   *  The name is the one a program writes. A bare symbol resolves to itself, so `&shelf` reaches this
+   *  backend directly, and `(bind! &alias &shelf)` reaches it through the token. `&self` is NOT
+   *  registrable: it is the KB and the World read as one, and neither is a `Space`.
+   *
+   *  Registering nothing leaves every path exactly as it was. */
+  registerSpace(name: string, backend: core.Space | undefined): void {
+    if (backend === undefined) this.spaceBackends.delete(name);
+    else this.spaceBackends.set(name, backend);
+    this.env.spaceBackends = this.spaceBackends.size === 0 ? undefined : this.spaceBackends;
+  }
+
+  /** Report every atom this runner's spaces gain or lose, from a host write or from an `(add-atom …)`
+   *  the program performed while evaluating. Pass `undefined` to stop.
+   *
+   *  A change LOG, where a trace sink is an execution trace: it says what happened to the knowledge, not
+   *  how the evaluator got there. Installing one costs a single `if` per space write and nothing at all
+   *  while none is installed, so it stays free for every program that does not ask. */
+  watchSpaceChanges(
+    fn: ((op: "add" | "remove", space: string, atom: Atom) => void) | undefined,
+  ): void {
+    this.spaceChange =
+      fn === undefined
+        ? undefined
+        : (op, space, atom) => {
+            fn(op, space, Atom.fromCAtom(atom));
+          };
+    this.env.onSpaceChange = this.spaceChange;
   }
 
   /** The runner's tokenizer. */

@@ -273,4 +273,25 @@ describe("MeTTa runner", () => {
     expect(removed).toBe(true);
     expect(m.run("!(greeting)")[0]!.map((a) => a.toString())).toEqual(["hi"]);
   });
+
+  it("space() and (match &self ...) agree, including about evaluation-time add and remove", () => {
+    // An `(add-atom &self ...)` performed DURING evaluation is an interpreter effect: it lands in the
+    // evaluator's World, not in the atoms `run` and `space()` put in. Reading only the latter made the
+    // two disagree about one space — `getAtoms` missed the atom and `query` returned no frames for it,
+    // while `match` found it. A `(remove-atom &self ...)` against a stored atom is the mirror case: it
+    // records a retraction rather than splicing the store.
+    const m = new MeTTa();
+    m.run("(base-atom)");
+    m.run("!(add-atom &self (effect-atom))");
+
+    expect(m.space().getAtoms().map(String).sort()).toEqual(["(base-atom)", "(effect-atom)"]);
+    expect(m.space().query(E(S("effect-atom"))).frames).toHaveLength(1);
+    expect(m.run("!(match &self (effect-atom) YES)")[0]!.map(String)).toEqual(["YES"]);
+    expect(m.space().atomCount()).toBe(2);
+
+    m.run("!(remove-atom &self (base-atom))");
+    expect(m.space().getAtoms().map(String)).toEqual(["(effect-atom)"]);
+    expect(m.space().query(E(S("base-atom"))).frames).toHaveLength(0);
+    expect(m.run("!(match &self (base-atom) STILL)")[0]!.map(String)).toEqual([]);
+  });
 });

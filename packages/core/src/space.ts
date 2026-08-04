@@ -16,6 +16,9 @@ export interface Space {
    *  to each stored atom before matching (rule-variable freshening). */
   query(pattern: Atom, freshen?: (a: Atom) => Atom): Bindings[];
   atoms(): readonly Atom[];
+  /** Remove every atom, when the backend can do it in one pass. Optional so a backend that cannot
+   *  (a remote store, say) is unaffected; the caller falls back to removing one at a time. */
+  clear?(): void;
 }
 
 function expressionHeadKey(atom: Atom): string | undefined {
@@ -82,5 +85,13 @@ export class InMemorySpace implements Space {
 
   atoms(): readonly Atom[] {
     return this.store;
+  }
+
+  // Resetting the three containers, rather than removing atom by atom: `remove` scans the store with a
+  // deep comparison, so emptying it one atom at a time is quadratic.
+  clear(): void {
+    this.store.length = 0;
+    this.byHead.clear();
+    this.unindexed.length = 0;
   }
 }

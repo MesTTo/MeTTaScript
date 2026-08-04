@@ -1,0 +1,57 @@
+# MeTTaScript
+
+> MeTTa (OpenCog Hyperon) for TypeScript: an interpreter in pure TypeScript plus the packages around it —
+> atom construction, a typed eDSL, files and a CLI, property testing, visual reduction, and Python,
+> Prolog and Distributed AtomSpace interop. No native addons and no required WASM; runs in browsers,
+> Node, Deno, Bun and edge runtimes.
+
+Each package carries an `LLMS.md`: a one-page, high-density reference written for a language model that
+needs to USE it — API surface, working code, and the traps that produce wrong programs. Read the one for
+the package you need; they cross-link and do not repeat each other.
+
+Start with `core` for the evaluation model (rewrite vs match, why every result is an array), then the
+package that matches your job. `core` deliberately exports no atom constructors: if you are building
+atoms from TypeScript values you want `hyperon` or `edsl`.
+
+## Engine
+
+- [core](packages/core/LLMS.md): the interpreter. Source text in, result atoms out; parser, static
+  analysis, spaces, the evaluation model every other package inherits.
+- [hyperon](packages/hyperon/LLMS.md): class API modeled on Python `hyperon`. Build atoms (`E S V G`),
+  hold them in spaces, run a stateful `MeTTa`, register grounded operations. Use this to cross JS↔MeTTa.
+- [edsl](packages/edsl/LLMS.md): typed TypeScript eDSL. Proxy-minted names and variables, combinators, a
+  tagged template, auto-grounding, a typed host bridge in both directions.
+
+## Runtimes
+
+- [node](packages/node/LLMS.md): the `metta` CLI, filesystem `import!`, worker-thread parallel matcher.
+  Re-exports all of `core`.
+- [browser](packages/browser/LLMS.md): browser entry with an in-memory virtual file system so `import!`
+  works without disk; async runner for `par`/`race`/`hyperpose`.
+
+## Libraries and tooling
+
+- [libraries](packages/libraries/LLMS.md): pure MeTTa standard libraries (`vector`, `spaces`, `nars`,
+  `pln`, …), registered by a side-effecting import and loaded with `(import! &self <name>)`.
+- [fuzz](packages/fuzz/LLMS.md): property testing written in MeTTa — generators as data, stable
+  shrinking, exhaustive enumeration, model-vs-real state machines, bounded reachability.
+- [debug](packages/debug/LLMS.md): host-free debugger engine; you pass in the runner, it explains the
+  call.
+- [grapher](packages/grapher/LLMS.md): visual editor and reduction renderer, node-graph or nested-block
+  views, GIF export.
+
+## Interop
+
+- [py](packages/py/LLMS.md): Python via a caller-supplied bridge — `py-call`, `py-eval`, the `py-atom`
+  family. Async; pythonia on Node, Pyodide in browsers.
+- [prolog](packages/prolog/LLMS.md): Prolog via SWI (`swipl` executable on Node, `swipl-wasm` in
+  browsers) — `Predicate`, `prolog-call`, `assertzPredicate`.
+- [das-client](packages/das-client/LLMS.md): SingularityNET Distributed AtomSpace over gRPC, Node-only;
+  presents a DAS as a `Space`.
+- [das-gateway](packages/das-gateway/LLMS.md): transport-agnostic DAS bridge over Connect/HTTP, reachable
+  from a browser.
+
+## Optional
+
+- [README](README.md): human-facing project overview.
+- [documentation site](https://mestto.github.io/MeTTaScript/): guides and tutorials.

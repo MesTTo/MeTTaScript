@@ -51,6 +51,12 @@ for (const { query, results } of runFile("program.metta")) {
 
 `ParallelFlatMatcher` scans a large flat knowledge base across `worker_threads` over a shared token buffer. It pays off only for a large KB scanned by a non-selective query whose result set is small; a keyed query is already near-constant-time via the in-memory argument index.
 
+## For language models
+
+[`LLMS.md`](./LLMS.md) is a one-page, high-density reference for this package: API surface, working
+examples, and the mistakes that produce wrong code. The repository root carries an
+[`llms.txt`](../../llms.txt) index of all of them.
+
 ## License
 
 [MIT](https://github.com/MesTTo/MeTTaScript/blob/main/LICENSE).

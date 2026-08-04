@@ -27,6 +27,12 @@ Querying a DAS involves network I/O, so the gateway's query API is async. Pair i
 
 Each returned binding value must contain exactly one MeTTa atom. `decodeBindings` throws a deterministic error for blank, malformed, bang-prefixed, or multi-atom values instead of returning a partial binding.
 
+## For language models
+
+[`LLMS.md`](./LLMS.md) is a one-page, high-density reference for this package: API surface, working
+examples, and the mistakes that produce wrong code. The repository root carries an
+[`llms.txt`](../../llms.txt) index of all of them.
+
 ## License
 
 [MIT](https://github.com/MesTTo/MeTTaScript/blob/main/LICENSE).

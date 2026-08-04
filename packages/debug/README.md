@@ -23,3 +23,9 @@ console.log(report.result); // ["42"]
 Use `collectTrace` when the caller already has an assembled program and only
 needs the raw trace event stream. Use `summarize` when the caller already
 collected events and needs the grouped `metta-debug why` counters.
+
+## For language models
+
+[`LLMS.md`](./LLMS.md) is a one-page, high-density reference for this package: API surface, working
+examples, and the mistakes that produce wrong code. The repository root carries an
+[`llms.txt`](../../llms.txt) index of all of them.

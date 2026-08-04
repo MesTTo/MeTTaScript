@@ -9,6 +9,8 @@ import { describe, it, expect } from "vitest";
 import {
   emptyPMap,
   emptyPTable,
+  pmDiff,
+  ptDiff,
   pmGet,
   pmSet,
   ptDelete,
@@ -163,5 +165,78 @@ describe("PTable (persistent table with size and insertion order)", () => {
       ["b", "2"],
     ]);
     expect(ptDelete(t, "missing")).toBe(t);
+  });
+});
+
+// The structural diff is held to the same standard as the map itself: a plain Map says what changed, and
+// the trie walk has to agree. It earns that scrutiny — the first version reported spurious changes,
+// because CHAMP's canonical deletion lifts a surviving entry up into its parent, so an inline entry can
+// end up facing a subtree whose keys are indexed by the NEXT level's hash bits.
+describe("pmDiff / ptDiff against a plain Map", () => {
+  // A seeded LCG, as above: deterministic, and a small key space to force depth and collisions.
+  const lcg = (seed: number) => () =>
+    (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+
+  it("reports exactly the keys a Map reference says changed, and their before/after", () => {
+    for (let trial = 0; trial < 200; trial++) {
+      const rnd = lcg(trial + 1);
+      const key = (): string => String(Math.floor(rnd() * 60));
+      let table: PTable<number> = emptyPTable();
+      const ref = new Map<string, number>();
+      const apply = (n: number): void => {
+        for (let i = 0; i < n; i++) {
+          const k = key();
+          if (rnd() < 0.3) {
+            table = ptDelete(table, k);
+            ref.delete(k);
+          } else {
+            const v = Math.floor(rnd() * 100);
+            table = ptSet(table, k, v);
+            ref.set(k, v);
+          }
+        }
+      };
+      apply(40);
+      const base = table;
+      const before = new Map(ref);
+      apply(20);
+
+      const expected = new Set<string>();
+      for (const [k, v] of before) if (ref.get(k) !== v) expected.add(k);
+      for (const [k, v] of ref) if (before.get(k) !== v) expected.add(k);
+
+      const got = ptDiff(base, table);
+      expect(new Set(got.map((c) => c.key))).toEqual(expected);
+      for (const c of got) {
+        expect(c.before).toBe(before.get(c.key));
+        expect(c.after).toBe(ref.get(c.key));
+      }
+    }
+  });
+
+  it("says nothing changed when nothing did, without walking the map", () => {
+    let t: PTable<number> = emptyPTable();
+    for (let i = 0; i < 500; i++) t = ptSet(t, String(i), i);
+    expect(ptDiff(t, t)).toEqual([]);
+    // an unrelated write leaves every other subtree shared, so the diff finds only the one key
+    const changed = ptSet(t, "250", 9999);
+    expect(ptDiff(t, changed)).toEqual([{ key: "250", before: 250, after: 9999 }]);
+  });
+
+  it("handles an empty side in both directions", () => {
+    let t: PMap<number> = emptyPMap;
+    t = pmSet(t, "a", 1);
+    t = pmSet(t, "b", 2);
+    expect(
+      pmDiff(emptyPMap, t)
+        .map((c) => c.key)
+        .sort(),
+    ).toEqual(["a", "b"]);
+    expect(
+      pmDiff(t, emptyPMap)
+        .map((c) => c.key)
+        .sort(),
+    ).toEqual(["a", "b"]);
+    expect(pmDiff(emptyPMap as PMap<number>, emptyPMap as PMap<number>)).toEqual([]);
   });
 });

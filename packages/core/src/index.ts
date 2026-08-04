@@ -30,6 +30,8 @@ export * from "./grounded-extensions";
 export * from "./stdlib";
 export * from "./flat-kb";
 export * from "./flat-atomspace";
+export * from "./pmap";
+export * from "./persistent-space";
 export * from "./flat-william";
 export * from "./table-space";
 export { Trail, unifyTrail } from "./trail";

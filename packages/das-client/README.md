@@ -70,3 +70,9 @@ Atom-handle hashing (`handle.ts`) is a port of `hyperon_das/hasher.py` and produ
 ## Version matching
 
 The released `1.0.0` Query Agent serves the `dasproto.AtomSpaceNode` service. A later `das-proto` renamed it to `DistributedAlgorithmNode`, and calling the new contract against the old agent returns gRPC `UNIMPLEMENTED`. The client carries both generated contracts, and the live path uses the one the running agent serves. Regenerate the stubs with `pnpm --filter @mettascript/das-client gen` (needs `protoc`).
+
+## For language models
+
+[`LLMS.md`](./LLMS.md) is a one-page, high-density reference for this package: API surface, working
+examples, and the mistakes that produce wrong code. The repository root carries an
+[`llms.txt`](../../llms.txt) index of all of them.

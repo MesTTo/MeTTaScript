@@ -570,6 +570,40 @@ const exprArgs = (args: readonly Atom[]): Atom[][] | undefined => {
   return out;
 };
 
+/** `(\ <pattern-1> ... <pattern-N> <body>)`, the lambda-abstraction value. Patterns are written
+ *  unparenthesized so the shape lines up with a named definition, `(= (f $x $y) body)`, and with an
+ *  arrow type, `(-> A B C)`. The head is one backslash.
+ *
+ *  Takes the items rather than the atom, and returns a plain boolean rather than an `a is ExprAtom`
+ *  type predicate, on purpose. Applying a type predicate to a value TypeScript has already narrowed to
+ *  `ExprAtom` narrows the false branch to `never`, and the next `.items` access fails to compile with a
+ *  message that points nowhere near the cause. That has cost time twice in this file now; check
+ *  `.kind === "expr"` at the call site and pass `.items` in. */
+const isLambdaItems = (items: readonly Atom[]): boolean =>
+  items.length >= 2 && items[0]!.kind === "sym" && items[0]!.name === "\\";
+
+/** The variables a lambda's parameter patterns bind. `(\ (Cons $h $t) $h)` binds `$h` and `$t`; the
+ *  body (the last element) is not a binder. */
+function lambdaBinders(items: readonly Atom[]): string[] {
+  const out: string[] = [];
+  for (let i = 1; i < items.length - 1; i++) out.push(...atomVars(items[i]!));
+  return out;
+}
+
+/** Apply `sub` through `a`, leaving alone any subtree where a nested lambda rebinds the name. */
+function renameAvoidingShadow(sub: ReadonlyMap<string, Atom>, a: Atom): Atom {
+  if (sub.size === 0) return a;
+  if (a.kind === "var") return sub.get(a.name) ?? a;
+  if (a.kind !== "expr") return a;
+  const items = a.items;
+  if (isLambdaItems(items)) {
+    const inner = new Map(sub);
+    for (const v of lambdaBinders(items)) inner.delete(v);
+    return expr(items.map((x, i) => (i === 0 ? x : renameAvoidingShadow(inner, x))));
+  }
+  return expr(items.map((x) => renameAvoidingShadow(sub, x)));
+}
+
 const getMetatypeOp: GroundFn = (args) => {
   const a = args[0];
   if (args.length !== 1 || a === undefined) return ierr("get-metatype expects 1 argument");
@@ -1268,6 +1302,29 @@ const stdEntries: Array<[string, GroundFn]> = [
       return ok(applySubst(sub, args[1]!));
     },
   ],
+  [
+    "lambda-alpha",
+    // Give a `(\ <patterns> <body>)` lambda a private copy of the variables its patterns bind, so an
+    // application cannot capture anything and the same lambda can be applied repeatedly (inside a fold or
+    // a map) without its uses running into one another.
+    //
+    // `sealed` is not enough on its own, because it renames every occurrence of a name and knows nothing
+    // about binders. In `(\ $x (+ ((\ $x $x) 5) 1))` the inner `$x` is a DIFFERENT variable that shadows
+    // the outer one; renaming both together and then binding the outer to 41 leaves `((\ 41 41) 5)`,
+    // which cannot match. This walks the body instead and stops renaming at any nested lambda that
+    // rebinds the name, i.e. ordinary capture-avoiding alpha-renaming.
+    (args) => {
+      const l = args[0];
+      if (args.length !== 1 || l === undefined || l.kind !== "expr" || !isLambdaItems(l.items))
+        return ierr("lambda-alpha expects a (\\ <patterns> <body>) expression");
+      const binders = [...new Set(lambdaBinders(l.items))];
+      if (binders.length === 0) return ok(l);
+      const sub = new Map<string, Atom>(
+        binders.map((v) => [v, variable(v + "#" + String(sealCounter++))]),
+      );
+      return ok(expr(l.items.map((x, i) => (i === 0 ? x : renameAvoidingShadow(sub, x)))));
+    },
+  ],
   ["nop", () => ok(emptyExpr)],
   ["dict-space", dictSpaceOp],
   ["json-decode", jsonDecodeOp],
@@ -1539,11 +1596,21 @@ const pettaEntries: Array<[string, GroundFn]> = [
       const chars = a[0]!;
       if (a.length !== 1 || chars.kind !== "expr")
         return ierr("charsToString expects an Expression of characters");
-      return ok(
-        gstr(
-          chars.items.map((x) => (x.kind === "sym" ? x.name : (asStr(x) ?? format(x)))).join(""),
-        ),
-      );
+      let s = "";
+      for (const x of chars.items) {
+        // Every element must be a single-character symbol, which is exactly what stringToChars
+        // produces. Joining whatever an element happens to render as instead turned a wrong argument
+        // into a plausible-looking string: `(charsToString (stringToChars "wolf"))` answered
+        // "stringToCharswolf", because the Expression-typed parameter leaves the inner call
+        // unreduced and its head and argument were spelled out. A wrong string nothing downstream
+        // can distinguish from a real answer is the worst way to fail, so this is an error instead.
+        // (hyperon-experimental returns its own garbage here, "tringToCharwolf"; mops.pdf specifies
+        // the operational core and the ground literals, not this op, so being loud is compliant.)
+        if (x.kind !== "sym" || [...x.name].length !== 1)
+          return ierr("charsToString expects an Expression of single-character symbols");
+        s += x.name;
+      }
+      return ok(gstr(s));
     },
   ],
   // parse a string of MeTTa source into its (first) atom; sread is PeTTa's alias.

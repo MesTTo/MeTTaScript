@@ -1,6 +1,6 @@
 {
   "name": "@mettascript/grapher",
-  "version": "2.10.0",
+  "version": "3.0.0",
   "author": "MesTTo",
   "license": "MIT",
   "description": "MeTTa visual editor and reduction renderer for browser and Node.js, with node-graph and nested-block views.",
@@ -30,7 +30,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "LLMS.md"
   ],
   "engines": {
     "node": ">=20"

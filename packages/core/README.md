@@ -30,6 +30,12 @@ for (const { query, results: rs } of results) {
 
 The experimental line adds a pull-based streaming grounded-operation protocol on the `experimental` npm tag; see [Experimental features](https://mestto.github.io/MeTTaScript/guide/experimental).
 
+## For language models
+
+[`LLMS.md`](./LLMS.md) is a one-page, high-density reference for this package: API surface, working
+examples, and the mistakes that produce wrong code. The repository root carries an
+[`llms.txt`](../../llms.txt) index of all of them.
+
 ## License
 
 [MIT](https://github.com/MesTTo/MeTTaScript/blob/main/LICENSE).

@@ -28,6 +28,23 @@ db.evalJs(fact(5)); // [120]
 
 `names()` and `vars()` mint the functors, symbols, and variables you use, so no name is written twice: the JS binding is the name. `fact(x)` builds the expression `(fact $x)`; `If`, `gt`, `mul`, `sub` build the standard forms `if`, `>`, `*`, `-`. The result runs on the same interpreter as any MeTTa program.
 
+## An array is an expression
+
+The shortest spelling of a term is an array. `[parent, Tom, Bob]` is `(parent Tom Bob)`, nesting is free, and a program is therefore data you build with ordinary array code.
+
+```ts
+import { mettaDB, names, vars } from "@mettascript/edsl";
+
+const db2 = mettaDB();
+const { parent, Tom, Bob } = names("parent", "Tom", "Bob");
+const { y } = vars("y");
+
+db2.add([parent, Tom, Bob]);
+db2.query([parent, Tom, y]); // [{ y: "Bob" }]
+```
+
+MeTTa has no array type of its own: `(1 2 3)` is an expression, so reading a JavaScript array as one is the closest notation TypeScript has. [An array is an expression](/edsl/arrays) covers the escape for when the array is the datum, why a string in head position needs `sym`, and what changed in 3.0.0.
+
 ## Names and variables
 
 `names()` returns a proxy that mints a symbol or functor per property, and `vars()` one that mints a fresh logic variable per property. A bare name grounds to its symbol; a called name applies it. Destructure what you use.
@@ -159,3 +176,7 @@ Python strings. Strings in Prolog goal arrays are Prolog atoms, so
 `["edge", "alice", x]` builds `(edge alice $x)`.
 
 The eDSL is the most ergonomic way to drive MeTTa from TypeScript. When a script is easier to read as plain MeTTa, reach for `m\`...\``or`db.run(source)`; the two always interoperate.
+
+## Where to go next
+
+[An array is an expression](/edsl/arrays) is the model everything else sits on. [Typed relations and queries](/edsl/relations) puts column types in one place and checks every query against them, including source strings parsed at the type level. [Programs you can compose](/edsl/modules) makes a fragment a value you pass around. [Taking a result apart](/edsl/results) types the way back, with exhaustiveness over declared heads, errors as values, and decoding through any Standard Schema validator. [The space, as a collection](/edsl/spaces) reads and writes the atoms directly, with transactions, a change log, and a space served by your own backend.

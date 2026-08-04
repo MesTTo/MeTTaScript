@@ -166,3 +166,37 @@ const importPrologFunctionsFromFile: (path: Term, names: readonly Term[] | Term)
 Strings in Prolog goal arrays are treated as Prolog atoms, so
 `prologCall(["edge", "alice", x])` builds `(prolog-call (edge alice $x))`.
 Pass `ground("text")` when a Prolog string is required.
+
+## Terms as arrays
+
+An array in term position is an expression: `[parent, Tom, Bob]` is `(parent Tom Bob)`, at any depth. `val(x)` keeps an array a grounded value instead. `sym(name)` is the single-name form of `names()`, for a head that is not a valid identifier (`sym("get-atoms")`, `sym("&limit")`, `sym("+")`). A JavaScript string is a grounded string in head position too, so `["get-atoms", x]` builds `("get-atoms" $x)`, which never reduces.
+
+An array whose every element is an expression reads as a conjunction at `query`; `e(...)` builds an expression with no second reading.
+
+## Modules
+
+`mettaModule()` answers a builder with `.grounded(name, fn)`, `.asyncGrounded`, `.define(name, body)`, `.relation(name, cols)`, `.atoms(...)`, `.source(src)`, `.declare(name, args, ret)` and `.use(other)`. Each declaring method also takes a value signature: `.define("quad", ["Number"], "Number", body)` types the TypeScript side and emits `(: quad (-> Number Number))`.
+
+`db.use(module)` applies it once per runner and returns the runner retyped with everything the module declares. `m.declarations()` returns the `(: Name (-> ...))` atoms without emitting them. `m.relations` and `m.signatures` are the recorded declarations.
+
+## Matching a result
+
+`matchAtom(a)` and `db.match(a)` answer a chain of `.with(pattern, handler)` arms, ending in `.otherwise(fallback)`, `.run()` or `.exhaustive()`. `db.match` checks exhaustiveness against the relation heads the schema declares.
+
+Patterns: `P._`, `P.any`, `P.str`, `P.num`, `P.bool`, `P.sym`, `P.var`, `P.expr`, `P.rest(name)`, `P.when(pred, name?)`, `P.union(alts, name?)`, `P.not(pattern, name?)`. `.withAny([p1, p2], handler)` runs one handler off several shapes; `.returnType<T>()` fixes every arm's result.
+
+`isMatching(pattern, atom)` answers a boolean and `matchBindings(pattern, atom)` the bindings or `undefined`. `NonExhaustiveError` is thrown when `.exhaustive()` runs and nothing matched.
+
+## Transactions and the change log
+
+`db.transaction(body)` commits the whole body or none of it, `db.dryRun(body)` reports and restores either way, and `db.undo(report)` returns to `report.before`. A report carries `value`, `changes`, `before`, `after` and `committed`.
+
+`db.onChange(fn)` reports every write outside a transaction and answers a function that stops it. A `Change` is `{ op, space, atom }`, and `formatChanges(changes)` renders a list.
+
+## Spaces
+
+`db.space` has `size`, `add`, `delete`, `deleteAll`, `has`, `clear`, iteration, the array methods, `atoms()`, `of(rel)`, `byHead()`, `toJS()`. `db.useSpace(name, backend)` serves a named space from any `Space` implementation, and `undefined` unregisters it. `PersistentSpace` is one whose versions are values: `snapshot()`, `restore(v)`, `fork()`, `size`.
+
+## Diagnosing
+
+`db.why(pattern)` returns why a pattern matched nothing as data and `db.explain(pattern)` as a line to print. `db.watch(pattern, fn)` runs a live query and answers a stop function. `db.declareRelations(decls)` emits the column types to the engine and `db.typeCheck()` turns enforcement on.

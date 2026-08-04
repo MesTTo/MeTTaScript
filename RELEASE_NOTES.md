@@ -1,3 +1,143 @@
+# MeTTaScript 3.0.0
+
+Write MeTTa as TypeScript. An array in term position is now an expression, so a program is data you
+build with ordinary array code, and the whole surface around that grew up: typed relations, source
+queries checked at the type level, composable modules, a matcher for taking results apart,
+transactions, and the space as a TypeScript collection. The version is a major one because that array
+rule changes what `ground` does with an array it was already given.
+
+Underneath, several conformance defects were fixed against the operational semantics rather than
+against another implementation's behaviour, a space and `(match &self ...)` stopped disagreeing about
+what the space holds, and a named space can now be served by a backend you supply.
+
+## An array in term position is an expression
+
+`[parent, Tom, Bob]` is `(parent Tom Bob)`. Nesting is free, so a whole program is array literals, and
+`Array.prototype` builds it.
+
+This is the breaking change. `ground([1, 2, 3])` used to answer a grounded array value and now answers
+the expression `(1 2 3)`, which is what MeTTa itself has: there is no array type, and `(1 2 3)` is an
+expression. `val([1, 2, 3])` is the escape for the rare case where the array is the datum, the same move
+miniMAL makes with quote. Anything that passed an array to `ground`, `add`, `query` or a builder gets
+the expression reading now.
+
+## Types that reach the query
+
+A relation carries its column types, and a query written as a source string is parsed at the type level,
+so a wrong arity, a ground argument a column cannot hold, and a variable standing in two disagreeing
+columns are all compile errors carrying their own message. A column that is itself a tuple declares a
+nested expression, checked to any depth.
+
+The schema is erased, so `db.declareRelations({...}).typeCheck()` emits the same contract to the engine,
+where it also covers atoms TypeScript never sees: from `run`, from an imported file, from a runtime
+`add-atom`, from a decoded payload.
+
+## Programs you can compose
+
+`mettaModule()` records what to add and carries the type of what it declares, so a fragment is a value
+you pass around rather than a file you `import!`. Modules merge with `use` before any runner exists, and
+a runner applies each one once. A signature is written as a value, `["Number"], "Number"`, which types
+the TypeScript side and emits `(: quad (-> Number Number))` for the engine at the same time.
+
+## Taking a result apart, and handling every head
+
+`matchAtom(a).with(pattern, handler)` types the handler's argument from the pattern. It matches atoms
+rather than unwrapped values on purpose, because unwrapping makes a symbol and a grounded string both a
+JavaScript string, and that difference causes most MeTTa bugs. `db.match(a)` adds exhaustiveness over
+the heads a schema declares: leave one out and it does not compile.
+
+## Writes that happen together, and a record of what happened
+
+`db.transaction(body)` commits the whole body or none of it, and answers a report of what changed.
+Changes are recorded as they happen rather than worked out by comparing the space before and after,
+which was linear in what is stored while the answer is the size of what changed: finding one insertion
+among 100k atoms took 34.5ms, and now the same list costs what it contains. `db.onChange(fn)` reports
+every write with no transaction involved, covering an `add-atom` MeTTa performed while evaluating.
+
+## A named space can be served by your own backend
+
+`Space` is four methods, and until now nothing consumed it. `db.useSpace(name, backend)` serves a named
+space from any implementation: `PersistentSpace`, whose versions are values that `snapshot`, `restore`
+and `fork` in constant time, or a remote atomspace. Registering nothing changes nothing, measured
+against the same build without the change.
+
+Emptying a space is one pass rather than one removal at a time, which was quadratic twice over: clearing
+and refilling 10k atoms took 31 seconds and now takes 7ms. `space.deleteAll(atoms)` removes a batch with
+one rebuild of the interpreter's derived indexes instead of one per atom.
+
+## A space and match agree about what it holds
+
+An `(add-atom &self ...)` performed during an evaluation lands in the evaluator's world rather than the
+knowledge base. Reading merged the two, and removing did not, so `getAtoms()` listed atoms that `delete`
+then refused. Removal now reaches them by the same route the engine's own `remove-atom` does.
+
+## Conformance
+
+`Empty` is the no-results marker rather than an ordinary symbol, so a `case` with no matching branch
+produces no results and collapses to the empty tuple.
+
+```metta
+(: Fruit Type)
+(: Apple Fruit)
+(= (colour Apple) red)
+!(colour Apple)
+!(case (colour Apple) ((red found) (green no)))
+!(collapse (case (colour Apple) ((green no))))
+```
+
+```text
+[red]
+[found]
+[()]
+```
+
+Lambda abstraction is available as `(\ <pattern-1> ... <pattern-N> <body>)`, which solves the nested
+shadowing that a named helper could not express.
+
+```metta
+!((\ $x $y ($y $x)) 1 2)
+!(let $f (\ $n (* $n 3)) ($f 7))
+```
+
+```text
+[(2 1)]
+[21]
+```
+
+`get-metatype` answers about its argument rather than about what its argument reduces to, because its
+parameter is `Atom`-typed.
+
+```metta
+!(get-metatype (foo bar))
+!(get-metatype foo)
+```
+
+```text
+[Expression]
+[Symbol]
+```
+
+Also fixed: a parameter declared with a meta-type is enforced against the argument's meta-type;
+`pragma! type-check auto` is implemented and applies to `add-atom` too; `charsToString` and `case`
+report an error where they used to fail silently; and a partial application no longer shadows an
+equation that does match.
+
+## Documentation
+
+The eDSL section of the site was one overview page, written when the package was a handful of builders.
+It is now five, one per idea: an array is an expression, typed relations and queries, programs you can
+compose, taking a result apart, and the space as a collection. Every TypeScript example in them was run
+before it was written down, and two examples that did not behave as documented turned out to be defects
+rather than prose errors, both fixed here: a bare relation grounded to a JavaScript function rather than
+to its head symbol, and the message that names a grounded head suggested spelling out the source of a
+function.
+
+## An LLM reference for every package
+
+Every package ships a one-page `LLMS.md`, indexed by a root `llms.txt` following llmstxt.org, and the
+examples in eight of them are executed by tests, so a stale example fails the build rather than being
+copied verbatim.
+
 # MeTTaScript 2.10.0
 
 A program split across files now runs at single-file speed, the world's tables stopped charging every

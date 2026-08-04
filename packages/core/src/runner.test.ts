@@ -252,18 +252,21 @@ describe("runner + stdlib prelude", () => {
     expect(out).toEqual([["()"], ["()"], ["!foo"]]);
   });
 
-  it("surfaces LeaTTa Empty results from switch", () => {
-    expect(q("!(switch foo ((1 a) (2 b)))")).toEqual(["Empty"]);
-    expect(q("!(switch foo ((foo Empty)))")).toEqual(["Empty"]);
+  // `Empty` is Hyperon's no-results marker, not an ordinary symbol: a switch that matches no clause
+  // answers with nothing at all. Every expectation below was read off Hyperon 0.2.10 directly
+  // (2026-08-03); the earlier LeaTTa-derived expectations, which kept `Empty` as a value, diverged.
+  it("a switch that matches no clause has no results", () => {
+    expect(q("!(switch foo ((1 a) (2 b)))")).toEqual([]);
+    expect(q("!(switch foo ((foo Empty)))")).toEqual([]);
     expect(q("!(switch foo ((foo bar)))")).toEqual(["bar"]);
   });
 
-  it("keeps Empty in result bags like LeaTTa", () => {
-    expect(q("! Empty")).toEqual(["Empty"]);
-    expect(q("!(superpose (Empty a))")).toEqual(["Empty", "a"]);
-    expect(q("!(collapse (superpose (Empty a)))")).toEqual(["(Empty a)"]);
-    expect(q("!(unify a a Empty fail)")).toEqual(["Empty"]);
-    expect(q("!(unify a b then Empty)")).toEqual(["Empty"]);
+  it("drops Empty from result bags, but keeps it as written data", () => {
+    // Evaluating something INTO `Empty` removes the branch...
+    expect(q("!(superpose (Empty a))")).toEqual(["a"]);
+    expect(q("!(collapse (superpose (Empty a)))")).toEqual(["(a)"]);
+    expect(q("!(unify a a Empty fail)")).toEqual([]);
+    expect(q("!(unify a b then Empty)")).toEqual([]);
     expect(
       q(`
         !(chain (collapse-bind (superpose ((unify $y a Empty $y)
@@ -271,7 +274,13 @@ describe("runner + stdlib prelude", () => {
                 $bs
                 (done $bs))
       `),
-    ).toEqual(["(done ((Empty ())))", "(done ((a ())))"]);
+    ).toEqual([]);
+    // ...while an atom that was already `Empty`, or holds one as a subterm, is left alone. Hyperon
+    // guards its own check the same way (`interpret_args`' `(if-equal $rhead $args_head ...)`).
+    expect(q("! Empty")).toEqual(["Empty"]);
+    expect(q("!(quote Empty)")).toEqual(["(quote Empty)"]);
+    expect(q("!(cons-atom Empty ())")).toEqual(["(Empty)"]);
+    expect(q("!(== Empty Empty)")).toEqual(["True"]);
   });
 
   it("sequential: a definition is visible to a later query", () => {

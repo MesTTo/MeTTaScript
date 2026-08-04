@@ -140,15 +140,21 @@ describe("superpose argument policy (Hyperon-identical)", () => {
     ]);
   });
 
-  it("errors on a non-expression value with Hyperon's exact message symbol", () => {
-    // Hyperon 0.2.10: `[(Error (superpose c) superpose expects single expression as an argument)]` —
-    // the message is a bare space-containing symbol, printed unquoted.
+  it("reports the declared type violation, not superpose's free-text message", () => {
+    // DELIBERATE DIVERGENCE. Hyperon 0.2.10 answers
+    // `[(Error (superpose c) superpose expects single expression as an argument)]`: its type check lets
+    // the call through, because it never enforces a meta-typed parameter against an argument whose
+    // value type is unknown, and the grounded op then complains in prose.
+    //
+    // `superpose` is declared `(-> Expression %Undefined%)` and `c` is an irreducible Symbol, so the
+    // signature is violated and the type checker is the right place to say so. `BadArgType` also names
+    // the position, the expected type and the actual one, and is an expression a program can match on;
+    // the prose version is a bare space-containing symbol that carries none of that. Same rejection,
+    // strictly more information. mops.pdf does not specify either message.
     const source = `
       (= (a b) c)
       !(let $t (a b) (superpose $t))`;
-    expect(query(source)).toEqual([
-      "(Error (superpose c) superpose expects single expression as an argument)",
-    ]);
+    expect(query(source)).toEqual(["(Error (superpose c) (BadArgType 1 Expression Symbol))"]);
   });
 
   it("splits a variable bound to a tuple value", () => {

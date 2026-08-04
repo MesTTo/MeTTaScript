@@ -10,10 +10,16 @@
 (: _fuzz-rng-init (-> Number Atom))
 (: _fuzz-draw-int (-> Atom Number Number Atom))
 (: _fuzz-atom-key (-> Symbol Atom Atom))
-(: _fuzz-deduplicate-exact (-> Expression Atom))
-(: _fuzz-deduplicate-replay (-> Expression Atom))
-(: _fuzz-exact-member (-> Atom Expression Atom))
-(: _fuzz-replay-member (-> Atom Expression Atom))
+; These four check their own collection argument and answer with the kernel's own error vocabulary
+; (`(FuzzKernelError InvalidDeduplicationInput (Operation ...) ExpectedExpression)`), which names the
+; failing operation and what it wanted. They therefore accept `Atom` rather than declaring `Expression`:
+; a declared meta-type is enforced by the type checker, which would reject the call first and report the
+; generic `(BadArgType 1 Expression Symbol)`, leaving the richer message unreachable. One owner per
+; constraint — here it is the operation, not the signature.
+(: _fuzz-deduplicate-exact (-> Atom Atom))
+(: _fuzz-deduplicate-replay (-> Atom Atom))
+(: _fuzz-exact-member (-> Atom Atom Atom))
+(: _fuzz-replay-member (-> Atom Atom Atom))
 (: _fuzz-make-variable (-> Number Variable))
 (: _fuzz-variable-marker (-> Number Atom))
 (: _fuzz-contains-variable-marker (-> Atom Bool))

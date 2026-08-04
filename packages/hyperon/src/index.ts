@@ -44,5 +44,8 @@ export {
   type AsyncOperationReturn,
 } from "./base";
 export { registerJsonModule, SpaceValue } from "./modules/json";
+// The kernel's Space interface and its versioned backend, so a host can serve a named space from one
+// without reaching past this package.
+export { type Space, PersistentSpace, type SpaceVersion } from "@mettascript/core";
 export { registerCatalogModule, ModuleCatalog } from "./modules/catalog";
 export { registerJsInterop, JsValue, atomToJs, jsToAtom } from "./modules/js";

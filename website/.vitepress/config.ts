@@ -162,7 +162,14 @@ export default defineConfig({
       {
         text: "The typed eDSL",
         collapsed: false,
-        items: [{ text: "Overview", link: "/edsl/overview" }],
+        items: [
+          { text: "Overview", link: "/edsl/overview" },
+          { text: "An array is an expression", link: "/edsl/arrays" },
+          { text: "Typed relations and queries", link: "/edsl/relations" },
+          { text: "Programs you can compose", link: "/edsl/modules" },
+          { text: "Taking a result apart", link: "/edsl/results" },
+          { text: "The space, as a collection", link: "/edsl/spaces" },
+        ],
       },
       {
         text: "Property testing",

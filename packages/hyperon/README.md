@@ -186,3 +186,9 @@ still inspect) rather than crashing the run. `evaluateAtom(atom)` evaluates a si
 ## Docs
 
 API docs are generated with TypeDoc from the TSDoc comments: `pnpm --filter @mettascript/hyperon docs`.
+
+## For language models
+
+[`LLMS.md`](./LLMS.md) is a one-page, high-density reference for this package: API surface, working
+examples, and the mistakes that produce wrong code. The repository root carries an
+[`llms.txt`](../../llms.txt) index of all of them.

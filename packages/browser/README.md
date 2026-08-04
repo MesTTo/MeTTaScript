@@ -74,6 +74,12 @@ await runner.dispose();
 See `examples/browser-interop` for a runnable smoke check and a bundle isolation
 check.
 
+## For language models
+
+[`LLMS.md`](./LLMS.md) is a one-page, high-density reference for this package: API surface, working
+examples, and the mistakes that produce wrong code. The repository root carries an
+[`llms.txt`](../../llms.txt) index of all of them.
+
 ## License
 
 [MIT](https://github.com/MesTTo/MeTTaScript/blob/main/LICENSE).

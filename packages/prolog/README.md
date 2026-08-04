@@ -89,3 +89,9 @@ The default tests use mock bridges and do not need SWI installed.
 - `SWI_WASM_LIVE=1 pnpm vitest run packages/prolog/src/swi-wasm.test.ts` checks
   `.pl` import, `prolog-call`, and `import_prolog_function` against real
   `swipl-wasm`.
+
+## For language models
+
+[`LLMS.md`](./LLMS.md) is a one-page, high-density reference for this package: API surface, working
+examples, and the mistakes that produce wrong code. The repository root carries an
+[`llms.txt`](../../llms.txt) index of all of them.

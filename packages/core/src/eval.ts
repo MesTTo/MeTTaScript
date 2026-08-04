@@ -43,6 +43,7 @@ import {
   logToArray,
 } from "./atomlog";
 import { emptyPTable, ptEntries, ptGet, ptKeys, ptSet, type PTable } from "./pmap";
+import { type Space } from "./space";
 import {
   type BindingRel,
   type Bindings,
@@ -326,6 +327,11 @@ const frame = (
 
 const notReducibleA = sym("NotReducible");
 const emptyA = sym("Empty");
+const isEmptySym = (x: Atom): boolean => x.kind === "sym" && x.name === "Empty";
+/** Drop the `Empty` alternatives from a collapsed bag, as Hyperon's `collapse_bind_ret` does: a branch
+ *  that evaluated to the no-results marker contributes no element, so `(collapse Empty)` is `()`. */
+const withoutEmptyAlternatives = (xs: Atom[]): Atom[] =>
+  xs.some(isEmptySym) ? xs.filter((x) => !isEmptySym(x)) : xs;
 const unitA = emptyExpr;
 const errAtom = (a: Atom, msg: string): Atom => expr([sym("Error"), a, sym(msg)]);
 const errTextAtom = (a: Atom, msg: string): Atom => expr([sym("Error"), a, gstr(msg)]);
@@ -882,6 +888,15 @@ export interface MinEnv {
   // an expression-headed query. Kept as a separate list so a symbol/grounded query skips the dead probes.
   varRulesVar: Array<[Atom, Atom]>;
   sigs: Map<string, Atom[]>;
+  /** Custom {@link Space} backends by space name. Absent by default, and every named-space read and
+   *  write falls through to the World's own log when a name has none. */
+  spaceBackends?: Map<string, Space> | undefined;
+  /** Called for each atom added to or removed from a space, if a host installs it.
+   *
+   *  The atom is passed as an ATOM, not formatted: the caller that wants text can format it, and the one
+   *  that wants to undo the write needs the value. Absent by default, so every emit site is one `if` that
+   *  allocates nothing — the same bargain {@link trace} makes. */
+  onSpaceChange?: ((op: "add" | "remove", space: string, atom: Atom) => void) | undefined;
   gt: GroundingTable;
   /** Static `&self` atoms in insertion (occurrence) order. Slot-stable: the nested match index refers
    *  to slots by occurrence id and `get-atoms` order is observable, so the compaction sweep swaps a
@@ -1856,6 +1871,89 @@ function userSelfAtoms(env: MinEnv, w: World): readonly Atom[] {
   return runtime.length === 0 ? visible : [...visible, ...runtime];
 }
 
+/** The atoms a runtime `(add-atom space …)` put into `&self` while evaluating.
+ *
+ *  These live in the World, not in the env, so a host that keeps its own list of added atoms has to ask
+ *  for them separately or it will disagree with what `(match &self …)` sees over the very same space. */
+export function runtimeSelfAtoms(w: World): readonly Atom[] {
+  return runtimeAtoms(w);
+}
+
+/** Remove one occurrence from the World's runtime `&self` additions, reindexing the rules it carried.
+ *  Answers whether one was there. Mutates `w`, which is always a fresh clone at every call site. */
+function spliceRuntimeSelf(w: World, a: Atom): boolean {
+  if (w.flatSelfExtra !== undefined) {
+    const next = w.flatSelfExtra.removeOne(a);
+    if (next.size !== w.flatSelfExtra.size) {
+      w.flatSelfExtra = next;
+      reindexRuntimeSelfRules(w);
+      return true;
+    }
+  }
+  const xs = logToArray(w.selfExtra);
+  const i = xs.findIndex((y) => atomEq(y, a));
+  if (i < 0) return false;
+  w.selfExtra = logFromArray([...xs.slice(0, i), ...xs.slice(i + 1)]);
+  reindexRuntimeSelfRules(w);
+  return true;
+}
+
+/** Remove an atom a runtime `(add-atom &self …)` put in the World, exactly as `(remove-atom &self …)`
+ *  does. Answers the new World, or `undefined` when the atom was not a runtime addition.
+ *
+ *  A host reading the space through {@link runtimeSelfAtoms} sees those atoms, so it must be able to
+ *  remove one too, or the space disagrees with itself: `getAtoms()` would list an atom that `remove`
+ *  refused. The static half stays the caller's, since only it knows what it loaded. */
+export function removeRuntimeSelfAtom(w0: World, a: Atom): World | undefined {
+  const w = cloneWorld(w0);
+  markSpaceMutation(w);
+  if (!spliceRuntimeSelf(w, a)) return undefined;
+  if (opOf(a) === ":") w.typeVersion = nextTypeContentVersion();
+  return w;
+}
+
+/** Empty `&self` of everything the World holds: every runtime addition goes, and a retraction is kept
+ *  only while `env` still holds the atom it refers to.
+ *
+ *  Both halves are needed. Dropping the additions is the point. Filtering the retractions against what
+ *  `env` still holds is what stops a later re-add of a previously retracted atom from coming back
+ *  already retracted, while a program that retracted a STDLIB rule keeps that retraction, which
+ *  clearing a space has no business undoing. */
+export function clearSelfSpace(env: MinEnv, w0: World): World {
+  const w = cloneWorld(w0);
+  markSpaceMutation(w);
+  w.selfExtra = emptyLog;
+  w.flatSelfExtra = undefined;
+  reindexRuntimeSelfRules(w);
+  if (w.removedStatic !== null)
+    Object.assign(
+      w,
+      staticRemovalState(logToArray(w.removedStatic).filter((a) => hasStaticAtom(env, a))),
+    );
+  w.typeVersion = nextTypeContentVersion();
+  return w;
+}
+
+/** Whether a statically loaded atom has been retracted by a runtime `(remove-atom …)`. */
+export function selfAtomRetracted(w: World, a: Atom): boolean {
+  return staticAtomRemoved(w, a);
+}
+
+/** Whether any static atom has been retracted at runtime. Cheap, so a reader can skip the per-atom
+ *  filter in the usual case where nothing was removed. */
+export function selfHasRetractions(w: World): boolean {
+  return w.removedStatic !== null;
+}
+
+/** Whether a runtime `add-atom` has put anything into `&self`, WITHOUT materialising it.
+ *
+ *  `runtimeSelfAtoms` builds an array, and a host that reads the space on every query would pay that
+ *  allocation on every read just to discover there was nothing to add. Both sides answer their size in
+ *  constant time, so the emptiness question is asked separately from the contents. */
+export function hasRuntimeSelfAtoms(w: World): boolean {
+  return logSize(w.selfExtra) > 0 || (w.flatSelfExtra?.size ?? 0) > 0;
+}
+
 function runtimeAtoms(w: World): Atom[] {
   const flat = w.flatSelfExtra?.toArray() ?? [];
   const log = logToArray(w.selfExtra);
@@ -1997,8 +2095,30 @@ function namedSpaceAtoms(space: NamedSpace | undefined): Atom[] {
   return logToArray(space ?? emptyLog);
 }
 
+/** The backend serving a named space, if one was registered for it.
+ *
+ *  A named space is ordinarily an {@link AtomLog} inside the World, which is immutable and versioned
+ *  with everything else. A BACKEND is an outside object — a persistent space held as a value, a remote
+ *  store, a database — reached through the same four-method {@link Space} interface the kernel already
+ *  defines. Registering one makes `(bind! &s …)` name that store instead.
+ *
+ *  It lives on the env rather than in the World because a backend has identity and its own lifetime; a
+ *  World is copied per branch and per effect, and copying a database is not a thing. The consequence is
+ *  that a backend does NOT take part in the world merge that joins parallel branches: its writes land as
+ *  they happen. That is the same bargain any external store makes, and the reason the default is none. */
+function spaceBackend(env: MinEnv, name: string): Space | undefined {
+  return env.spaceBackends?.get(name);
+}
+
+/** A named space's atoms, from its backend when it has one. The one read every other read goes through,
+ *  so a backend cannot be visible to `get-atoms` and invisible to `match`. */
+function namedSpaceRead(env: MinEnv, w: World, name: string): Atom[] {
+  const backend = spaceBackend(env, name);
+  return backend === undefined ? namedSpaceAtoms(ptGet(w.spaces, name)) : [...backend.atoms()];
+}
+
 function namedSpaceEnv(env: MinEnv, w: World, name: string): MinEnv {
-  const view = buildEnv(namedSpaceAtoms(ptGet(w.spaces, name)), env.gt);
+  const view = buildEnv(namedSpaceRead(env, w, name), env.gt);
   view.imports = env.imports;
   view.loadedModules = env.loadedModules;
   view.groundedEffects = new Map(env.groundedEffects);
@@ -2008,16 +2128,24 @@ function namedSpaceEnv(env: MinEnv, w: World, name: string): MinEnv {
 }
 
 function namedSpaceCandidateGetter(
+  env: MinEnv,
   w: World,
-  space: NamedSpace | undefined,
+  name: string,
 ): (pInst: Atom) => CandidateSource {
   let scan: Atom[] | undefined;
+  const backend = spaceBackend(env, name);
+  const space = backend === undefined ? ptGet(w.spaces, name) : undefined;
   return (pInst: Atom): CandidateSource => {
-    const log = space ?? emptyLog;
-    if (pInst.ground && logNonGround(log) === 0 && w.store.size === 0) {
-      return exactCandidateSource(pInst, idxCount(logGroundIdx(log), pInst), logSize(log));
+    // The ground-atom fast path counts occurrences straight off the log's index. A backend has no such
+    // index to offer, so it takes the ordinary scan — slower, and the only honest option for a store
+    // the kernel cannot see inside.
+    if (backend === undefined) {
+      const log = space ?? emptyLog;
+      if (pInst.ground && logNonGround(log) === 0 && w.store.size === 0) {
+        return exactCandidateSource(pInst, idxCount(logGroundIdx(log), pInst), logSize(log));
+      }
     }
-    scan ??= namedSpaceAtoms(space).map((x) => resolveStates(w, x));
+    scan ??= namedSpaceRead(env, w, name).map((x) => resolveStates(w, x));
     return scan;
   };
 }
@@ -2087,6 +2215,10 @@ export interface World {
   // payload. Held on the world, not in a space, so the check `log!` makes is a field read rather than a
   // match: that is what keeps an unconfigured log call off the cost of the program it instruments.
   logLevel: number;
+  // Set in-language by `(pragma! type-check auto)`. When on, every non-directive atom is type-checked
+  // before it enters the space, so an ill-typed equation is reported where it is written rather than
+  // where it is first called. Off by default, matching Hyperon.
+  typeCheckAuto: boolean;
 }
 export interface St {
   counter: number;
@@ -2132,6 +2264,7 @@ export const initSt = (): St => ({
     maxStackDepth: DEFAULT_MAX_STACK_DEPTH,
     maxSteps: DEFAULT_MAX_STEPS,
     logLevel: LOG_OFF,
+    typeCheckAuto: false,
     stepStart: 0,
   },
 });
@@ -2159,6 +2292,7 @@ function cloneWorld(w: World): World {
     maxSteps: w.maxSteps,
     stepStart: w.stepStart,
     logLevel: w.logLevel,
+    typeCheckAuto: w.typeCheckAuto,
   };
 }
 
@@ -2239,6 +2373,7 @@ function mergeWorlds(base: World, branches: readonly World[]): World {
     maxSteps: base.maxSteps,
     stepStart: base.stepStart,
     logLevel: base.logLevel,
+    typeCheckAuto: base.typeCheckAuto,
   };
   indexSelfRules(merged, selfExtra);
   return merged;
@@ -3139,8 +3274,13 @@ function skipApplicationCheck(op: string, args: readonly Atom[]): boolean {
 
 /** The arity admitted for PeTTa-style partial application: grounded ops use their `(-> ...)` signature,
  *  untyped lowercase user functions use their defining `=` rule head. Typed user functions stay under
- *  Hyperon's strict arity checks. */
-function functionArity(env: MinEnv, w: World, name: string): number | undefined {
+ *  Hyperon's strict arity checks.
+ *
+ *  `argc` is the number of arguments actually supplied. An equation that takes exactly that many is a
+ *  real definition of this call, so it wins over currying even when it is not the first one written:
+ *  with `(= (g $x $y) ...)` ahead of `(= (g $x) ...)`, `(g 1)` is the second equation, not a closure.
+ *  Reading only the first head made a later equation unreachable (Hyperon answers `(one 1)` there). */
+function functionArity(env: MinEnv, w: World, name: string, argc: number): number | undefined {
   const sig = env.sigs.get(name);
   if (sig !== undefined && sig.length >= 1) {
     const types = env.types.get(name) ?? [];
@@ -3148,12 +3288,16 @@ function functionArity(env: MinEnv, w: World, name: string): number | undefined 
     if (!hasDataType && env.gt.has(name)) return sig.length - 1;
   }
   if (!lowerFunctionHead.test(name)) return undefined;
+  let arity: number | undefined;
   for (const [lhs] of [
     ...visibleStaticRulesForHead(env, w, name),
     ...(w.selfRules.get(name) ?? []),
   ])
-    if (lhs.kind === "expr" && lhs.items.length >= 2) return lhs.items.length - 1;
-  return undefined;
+    if (lhs.kind === "expr" && lhs.items.length >= 2) {
+      if (lhs.items.length - 1 === argc) return undefined;
+      if (arity === undefined) arity = lhs.items.length - 1;
+    }
+  return arity;
 }
 
 function partialApplicationView(env: MinEnv, w: World, atom: Atom): Atom {
@@ -3161,7 +3305,7 @@ function partialApplicationView(env: MinEnv, w: World, atom: Atom): Atom {
   const head = atom.items[0]!;
   if (head.kind !== "sym") return atom;
   const args = atom.items.slice(1);
-  const arity = functionArity(env, w, head.name);
+  const arity = functionArity(env, w, head.name, args.length);
   if (arity === undefined || args.length >= arity) return atom;
   return makeExpr(env, [sym("partial"), head, makeExpr(env, args)]);
 }
@@ -3313,6 +3457,36 @@ function matchType(tb: Bindings, expected: Atom, actual: Atom): Bindings | undef
     return tb;
   return matchReduced(tb, expected, actual);
 }
+/** The meta-types that constrain an argument when named as a parameter type.
+ *
+ *  `Atom` is absent because it is the universal one, handled by the top-type fast path above.
+ *  `Grounded` is absent for a representational reason: this engine models space handles and grounded
+ *  operations as SYMBOLS (`&self` has meta-type Symbol, `+` likewise), where Hyperon makes them genuine
+ *  grounded atoms. Enforcing a `Grounded` parameter would therefore reject correct code — the standard
+ *  library's own `(: remove-all-atoms (-> Grounded %Undefined%))` applied to `&self` is the first
+ *  casualty. Until handles carry their own meta-type, `Grounded` stays advisory. */
+const META_PARAM_TYPES = new Set(["Symbol", "Expression", "Variable"]);
+
+/** Is `a`'s meta-type already final, i.e. can evaluation no longer change it? Only an irreducible atom
+ *  qualifies — MOPS calls exactly this `insensitive(t, k)`, "t unifies with no rule left-hand side".
+ *  It is what separates the two expressions that look alike to a meta-typed parameter: `(doc)` under
+ *  `(= (doc) <a grounded dict>)` is written as an Expression but evaluates to a Grounded, so its
+ *  meta-type says nothing yet, while `(This is an expression)` reduces to itself and is an Expression
+ *  for good. Deliberately conservative: anything that might still rewrite (a variable-headed rule in
+ *  scope, an expression-headed application, a grounded or embedded op) counts as not final. */
+function metaTypeIsFinal(env: MinEnv, w: World, a: Atom): boolean {
+  if (a.kind !== "expr") return true;
+  if (env.varRulesVar.length > 0 || w.selfVarRules.length > 0) return false;
+  const head = a.items[0];
+  if (head === undefined || head.kind !== "sym") return false;
+  return (
+    !env.ruleIndex.has(head.name) &&
+    !w.selfRules.has(head.name) &&
+    !env.gt.has(head.name) &&
+    !isEmbeddedOp(a)
+  );
+}
+
 function typeCheckArgs(
   env: MinEnv,
   w: World,
@@ -3338,14 +3512,33 @@ function typeCheckArgs(
   // computed expression like `(+ 5 5)` (inferred value-type Number, meta-type Expression) satisfies an
   // `Expression` parameter. Without this, ops with meta-typed parameters (lib_he's `evalc`/`noreduce-eq`,
   // `map-atom`) wrongly raise BadArgType on unevaluated expression arguments.
-  if (ti.kind === "sym" && ti.name === metaType(prepped))
+  const argMeta = metaType(prepped);
+  if (ti.kind === "sym" && ti.name === argMeta)
     return typeCheckArgs(env, w, argTypes, i + 1, tb, argsLeft.slice(1));
+  // A parameter declared with a concrete meta-type (`Symbol`, `Expression`, `Grounded`, `Variable`) is
+  // satisfied only by an argument of THAT meta-type. Hyperon says the same in `match_meta_types`
+  // (interpreter.rs): only `Atom` is universal, everything else is equality. It never reaches that check
+  // for an untyped argument though, so `(: foo (-> Symbol Type))` happily accepts
+  // `(This is an expression)` — the value type is `%Undefined%`, `%Undefined%` matches anything, and the
+  // meta-type is never consulted. Every atom HAS a meta-type, so an unknown value type is no reason to
+  // admit the wrong one. An unbound variable stays admissible: it stands for a value of any meta-type,
+  // which is why Hyperon answers `(foo $v)` with `$v` rather than an error.
+  const metaMismatch =
+    ti.kind === "sym" &&
+    META_PARAM_TYPES.has(ti.name) &&
+    argMeta !== "Variable" &&
+    metaTypeIsFinal(env, w, prepped);
   const actuals = getTypes(env, prepped);
-  for (const act of actuals) {
-    const tb2 = matchType(tb, ti, act);
-    if (tb2 !== undefined) return typeCheckArgs(env, w, argTypes, i + 1, tb2, argsLeft.slice(1));
-  }
-  return [i + 1, ti, headOr(actuals, UNDEF)];
+  if (!metaMismatch)
+    for (const act of actuals) {
+      const tb2 = matchType(tb, ti, act);
+      if (tb2 !== undefined) return typeCheckArgs(env, w, argTypes, i + 1, tb2, argsLeft.slice(1));
+    }
+  // Name the meta-type when the inferred value type says nothing (`(BadArgType 1 Symbol Expression)`
+  // rather than a tuple of `%Undefined%`); a concrete inferred type is still the more useful report, and
+  // is what Hyperon prints for `(foo 100)`.
+  const concrete = actuals.find((a) => a.kind === "sym" && a.name !== "%Undefined%");
+  return [i + 1, ti, metaMismatch ? (concrete ?? sym(argMeta)) : headOr(actuals, UNDEF)];
 }
 function typeMismatch(
   env: MinEnv,
@@ -3422,6 +3615,23 @@ export function checkApplication(
     ]);
   }
   return null;
+}
+
+/** The `check-types` verdict for one atom: an `(Error ...)` describing the first bad application, or unit
+ *  when the atom type-checks. Shared by the `check-types` op, the load-time `(pragma! type-check auto)`
+ *  gate, and `add-atom` under that pragma.
+ *
+ *  Only the TOP-level application is checked, which is deliberate and matches what the pragma needs. Do
+ *  not "fix" this into a recursive walk on the strength of a Hyperon comparison: `check-types` does not
+ *  exist there. `!(check-types (= (foo $x) (+ $x "2")))` run against Hyperon answers
+ *  `(Error (+ $x "2") (BadArgType 2 Number String))`, which looks like a checker that recurses, but it is
+ *  ordinary evaluation of an undefined operation's argument with the error propagating out. Hyperon's
+ *  actual `(pragma! type-check auto)` does NOT reject that equality. */
+function typeCheckAtom(env: MinEnv, w: World, t: Atom): Atom {
+  if (t.kind !== "expr" || t.items.length === 0) return emptyExpr;
+  const head = t.items[0]!;
+  if (head.kind !== "sym") return emptyExpr;
+  return checkApplication(env, w, head.name, t.items.slice(1)) ?? emptyExpr;
 }
 
 /** The superpose/hyperpose argument policy. Hyperon 0.2.10 never evaluates the argument tuple: it splits
@@ -4802,16 +5012,11 @@ function* interpretStack1G(
       );
     }
     case "check-types":
-      if (it2.length === 2) {
-        const t = inst(env, it.bnd, it2[1]!);
-        let checked: Atom = emptyExpr;
-        if (t.kind === "expr" && t.items.length > 0) {
-          const head = t.items[0]!;
-          if (head.kind === "sym")
-            checked = checkApplication(env, st.world, head.name, t.items.slice(1)) ?? emptyExpr;
-        }
-        return [[finItem(prev, checked, it.bnd)], st];
-      }
+      if (it2.length === 2)
+        return [
+          [finItem(prev, typeCheckAtom(env, st.world, inst(env, it.bnd, it2[1]!)), it.bnd)],
+          st,
+        ];
       break;
     case "get-doc":
       if (it2.length === 2)
@@ -4843,7 +5048,10 @@ function* interpretStack1G(
             prev,
             makeExpr(
               env,
-              atoms.map((p) => makeExpr(env, [p[0], unitA])),
+              // Hyperon's `collapse_bind_ret` pushes an alternative only when it is not `Empty`, so a
+              // branch that evaluated to the no-results marker contributes nothing to the collapsed
+              // tuple: `(collapse Empty)` is `()`, not `(Empty)`.
+              atoms.filter((p) => !isEmptySym(p[0])).map((p) => makeExpr(env, [p[0], unitA])),
             ),
             it.bnd,
           ),
@@ -5117,7 +5325,7 @@ function* interpretStack1G(
           st,
         ];
       const srcAtoms =
-        src === "&self" ? selfAtoms(env, st.world) : namedSpaceAtoms(ptGet(st.world.spaces, src));
+        src === "&self" ? selfAtoms(env, st.world) : namedSpaceRead(env, st.world, src);
       const id = st.counter;
       const name = "&space-" + String(id);
       const w = cloneWorld(st.world);
@@ -5128,10 +5336,21 @@ function* interpretStack1G(
     case "add-atom":
       if (it2.length === 3) {
         const added = inst(env, it.bnd, it2[2]!);
+        // `(add-atom &self A)` is meant to be the same as writing `A`, so under
+        // `(pragma! type-check auto)` it is checked the same way. Hyperon lets it through because
+        // add-atom's second parameter is `Atom`-typed and a meta-type accepts anything, which makes
+        // the pragma silently miss exactly the generated code it is most wanted for; the atom is
+        // still added, so a definition that only type-checks once more information arrives is not lost.
+        const bad = st.world.typeCheckAuto ? typeCheckAtom(env, st.world, added) : emptyExpr;
         if (opOf(added) === "=") disableTabling(env);
-        return spaceMutate(env, st, prev, it2[1]!, it.bnd, (w, name) =>
+        const mutated = spaceMutate(env, st, prev, it2[1]!, it.bnd, (w, name) =>
           appendSpace(env, w, name, [added]),
         );
+        // Report instead of the usual unit, but still add: the atom may type-check once more
+        // information arrives, which is why Hyperon admits ill-typed atoms at all.
+        if (bad.kind === "expr" && bad.items.length > 0)
+          return [[finItem(prev, bad, it.bnd)], mutated[1]];
+        return mutated;
       }
       break;
     case "remove-atom":
@@ -5152,9 +5371,7 @@ function* interpretStack1G(
           st,
         ];
       const list =
-        name === "&self"
-          ? userSelfAtoms(env, st.world)
-          : namedSpaceAtoms(ptGet(st.world.spaces, name));
+        name === "&self" ? userSelfAtoms(env, st.world) : namedSpaceRead(env, st.world, name);
       return [list.map((x) => finItem(prev, x, it.bnd)), st];
     }
     case "pragma!": {
@@ -5174,6 +5391,14 @@ function* interpretStack1G(
         const w = cloneWorld(st.world);
         if (key.name === "max-stack-depth") w.maxStackDepth = Number(n);
         else w.maxSteps = Number(n);
+        return [[finItem(prev, emptyExpr, it.bnd)], { counter: st.counter, world: w }];
+      }
+      if (key.kind === "sym" && key.name === "type-check") {
+        // Hyperon's documented switch: `auto` type-checks every atom on its way into the space, any
+        // other value turns that back off.
+        const val = inst(env, it.bnd, it2[2]!);
+        const w = cloneWorld(st.world);
+        w.typeCheckAuto = val.kind === "sym" && val.name === "auto";
         return [[finItem(prev, emptyExpr, it.bnd)], { counter: st.counter, world: w }];
       }
       if (key.kind === "sym" && key.name === "log-level") {
@@ -5276,6 +5501,7 @@ function indexSelfRules(w: World, atoms: readonly Atom[]): void {
   }
 }
 function appendSpace(env: MinEnv, w0: World, name: string, atoms: Atom[]): World {
+  if (env.onSpaceChange !== undefined) for (const x of atoms) env.onSpaceChange("add", name, x);
   // `&self` add-atom only touches `selfExtra` (and the rule index iff an equality is added), so SHARE the
   // unchanged spaces/store/tokens by reference rather than `cloneWorld`'s four fresh Maps. That copy was
   // the per-add allocation that kept the add-heavy benchmarks (matespace family) quadratic-in-GC even
@@ -5335,7 +5561,15 @@ function appendSpace(env: MinEnv, w0: World, name: string, atoms: Atom[]): World
       maxSteps: w0.maxSteps,
       stepStart: w0.stepStart,
       logLevel: w0.logLevel,
+      typeCheckAuto: w0.typeCheckAuto,
     };
+  }
+  const backend = spaceBackend(env, name);
+  if (backend !== undefined) {
+    for (const a of atoms) backend.add(a);
+    // The atoms are the backend's now, so the World only records that a space changed — which is what
+    // invalidates the caches keyed on space content.
+    return { ...w0, spaceVersion: nextSpaceContentVersion() };
   }
   const spaces = ptSet(w0.spaces, name, logAppendAll(ptGet(w0.spaces, name) ?? emptyLog, atoms));
   return {
@@ -5454,6 +5688,9 @@ export function promoteCompletedSelfImport(
 }
 
 function eraseSpace(env: MinEnv, w0: World, name: string, a: Atom): World {
+  // Reported unconditionally, as `remove-atom` itself is: the engine answers unit whether or not the
+  // atom was there, and a listener that needs to know can ask the space.
+  env.onSpaceChange?.("remove", name, a);
   const w = cloneWorld(w0);
   markSpaceMutation(w);
   if (opOf(a) === ":") w.typeVersion = nextTypeContentVersion();
@@ -5462,22 +5699,17 @@ function eraseSpace(env: MinEnv, w0: World, name: string, a: Atom): World {
     return i < 0 ? [...xs] : [...xs.slice(0, i), ...xs.slice(i + 1)];
   };
   if (name === "&self") {
-    if (w.flatSelfExtra !== undefined) {
-      const next = w.flatSelfExtra.removeOne(a);
-      if (next.size !== w.flatSelfExtra.size) {
-        w.flatSelfExtra = next;
-        reindexRuntimeSelfRules(w);
-        return w;
-      }
-    }
-    const xs = logToArray(w.selfExtra);
-    const i = xs.findIndex((y) => atomEq(y, a));
-    if (i >= 0) {
-      w.selfExtra = logFromArray([...xs.slice(0, i), ...xs.slice(i + 1)]);
-      reindexRuntimeSelfRules(w);
-    } else if (hasStaticAtom(env, a)) addStaticRemoval(w, a);
-  } else
-    w.spaces = ptSet(w.spaces, name, logFromArray(erase1(namedSpaceAtoms(ptGet(w.spaces, name)))));
+    if (!spliceRuntimeSelf(w, a) && hasStaticAtom(env, a)) addStaticRemoval(w, a);
+  } else {
+    const backend = spaceBackend(env, name);
+    if (backend !== undefined) backend.remove(a);
+    else
+      w.spaces = ptSet(
+        w.spaces,
+        name,
+        logFromArray(erase1(namedSpaceAtoms(ptGet(w.spaces, name)))),
+      );
+  }
   return w;
 }
 function spaceMutate(
@@ -5698,7 +5930,7 @@ function matchSetup(
     };
   }
   return {
-    getCandidates: namedSpaceCandidateGetter(st.world, ptGet(st.world.spaces, sn)),
+    getCandidates: namedSpaceCandidateGetter(env, st.world, sn),
     patterns,
   };
 }
@@ -7987,7 +8219,7 @@ function tryFastUniqueChoiceFunction(
     choicePlanConstructor(env, world),
     choicePlanDataExpression(env, world),
     choicePlanApplication(env, world),
-  );
+  )?.filter((x) => !isEmptySym(x));
   if (planned === undefined) return undefined;
   return planned;
 }
@@ -8366,7 +8598,8 @@ function* mettaEvalBodyG(
           choicePlanDataExpression(env, lst.world),
           choicePlanApplication(env, lst.world),
         );
-        if (planned !== undefined) return flushReturn([[makeExpr(env, planned), lbnd]], lst);
+        if (planned !== undefined)
+          return flushReturn([[makeExpr(env, withoutEmptyAlternatives(planned)), lbnd]], lst);
         const collapsedOp = opOf(collapsedCall);
         const tableVersion =
           collapsedOp === undefined ||
@@ -8434,7 +8667,8 @@ function* mettaEvalBodyG(
             choicePlanDataExpression(env, lst.world),
             choicePlanApplication(env, lst.world),
           );
-          if (planned !== undefined) return flushReturn([[makeExpr(env, planned), lbnd]], lst);
+          if (planned !== undefined)
+            return flushReturn([[makeExpr(env, withoutEmptyAlternatives(planned)), lbnd]], lst);
         }
         const match = matchInsideOnce(args[0]!);
         if (match !== undefined) {
@@ -8743,7 +8977,7 @@ function* mettaEvalBodyG(
         // fewer arguments than their arity become `(partial fn (args))` closures. Requires at least one
         // argument, so a nullary thunk is still evaluated rather than curried.
         if (partAtoms.length >= 1) {
-          const ar = functionArity(env, cur2.world, op);
+          const ar = functionArity(env, cur2.world, op, partAtoms.length);
           if (ar !== undefined && partAtoms.length < ar) {
             out.push([makeExpr(env, [sym("partial"), sym(op), makeExpr(env, partAtoms)]), partB]);
             continue;
@@ -9269,6 +9503,34 @@ function* mettaEvalBodyG(
   );
 }
 
+/** Hyperon's `Empty` marker: rewriting an atom to `Empty` means "no results", not "the result is the
+ *  symbol Empty". That is how a `case` with no matching clause and a `let` with a failing pattern report
+ *  no answers, and the prelude already relies on it (`(= (let $p $a $t) (unify $a $p $t Empty))`,
+ *  `(if-equal $res NotReducible Empty $res)`).
+ *
+ *  Hyperon spells the same rule as `return_on_error` (interpreter.rs), which `interpret_tuple` wraps
+ *  around every interpreted element, so `Empty` also propagates out of an argument position:
+ *  `(got (foo))` has no results when `(foo)` evaluates to `Empty`. Dropping the branch here rather than
+ *  at the collector gives that propagation for free, because an argument with no results leaves the
+ *  parent call nothing to continue with.
+ *
+ *  An atom that was ALREADY `Empty` is passed through untouched. Hyperon guards its own check the same
+ *  way in `interpret_args` (`(if-equal $rhead $args_head ...)`, i.e. skip the check when interpreting
+ *  left the argument unchanged), and that is what keeps `(== Empty Empty)` answering True and
+ *  `(cons-atom Empty ())` answering `(Empty)`. */
+function dropEmptyResults(w: Atom, res: EvalRes): EvalRes {
+  const pairs = res[0];
+  if (pairs.length === 0 || isEmptySym(w)) return res;
+  let found = false;
+  for (const p of pairs)
+    if (isEmptySym(p[0])) {
+      found = true;
+      break;
+    }
+  if (!found) return res;
+  return [pairs.filter((p) => !isEmptySym(p[0])), res[1]];
+}
+
 function* mettaEvalFrameG(
   env: MinEnv,
   fuel: number,
@@ -9290,7 +9552,10 @@ function* mettaEvalFrameG(
   const depthSpan = depth.beginSpan();
   depth.enterNative();
   try {
-    return yield* mettaEvalBodyG(env, fuel, st, bnd, a, w, depth, lease, depthSpan, trampoline);
+    return dropEmptyResults(
+      w,
+      yield* mettaEvalBodyG(env, fuel, st, bnd, a, w, depth, lease, depthSpan, trampoline),
+    );
   } finally {
     depth.leaveNative();
     depth.endSpan(depthSpan);

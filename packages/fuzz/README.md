@@ -167,3 +167,9 @@ The decoder is strict: an atom it does not recognize becomes an `undecodable` ou
 ## Determinism
 
 A run is a function of its seed. The random source, the shrink order, the replay keys, and the exhaustive enumeration order are all named and versioned, so a reported failure reproduces, and `metta fuzz --seed <n>` twice gives the same cases.
+
+## For language models
+
+[`LLMS.md`](./LLMS.md) is a one-page, high-density reference for this package: API surface, working
+examples, and the mistakes that produce wrong code. The repository root carries an
+[`llms.txt`](../../llms.txt) index of all of them.

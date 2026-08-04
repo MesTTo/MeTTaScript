@@ -121,3 +121,9 @@ The unit and property tests run with no Python, against an in-process fake bridg
 - `HYPERON_LIVE=1 pnpm vitest run packages/py` runs the differential against pip `hyperon`. Set one up with `uv venv --python 3.11 .venv-hyperon && uv pip install -p .venv-hyperon hyperon` (override the interpreter with `HYPERON_PY`).
 - `PYODIDE_LIVE=1 pnpm vitest run packages/py/src/pyodide.test.ts`
   starts real Pyodide and checks `.py` import plus `py-call`.
+
+## For language models
+
+[`LLMS.md`](./LLMS.md) is a one-page, high-density reference for this package: API surface, working
+examples, and the mistakes that produce wrong code. The repository root carries an
+[`llms.txt`](../../llms.txt) index of all of them.

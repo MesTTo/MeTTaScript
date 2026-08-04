@@ -176,10 +176,13 @@ describe("deterministic fuzz kernel", () => {
       ["(-> Number Atom)"],
       ["(-> Atom Number Number Atom)"],
       ["(-> Symbol Atom Atom)"],
-      ["(-> Expression Atom)"],
-      ["(-> Expression Atom)"],
-      ["(-> Atom Expression Atom)"],
-      ["(-> Atom Expression Atom)"],
+      // The four collection ops accept `Atom` and check the argument themselves, so their own
+      // `(FuzzKernelError ... ExpectedExpression)` reaches the caller instead of the type checker's
+      // generic BadArgType. See the note in metta/00-types.metta.
+      ["(-> Atom Atom)"],
+      ["(-> Atom Atom)"],
+      ["(-> Atom Atom Atom)"],
+      ["(-> Atom Atom Atom)"],
       ["(-> Number Variable)"],
       ["(-> Number Atom)"],
       ["(-> Atom Atom Atom %Undefined%)"],

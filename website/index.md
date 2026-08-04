@@ -23,7 +23,7 @@ hero:
 
 features:
   - title: Use it from TypeScript
-    details: Store facts, query by pattern, and write rules with a typed eDSL, entirely in TypeScript. Query keys, arguments, and results cross the boundary as ordinary values. You never have to learn a new language to start.
+    details: An array in term position is an expression, so a program is data you build with ordinary array code. Relations carry their column types, source queries are parsed at the type level, and results come back typed. Query keys, arguments, and results cross the boundary as ordinary values. You never have to learn a new language to start.
   - title: A metagraph, not a table
     details: Atoms nest, so a fact can be about another fact, and rules and types live in the same space as the data. Flat rows and RDF triples cannot nest that way. One pattern-matching mechanism both queries the space and computes over it.
   - title: Rules, inference, and search

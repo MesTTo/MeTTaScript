@@ -1,6 +1,6 @@
 {
   "name": "@mettascript/das-client",
-  "version": "2.10.0",
+  "version": "3.0.0",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -13,7 +13,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "LLMS.md"
   ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --clean",

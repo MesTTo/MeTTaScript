@@ -317,3 +317,126 @@ export function ptEntries<V>(t: PTable<V>): Array<[string, V]> {
 export function ptKeys<V>(t: PTable<V>): string[] {
   return ptEntries(t).map(([k]) => k);
 }
+
+// ---------- structural diff ----------
+//
+// What changed between two versions, WITHOUT walking either of them.
+//
+// A CHAMP trie path-copies on write: `pmSet` rebuilds only the nodes from the root down to the changed
+// key, and every other subtree is handed to the new version by reference. So two versions of a large map
+// that differ by one key share all but a handful of nodes, and a walk that stops wherever the two node
+// references are identical visits O(changes * depth) nodes rather than O(size).
+//
+// This is Merkle-tree comparison, with reference identity standing in for the hash: git's tree diff,
+// Cassandra's anti-entropy repair and IPFS all compare large structures the same way, and it is the
+// reason Clojure and DataScript get cheap diffs out of persistent collections rather than bolting a
+// change log onto a mutable store.
+
+/** One key that differs between two maps. `before`/`after` are `undefined` where the key is absent. */
+export interface PMapChange<V> {
+  readonly key: string;
+  readonly before: V | undefined;
+  readonly after: V | undefined;
+}
+
+function collectAll<V>(node: PMap<V>, out: Map<string, V>): void {
+  if (node === null) return;
+  if (node.datamap === -1) {
+    const c = node as CollisionNode<V>;
+    for (let i = 0; i < c.keys.length; i++) out.set(c.keys[i]!, c.vals[i]!);
+    return;
+  }
+  const b = node as BitmapNode;
+  const dataCount = popcount(b.datamap);
+  for (let i = 0; i < dataCount; i++) out.set(b.slots[2 * i] as string, b.slots[2 * i + 1] as V);
+  for (let i = 0; i < popcount(b.nodemap); i++)
+    collectAll(b.slots[2 * dataCount + i] as PNode<V>, out);
+}
+
+/** Record the differences between two flat key sets. */
+function compareMaps<V>(
+  left: ReadonlyMap<string, V>,
+  right: ReadonlyMap<string, V>,
+  out: Map<string, PMapChange<V>>,
+): void {
+  for (const [key, before] of left) {
+    const after = right.get(key);
+    if (after === undefined || !Object.is(before, after)) out.set(key, { key, before, after });
+  }
+  for (const [key, after] of right)
+    if (!left.has(key)) out.set(key, { key, before: undefined, after });
+}
+
+/** The entries under one position, as a flat map. */
+function gather<V>(node: PMap<V>): Map<string, V> {
+  const m = new Map<string, V>();
+  collectAll(node, m);
+  return m;
+}
+
+function diffNodes<V>(a: PMap<V>, b: PMap<V>, out: Map<string, PMapChange<V>>): void {
+  // The whole point: an untouched subtree is the SAME object in both versions, so it cannot contain a
+  // change and is never descended into.
+  if (a === b) return;
+  // A collision node holds keys sharing one hash, and a missing side has nothing to align against, so
+  // both are settled by comparing contents rather than by position.
+  if (a === null || b === null || a.datamap === -1 || b.datamap === -1) {
+    compareMaps(gather(a), gather(b), out);
+    return;
+  }
+  const x = a as BitmapNode;
+  const y = b as BitmapNode;
+  const xData = popcount(x.datamap);
+  const yData = popcount(y.datamap);
+  const childOf = (n: BitmapNode, dataCount: number, bit: number): PNode<V> =>
+    n.slots[2 * dataCount + popcount(n.nodemap & (bit - 1))] as PNode<V>;
+  const entryOf = (n: BitmapNode, bit: number): [string, V] => {
+    const i = 2 * popcount(n.datamap & (bit - 1));
+    return [n.slots[i] as string, n.slots[i + 1] as V];
+  };
+
+  // Walk the union of occupied positions, one 5-bit slot at a time.
+  for (let bitIndex = 0; bitIndex < 32; bitIndex++) {
+    const bit = 1 << bitIndex;
+    const xHasData = (x.datamap & bit) !== 0;
+    const yHasData = (y.datamap & bit) !== 0;
+    const xHasNode = (x.nodemap & bit) !== 0;
+    const yHasNode = (y.nodemap & bit) !== 0;
+    if (!xHasData && !yHasData && !xHasNode && !yHasNode) continue;
+
+    if (xHasNode && yHasNode) {
+      diffNodes(childOf(x, xData, bit), childOf(y, yData, bit), out);
+      continue;
+    }
+    // An inline entry against a subtree. CHAMP's canonical deletion lifts a surviving entry up into its
+    // parent, so this happens whenever a delete emptied a sibling — and the two cannot be compared by
+    // position, because the entry is keyed by THIS level's five hash bits and the subtree's entries by
+    // the next level's. Both sides are flattened instead.
+    const left = xHasNode
+      ? gather(childOf(x, xData, bit))
+      : xHasData
+        ? new Map([entryOf(x, bit)])
+        : new Map<string, V>();
+    const right = yHasNode
+      ? gather(childOf(y, yData, bit))
+      : yHasData
+        ? new Map([entryOf(y, bit)])
+        : new Map<string, V>();
+    compareMaps(left, right, out);
+  }
+}
+
+/** Every key whose value differs between two maps, in no particular order.
+ *
+ *  Costs what CHANGED, not what is stored, whenever the two share structure — which two versions of the
+ *  same map always do. Comparing two maps built independently is the worst case and walks both. */
+export function pmDiff<V>(before: PMap<V>, after: PMap<V>): Array<PMapChange<V>> {
+  const out = new Map<string, PMapChange<V>>();
+  diffNodes(before, after, out);
+  return [...out.values()];
+}
+
+/** {@link pmDiff} over two tables. */
+export function ptDiff<V>(before: PTable<V>, after: PTable<V>): Array<PMapChange<V>> {
+  return pmDiff(before.root, after.root);
+}

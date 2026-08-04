@@ -5,7 +5,7 @@
 // Program runner: sequential top-to-bottom evaluation of a MeTTa program, a faithful port of
 // LeaTTa `Stdlib.lean` (`evalSequential`, `oracleReport`). Each `!`-query is evaluated against the
 // prelude plus the KB atoms that precede it; world effects (add-atom, bind!, state) thread forward.
-import { type Atom, createInternTable, gint, gfloat, gbool } from "./atom";
+import { type Atom, createInternTable, expr, gint, gfloat, gbool, sym } from "./atom";
 import { Tokenizer } from "./tokenizer";
 import { parseAll, format } from "./parser";
 import {
@@ -28,7 +28,9 @@ import { analyzePurity, analyzeTableWorth, MODED_IMPURE_OPS } from "./tabling";
 import { PRELUDE_SRC } from "./prelude";
 import { withBuiltinModules } from "./extensions";
 import { stdlibAtoms } from "./stdlib";
+import { type Space } from "./space";
 import { pettaStdlibAtoms } from "./petta-stdlib";
+import { lambdaStdlibAtoms } from "./lambda-stdlib";
 import { TableSpace } from "./table-space";
 import type { TraceSink } from "./trace";
 import type { EvaluationDepth } from "./eval-depth";
@@ -124,7 +126,7 @@ function baseTablingAnalysis(env: MinEnv): TablingAnalysis {
 function buildDefaultEnv(imports: ImportMap, tabling: boolean, opts: RunOptions = {}): MinEnv {
   const experimental = opts.experimental;
   const env: MinEnv = buildEnv(
-    [...preludeAtoms(), ...stdlibAtoms(), ...pettaStdlibAtoms()],
+    [...preludeAtoms(), ...stdlibAtoms(), ...pettaStdlibAtoms(), ...lambdaStdlibAtoms()],
     stdTable(),
     staticCompactEnabled(opts),
   );
@@ -140,6 +142,8 @@ function buildDefaultEnv(imports: ImportMap, tabling: boolean, opts: RunOptions 
     env.declineCompiled = (functor, kind) => kinds.has(kind) || functors.has(functor);
   }
   if (opts.trace !== undefined) env.trace = opts.trace;
+  if (opts.spaces !== undefined) env.spaceBackends = new Map(opts.spaces);
+  if (opts.onSpaceChange !== undefined) env.onSpaceChange = opts.onSpaceChange;
   if (experimental?.hashCons === true) env.intern = createInternTable();
   if (experimental?.trail === true) env.useTrail = true;
   // buildEnv already defaults these on; assign (not just enable) so an explicit `false` forces the
@@ -217,6 +221,18 @@ export interface RunOptions {
   // decision (grounded dispatch, higher-order specialization, reduction step, stack-overflow cut). Off by
   // default at zero cost; used by the `metta-debug` CLI to explain evaluation.
   readonly trace?: TraceSink | undefined;
+  /** Custom {@link Space} backends by name, so `(bind! &s …)` names an outside store — a persistent
+   *  space held as a value, a remote atomspace, a database — instead of a log inside the World.
+   *
+   *  Every named-space read and write asks the registry first and falls through when a name has none,
+   *  so a program that registers nothing behaves exactly as before. A backend does not take part in the
+   *  world merge that joins parallel branches: it has identity and its own lifetime, and its writes land
+   *  as they happen. That is the bargain any external store makes. */
+  readonly spaces?: ReadonlyMap<string, Space> | undefined;
+  /** Called for each atom a space gains or loses during evaluation. A change LOG, where `trace` is an
+   *  execution trace: it says what the program did to its knowledge, not how it got there. Absent by
+   *  default and free when absent. */
+  readonly onSpaceChange?: ((op: "add" | "remove", space: string, atom: Atom) => void) | undefined;
   // Compiled holders to leave unbuilt, for differential debugging. `kinds` names holder kinds
   // (`functional`, `scalar`, `symbolic`, `imperative`, `rewrite`, `nondet`, `choiceUnion`, `pipeline`) and
   // `functors` names individual functions. Running a program as-is and again with one of them declined
@@ -277,6 +293,26 @@ function resultsForQuery(pairs: Array<[Atom, unknown]>): Atom[] {
   return pairs.map((p) => p[0]);
 }
 
+const isErrorAtom = (a: Atom): boolean =>
+  a.kind === "expr" && a.items[0]?.kind === "sym" && a.items[0].name === "Error";
+
+/** Type-check a non-directive atom on its way into the space, for `(pragma! type-check auto)`.
+ *
+ *  Hyperon reports an ill-typed atom where it is written rather than where it is first called, so a
+ *  wrong equation like `(= (foo $x) (+ $x 1))` under `(: foo (-> Number Bool))` is caught at load. The
+ *  check is the `check-types` the standard library already exposes, which answers unit for a well-typed
+ *  atom and an `(Error <atom> (BadArgType ...))` otherwise. */
+function typeCheckOnLoad(
+  env: MinEnv,
+  fuel: number,
+  st: St,
+  atom: Atom,
+  depth: EvaluationDepth | undefined,
+): Atom[] {
+  const [pairs] = mettaEval(env, fuel, st, [], expr([sym("check-types"), atom]), depth);
+  return resultsForQuery(pairs).filter(isErrorAtom);
+}
+
 function evalSequentialInternal(
   atoms: readonly { atom: Atom; bang: boolean }[],
   fuel = DEFAULT_FUEL,
@@ -292,8 +328,12 @@ function evalSequentialInternal(
   wireParallelEvaluation(env, atoms, opts);
   for (const { atom, bang } of atoms) {
     if (!bang) {
+      const errs = st.world.typeCheckAuto
+        ? typeCheckOnLoad(env, fuel, st, atom, opts.evaluationDepth)
+        : [];
       addAtomToEnv(env, atom);
-      if (includeNonBang) out.push({ query: atom, results: [] });
+      if (errs.length > 0) out.push({ query: atom, results: errs });
+      else if (includeNonBang) out.push({ query: atom, results: [] });
       continue;
     }
     const preWorld = st.world;
@@ -366,7 +406,11 @@ export async function runProgramAsync(
   if (opts.maxSteps !== undefined) st.world.maxSteps = opts.maxSteps;
   for (const { atom, bang } of parsed) {
     if (!bang) {
+      const errs = st.world.typeCheckAuto
+        ? typeCheckOnLoad(env, fuel, st, atom, opts.evaluationDepth)
+        : [];
       addAtomToEnv(env, atom);
+      if (errs.length > 0) out.push({ query: atom, results: errs });
       continue;
     }
     const preWorld = st.world;

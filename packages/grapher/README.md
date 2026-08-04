@@ -130,6 +130,12 @@ The package also exports `@mettascript/grapher/node` and
 `@mettascript/grapher/package.json`. See the
 [full API reference](https://mestto.github.io/MeTTaScript/reference/grapher).
 
+## For language models
+
+[`LLMS.md`](./LLMS.md) is a one-page, high-density reference for this package: API surface, working
+examples, and the mistakes that produce wrong code. The repository root carries an
+[`llms.txt`](../../llms.txt) index of all of them.
+
 ## License
 
 [MIT](https://github.com/MesTTo/MeTTaScript/blob/main/LICENSE).

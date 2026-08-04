@@ -1,6 +1,6 @@
 {
   "name": "@mettascript/libraries",
-  "version": "2.10.0",
+  "version": "3.0.0",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -13,7 +13,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "LLMS.md"
   ],
   "scripts": {
     "generate": "node scripts/generate-sources.mjs",
