@@ -570,9 +570,8 @@ const exprArgs = (args: readonly Atom[]): Atom[][] | undefined => {
   return out;
 };
 
-/** `(\ <pattern-1> ... <pattern-N> <body>)`, the lambda-abstraction value. Patterns are written
- *  unparenthesized so the shape lines up with a named definition, `(= (f $x $y) body)`, and with an
- *  arrow type, `(-> A B C)`. The head is one backslash.
+/** `(|-> (<pattern-1> ... <pattern-N>) <body>)`, the lambda-abstraction value: head, one expression of
+ *  parameter patterns, one body.
  *
  *  Takes the items rather than the atom, and returns a plain boolean rather than an `a is ExprAtom`
  *  type predicate, on purpose. Applying a type predicate to a value TypeScript has already narrowed to
@@ -580,14 +579,15 @@ const exprArgs = (args: readonly Atom[]): Atom[][] | undefined => {
  *  message that points nowhere near the cause. That has cost time twice in this file now; check
  *  `.kind === "expr"` at the call site and pass `.items` in. */
 const isLambdaItems = (items: readonly Atom[]): boolean =>
-  items.length >= 2 && items[0]!.kind === "sym" && items[0]!.name === "\\";
+  items.length === 3 &&
+  items[0]!.kind === "sym" &&
+  items[0]!.name === "|->" &&
+  items[1]!.kind === "expr";
 
-/** The variables a lambda's parameter patterns bind. `(\ (Cons $h $t) $h)` binds `$h` and `$t`; the
- *  body (the last element) is not a binder. */
+/** The variables a lambda's parameter patterns bind. `(|-> ((Cons $h $t)) $h)` binds `$h` and `$t`; the
+ *  body is not a binder. */
 function lambdaBinders(items: readonly Atom[]): string[] {
-  const out: string[] = [];
-  for (let i = 1; i < items.length - 1; i++) out.push(...atomVars(items[i]!));
-  return out;
+  return atomVars(items[1]!);
 }
 
 /** Apply `sub` through `a`, leaving alone any subtree where a nested lambda rebinds the name. */
@@ -1304,23 +1304,33 @@ const stdEntries: Array<[string, GroundFn]> = [
   ],
   [
     "lambda-alpha",
-    // Give a `(\ <patterns> <body>)` lambda a private copy of the variables its patterns bind, so an
-    // application cannot capture anything and the same lambda can be applied repeatedly (inside a fold or
-    // a map) without its uses running into one another.
+    // Give a `(|-> (<patterns>) <body>)` lambda a private copy of its variables, so an application cannot
+    // capture anything and the same lambda can be applied repeatedly (inside a fold, a map, or a
+    // recursion) without its uses running into one another.
     //
-    // `sealed` is not enough on its own, because it renames every occurrence of a name and knows nothing
-    // about binders. In `(\ $x (+ ((\ $x $x) 5) 1))` the inner `$x` is a DIFFERENT variable that shadows
-    // the outer one; renaming both together and then binding the outer to 41 leaves `((\ 41 41) 5)`,
-    // which cannot match. This walks the body instead and stops renaming at any nested lambda that
-    // rebinds the name, i.e. ordinary capture-avoiding alpha-renaming.
+    // `sealed` is what MeTTa reaches for here and it is not enough on its own, because it renames every
+    // occurrence of a name and knows nothing about binders. Hyperon 0.2.10 answers
+    // `(sealed () (($x) (+ ((($x) $x) 5) 1)))` with `(($x#98) (+ ((($x#98) $x#98) 5) 1))`: one fresh name
+    // for two different binders. So in `(|-> ($x) (+ ((|-> ($x) $x) 5) 1))` the inner `$x`, which shadows
+    // the outer one, gets renamed along with it, and binding the outer to 41 leaves `((|-> (41) 41) 5)`,
+    // which cannot match. That is not a bug in `sealed` to fix — a flat rename over an expression is what
+    // `sealed` is, and its ignore-list interface has nowhere to put a scope. It needs a different
+    // operation, so this is one: it walks the lambda and stops renaming at any nested lambda that rebinds
+    // the name, i.e. ordinary capture-avoiding alpha-renaming.
+    //
+    // It freshens EVERY variable, not only the ones the patterns bind. That keeps it a strict superset of
+    // the flat `sealed ()` rename it replaces: a variable left free in the body would otherwise be shared
+    // by every application of the lambda, which is the hygiene failure reported as
+    // hyperon-experimental#989, where filtering a two-element list with a `sealed`-based lambda silently
+    // answers nothing.
     (args) => {
       const l = args[0];
       if (args.length !== 1 || l === undefined || l.kind !== "expr" || !isLambdaItems(l.items))
-        return ierr("lambda-alpha expects a (\\ <patterns> <body>) expression");
-      const binders = [...new Set(lambdaBinders(l.items))];
-      if (binders.length === 0) return ok(l);
+        return ierr("lambda-alpha expects a (|-> (<patterns>) <body>) expression");
+      const vars = [...new Set(atomVars(l))];
+      if (vars.length === 0) return ok(l);
       const sub = new Map<string, Atom>(
-        binders.map((v) => [v, variable(v + "#" + String(sealCounter++))]),
+        vars.map((v) => [v, variable(v + "#" + String(sealCounter++))]),
       );
       return ok(expr(l.items.map((x, i) => (i === 0 ? x : renameAvoidingShadow(sub, x)))));
     },

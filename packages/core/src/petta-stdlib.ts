@@ -12,8 +12,11 @@
 //     not two pattern rules, so the empty case is not also matched by the recursive one (which would fork).
 //   - Mark a generator / function argument `Atom`-typed so it is passed unevaluated; a function value (a
 //     symbol or a `|->` lambda) must not be reduced before it is applied.
-//   - Apply a `|->` lambda through `sealed`, giving each application a private copy of the lambda's variables
-//     so repeated applications (e.g. inside a fold) do not capture one another.
+//   - Apply a `|->` lambda through `lambda-alpha`, giving each application a private copy of the lambda's
+//     variables so repeated applications (e.g. inside a fold) do not capture one another.
+//
+// `|->` is the language's one lambda abstraction, not a compat shim, and it is always loaded. It lives here
+// because this is where it started; the spelling is also PeTTa's, so PeTTa programs get it for free.
 import { type Atom } from "./atom";
 import { parseAll } from "./parser";
 import { standardTokenizer } from "./runner";
@@ -31,23 +34,38 @@ export const PETTA_STDLIB_SRC = `
   ; early, collapsing a nondeterministic body before the lambda is ever applied.
   (: |-> (-> Expression Atom Atom))
 
+  ; lambda-alpha gives a lambda a private copy of its variables per application. Its argument is
+  ; Atom-typed so the lambda reaches it unevaluated.
+  (: lambda-alpha (-> Atom Atom))
+
   ; ---- anonymous function application: ((|-> (params...) body) args...) ----
-  ; Each clause seals the (params body) to fresh variables, binds the fresh params to the arguments, then
-  ; evaluates the fresh body. sealing is what makes a lambda reusable inside a higher-order function.
-  ; Limitation: one clause per arity (1-5 here). A single variadic clause is not expressible because a
+  ; Each clause alpha-renames the lambda to fresh variables, unifies each fresh pattern with its argument,
+  ; then evaluates the fresh body. Renaming per application is what makes a lambda reusable inside a
+  ; higher-order function; doing it capture-avoidingly rather than flatly is what lets one lambda nest
+  ; inside another that binds the same name (see lambda-alpha in builtins.ts).
+  ;
+  ; A pattern is a full pattern, not just a variable, and all of them must unify with their arguments for
+  ; the lambda to beta-reduce, exactly like a named function's equation. One that does not match yields no
+  ; results: the rule head matches any application, so answering with the call unchanged would re-trigger
+  ; the same rule forever, and let*'s own failure value, Empty, composes correctly instead.
+  ;
+  ; Limitation: one clause per arity (0-5 here). A single variadic clause is not expressible because a
   ; MeTTa rule head has a fixed shape — it cannot match "the lambda applied to any number of arguments";
-  ; extend by adding the next arity. (PeTTa handles this in its translator, not in MeTTa.)
+  ; extend by adding the next arity.
+  (= ((|-> () $body))
+     (let (|-> () $sb) (lambda-alpha (|-> () $body)) $sb))
   (= ((|-> ($p1) $body) $a1)
-     (let* (((($q1) $sb) (sealed () (($p1) $body))) ($q1 $a1)) $sb))
+     (let* (((|-> ($q1) $sb) (lambda-alpha (|-> ($p1) $body))) ($q1 $a1)) $sb))
   (= ((|-> ($p1 $p2) $body) $a1 $a2)
-     (let* (((($q1 $q2) $sb) (sealed () (($p1 $p2) $body))) ($q1 $a1) ($q2 $a2)) $sb))
+     (let* (((|-> ($q1 $q2) $sb) (lambda-alpha (|-> ($p1 $p2) $body))) ($q1 $a1) ($q2 $a2)) $sb))
   (= ((|-> ($p1 $p2 $p3) $body) $a1 $a2 $a3)
-     (let* (((($q1 $q2 $q3) $sb) (sealed () (($p1 $p2 $p3) $body))) ($q1 $a1) ($q2 $a2) ($q3 $a3)) $sb))
+     (let* (((|-> ($q1 $q2 $q3) $sb) (lambda-alpha (|-> ($p1 $p2 $p3) $body)))
+            ($q1 $a1) ($q2 $a2) ($q3 $a3)) $sb))
   (= ((|-> ($p1 $p2 $p3 $p4) $body) $a1 $a2 $a3 $a4)
-     (let* (((($q1 $q2 $q3 $q4) $sb) (sealed () (($p1 $p2 $p3 $p4) $body)))
+     (let* (((|-> ($q1 $q2 $q3 $q4) $sb) (lambda-alpha (|-> ($p1 $p2 $p3 $p4) $body)))
             ($q1 $a1) ($q2 $a2) ($q3 $a3) ($q4 $a4)) $sb))
   (= ((|-> ($p1 $p2 $p3 $p4 $p5) $body) $a1 $a2 $a3 $a4 $a5)
-     (let* (((($q1 $q2 $q3 $q4 $q5) $sb) (sealed () (($p1 $p2 $p3 $p4 $p5) $body)))
+     (let* (((|-> ($q1 $q2 $q3 $q4 $q5) $sb) (lambda-alpha (|-> ($p1 $p2 $p3 $p4 $p5) $body)))
             ($q1 $a1) ($q2 $a2) ($q3 $a3) ($q4 $a4) ($q5 $a5)) $sb))
 
   ; ---- foldall: fold an aggregator over ALL nondeterministic results of a generator ----

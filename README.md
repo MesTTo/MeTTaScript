@@ -160,7 +160,9 @@ console.log((await metta.runAsync("!(race (aw 40) (aw 3))"))[0].map(String)); //
 
 ## Ergonomic typed eDSL
 
-For writing MeTTa in idiomatic TypeScript, [`@mettascript/edsl`](packages/edsl) mints symbols, functors, and logic variables from proxies (`names()`, `vars()`), builds the special forms with capitalized combinators (`If`, `Case`, `Match`, arithmetic, ...) or a tagged template, and bridges TypeScript functions in both directions. It builds ordinary atoms and runs on the same engine, so you get MeTTa's full semantics: rewrite rules, nondeterminism, pattern matching, and types. Any TypeScript value drops in as a grounded atom automatically.
+For writing MeTTa in idiomatic TypeScript, [`@mettascript/edsl`](packages/edsl) reads **an array in term position as an expression**: `[parent, Tom, Bob]` is `(parent Tom Bob)`, at any depth, so a program is data you build with ordinary array code. MeTTa has no array type of its own — `(1 2 3)` is an expression — so this is the closest notation TypeScript has. `val([1, 2, 3])` is the escape for when the array is the datum.
+
+It also mints symbols, functors, and logic variables from proxies (`names()`, `vars()`), builds the special forms with capitalized combinators (`If`, `Case`, `Match`, arithmetic, ...) or a tagged template, and bridges TypeScript functions in both directions. It builds ordinary atoms and runs on the same engine, so you get MeTTa's full semantics: rewrite rules, nondeterminism, pattern matching, and types. Any TypeScript value drops in as a grounded atom automatically.
 
 ```ts
 import { mettaDB, names, vars, If, gt, mul, sub, m } from "@mettascript/edsl";
@@ -185,7 +187,33 @@ db.fn("balance-of", (a: { balance: number }) => a.balance);
 db.evalJs(m`(balance-of ${{ owner: "Tom", balance: 100 }})`); // [100]
 db.call.fact(5); // [120]
 const factorial = db.import<[number], number>("fact"); // typed callable, factorial(6) === 720
+
+// An array IS an expression, so array code builds programs.
+const { parent, Tom, Bob } = names("parent", "Tom", "Bob");
+db.add(...[Bob, Ada].map((who) => [parent, Tom, who]));
+db.query([parent, Tom, thing]); // [{ thing: "Bob" }, { thing: "Ada" }]
 ```
+
+Types reach the query. A relation carries its column types once, and a wrong arity, a
+value a column cannot hold, or a variable standing in two disagreeing columns are all
+compile errors — including in a query written as a source string, which is parsed at
+the type level:
+
+```ts
+const Likes2 = rel<[person: string, drink: string]>("Likes");
+db.query(Likes2("Ada", thing)); // { drink: string }[]  ·  Likes2("Ada", 42) does not compile
+
+const typed = mettaDB<{ relations: { Likes: [string, string] } }>();
+typed.q('(Likes "Ada" $drink)'); // { drink: string }[]
+```
+
+Beyond that: `mettaModule()` makes a program fragment a value you pass around, carrying
+its types; `matchAtom`/`db.match` take a result apart with the handler typed from the
+pattern and exhaustiveness checked against the declared heads; `db.transaction` commits a
+batch or none of it and reports what changed; `db.space` reads the atoms as a TypeScript
+collection; and `db.useSpace` serves a named space from your own `Space` backend, such as
+the versioned `PersistentSpace`. The [eDSL guide](https://mestto.github.io/MeTTaScript/edsl/overview)
+covers each in turn.
 
 The eDSL also has dependency-free helper subpaths for optional host interop:
 `@mettascript/edsl/py` builds `py-call`, `py-atom`, and collection forms, while

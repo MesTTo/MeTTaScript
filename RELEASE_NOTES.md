@@ -1,3 +1,80 @@
+# MeTTaScript 3.1.0
+
+One lambda abstraction, spelled `|->`, and it now renames capture-avoidingly so a lambda can nest
+inside another that binds the same name.
+
+## `|->` is the only lambda
+
+3.0.0 shipped a second spelling, `(\\ <pattern-1> ... <pattern-N> <body>)`. It is gone. A backslash
+head reads as a division slash at a glance, and two spellings for one idea cost more than either
+saves. `|->` keeps its parameters parenthesized:
+
+```metta
+!((|-> ($x $y) ($y $x)) 1 2)
+!(let $f (|-> ($n) (* $n 3)) ($f 7))
+!(foldall (|-> ($acc $n) (+ $acc $n)) (superpose (1 2 3)) 0)
+```
+
+```text
+[(2 1)]
+[21]
+[6]
+```
+
+This is the breaking change: a program written against `\\` moves to `|->` and parenthesizes its
+parameters. Nothing else about the form changed. A parameter is still a full pattern rather than only
+a variable, all of them must unify for the lambda to beta-reduce, and a lambda is still a value, so it
+can be bound, passed, matched on and taken apart before anything is applied to it.
+
+## A lambda can nest inside one that binds the same name
+
+Applying a lambda gives it a private copy of its variables, or two uses of the same lambda inside a
+fold would capture one another. That copy used to be made with `sealed`, which renames every
+occurrence of a name and knows nothing about binders. Hyperon 0.2.10 shows the limit directly:
+
+```text
+> !(sealed () (($x) (+ ((($x) $x) 5) 1)))
+[(($x#98) (+ ((($x#98) $x#98) 5) 1))]
+```
+
+Two distinct binders, one fresh name. So in `(|-> ($x) (+ ((|-> ($x) $x) 5) 1))` the inner `$x`, which
+shadows the outer one, was renamed along with it, and binding the outer to 41 left `((|-> (41) 41) 5)`,
+which cannot match. The application answered nothing.
+
+That is not a defect in `sealed`. A flat rename over an expression is what `sealed` is, and its
+ignore-list interface has nowhere to put a scope. It needs a different operation, so applications now
+go through one, `lambda-alpha`, which walks the lambda and stops renaming at any nested lambda that
+rebinds the name:
+
+```metta
+!((|-> ($x) (+ ((|-> ($x) $x) 5) 1)) 41)
+```
+
+```text
+[6]
+```
+
+The inner lambda is applied to 5, not to the outer 41, so this is 5 + 1. A free variable in the body
+still refers outwards, so `((|-> ($x) ((|-> ($y) (+ $x $y)) 10)) 5)` is 15. `lambda-alpha` freshens
+every variable, not only the ones the patterns bind, which keeps it a strict superset of the flat
+rename it replaces.
+
+`sealed` itself is untouched and still matches Hyperon exactly, renaming the variables that are not in
+its ignore list.
+
+## A nullary lambda
+
+`(|-> () <body>)` applied to no arguments is the delayed body, which is what the `Atom`-typed body was
+already buying:
+
+```metta
+!((|-> () (+ 2 3)))
+```
+
+```text
+[5]
+```
+
 # MeTTaScript 3.0.0
 
 Write MeTTa as TypeScript. An array in term position is now an expression, so a program is data you
@@ -91,18 +168,8 @@ produces no results and collapses to the empty tuple.
 [()]
 ```
 
-Lambda abstraction is available as `(\ <pattern-1> ... <pattern-N> <body>)`, which solves the nested
-shadowing that a named helper could not express.
-
-```metta
-!((\ $x $y ($y $x)) 1 2)
-!(let $f (\ $n (* $n 3)) ($f 7))
-```
-
-```text
-[(2 1)]
-[21]
-```
+Lambda abstraction arrived here, spelled `(\ <pattern-1> ... <pattern-N> <body>)`. 3.1.0 removed that
+spelling and kept one lambda, `|->`; see its section above for the form that works.
 
 `get-metatype` answers about its argument rather than about what its argument reduces to, because its
 parameter is `Atom`-typed.

@@ -72,7 +72,7 @@ export type BlockBox = AtomBox | HoleBox | ExprBox;
 
 /** Branching forms: head and first argument on line one, the rest indented below. */
 const IF_LIKE = new Set(["if", "and", "or"]);
-/** Binding and abstraction forms, including the `\` lambda: head and first argument on line one. */
+/** Binding and abstraction forms, including the `|->` lambda: head and first argument on line one. */
 const LAMBDA_LIKE = new Set([
   "=",
   "let",
@@ -80,7 +80,7 @@ const LAMBDA_LIKE = new Set([
   "match",
   "function",
   "lambda",
-  "\\",
+  "|->",
   "sealed",
   "chain",
 ]);

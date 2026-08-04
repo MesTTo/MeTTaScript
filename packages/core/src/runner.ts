@@ -30,7 +30,6 @@ import { withBuiltinModules } from "./extensions";
 import { stdlibAtoms } from "./stdlib";
 import { type Space } from "./space";
 import { pettaStdlibAtoms } from "./petta-stdlib";
-import { lambdaStdlibAtoms } from "./lambda-stdlib";
 import { TableSpace } from "./table-space";
 import type { TraceSink } from "./trace";
 import type { EvaluationDepth } from "./eval-depth";
@@ -126,7 +125,7 @@ function baseTablingAnalysis(env: MinEnv): TablingAnalysis {
 function buildDefaultEnv(imports: ImportMap, tabling: boolean, opts: RunOptions = {}): MinEnv {
   const experimental = opts.experimental;
   const env: MinEnv = buildEnv(
-    [...preludeAtoms(), ...stdlibAtoms(), ...pettaStdlibAtoms(), ...lambdaStdlibAtoms()],
+    [...preludeAtoms(), ...stdlibAtoms(), ...pettaStdlibAtoms()],
     stdTable(),
     staticCompactEnabled(opts),
   );
