@@ -1,3 +1,87 @@
+# MeTTaScript 3.4.0
+
+A symbol never reduces. The interpreter's equation query now fires only for expressions, which is
+how Hyperon has always read the language: `(= foo bar)` is knowledge about `foo`, retrievable by
+`match`, never an alias the evaluator chases.
+
+## Symbols are identifiers
+
+Earlier releases treated every atom as a potential application, so an equation whose left side is a
+symbol rewrote that symbol wherever evaluation touched it: a bare `! foo` answered `bar`, a symbol
+argument reduced before the call, a symbol-valued result kept reducing, and a catch-all `(= $x ...)`
+rule rewrote even `! 5`. Only an expression is an application, so all of that is gone:
+
+```metta
+(= foo bar)
+! foo
+```
+
+```text
+[foo]
+```
+
+Arguments are unchanged the same way. `sam` stays `sam` no matter what the space says about it:
+
+```metta
+(= sam mule)
+(= (greet $x) (Hello $x))
+!(greet sam)
+```
+
+```text
+[(Hello sam)]
+```
+
+The equation itself is ordinary data, and the explicit minimal instruction `eval` is exactly the
+query, so both of these still answer `bar`. What no longer exists is the interpreter performing that
+query implicitly:
+
+```metta
+!(match &self (= foo $x) $x)
+!(eval foo)
+```
+
+```text
+[bar]
+[bar]
+```
+
+Expressions reduce as before: `(= (double $n) (* 2 $n))` still rewrites `(double 3)`, a grounded
+call still runs, and a catch-all rule still rewrites any expression. The whole change is that
+non-expressions pass through evaluation unchanged, which is the spec's `type_cast` path. Every case
+above, and two dozen more, are pinned in `symbol-evaluation.test.ts` with each expectation verified
+against Hyperon 0.2.10 one directive per file.
+
+## An undeclared atom satisfies every parameter
+
+The same uniformity reaches the type checker. A parameter type that names a meta-type (`Symbol`,
+`Expression`, `Variable`, `Grounded`) is an ordinary type symbol: an argument with a declared type
+must match it, and an argument with no declared type infers `%Undefined%`, which matches anything.
+3.3.0 enforced the parameter's meta-type against the argument's even when nothing was declared;
+that enforcement is reverted, so an undeclared symbol now passes an `Expression` parameter and an
+undeclared expression passes a `Symbol` parameter, exactly as Hyperon answers:
+
+```metta
+(: keep (-> Expression Atom))
+(= (keep $e) $e)
+!(keep undeclared)
+```
+
+```text
+[undeclared]
+```
+
+A declared mismatch still rejects: with `(: c Nat)` in the space, `!(superpose c)` answers
+`(Error (superpose c) (BadArgType 1 Expression Nat))` in both engines, and `(foo 100)` at a
+`Symbol` parameter still reports `BadArgType`, because `100` really is a `Number`.
+
+## Migrating a symbol alias
+
+A program that relied on symbol rewriting has two spellings, both unchanged for years: make the
+definition an expression, `(= (origin) (0 0))` called as `!(origin)`, or ask for the rewrite
+explicitly with `!(eval origin)`. Nothing shipped in the prelude, the standard library, or the
+bundled libraries used a symbol equation, so no bundled behavior changes.
+
 # MeTTaScript 3.3.2
 
 `charsToString` says what is actually wrong with its argument, instead of restating what it wanted.

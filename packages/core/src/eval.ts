@@ -605,10 +605,8 @@ function isNormalForm(env: MinEnv, w: World, t: Atom): boolean {
       case "gnd":
         break;
       case "sym":
-        if (isDefinedHead(env, w, cur.name)) {
-          if (t.kind === "expr") normalFormCache.set(t, normalFormEntry(env, w, false));
-          return false;
-        }
+        // A symbol never reduces (it is an identifier, not an application), so it is always normal,
+        // equations and grounded implementations under its name notwithstanding.
         break;
       case "expr": {
         const its = cur.items;
@@ -786,7 +784,7 @@ function isInertData(env: MinEnv, w: World, t: Atom, exprHeads: ReadonlySet<stri
       case "gnd":
         break;
       case "sym":
-        if (reduciblyDefinedHead(env, w, cur.name)) return fail(cur);
+        // Always inert: a symbol element passes through interpretation unchanged.
         break;
       case "expr": {
         const its = cur.items;
@@ -3330,14 +3328,6 @@ function argMask(ts: Atom[] | undefined, arity: number): boolean[] {
   }
   return mask;
 }
-function returnsAtom(env: MinEnv, a: Atom): boolean {
-  const op = headKey(a);
-  if (op === undefined) return false;
-  const ts = env.sigs.get(op);
-  const last = ts && ts.length > 0 ? ts[ts.length - 1] : undefined;
-  return last !== undefined && atomEq(last, sym("Atom"));
-}
-
 const lowerFunctionHead = /^[a-z_]/;
 const STRICT_HYPERON_ARITY = new Map<string, number>([
   ["==", 2],
@@ -3544,35 +3534,6 @@ function matchType(tb: Bindings, expected: Atom, actual: Atom): Bindings | undef
     return tb;
   return matchReduced(tb, expected, actual);
 }
-/** The meta-types that constrain an argument when named as a parameter type.
- *
- *  `Atom` is absent because it is the universal one, handled by the top-type fast path above.
- *  `Grounded` is absent for a representational reason: this engine models space handles and grounded
- *  operations as SYMBOLS (`&self` has meta-type Symbol, `+` likewise), where Hyperon makes them genuine
- *  grounded atoms. Enforcing a `Grounded` parameter would therefore reject correct code — the standard
- *  library's own `(: remove-all-atoms (-> Grounded %Undefined%))` applied to `&self` is the first
- *  casualty. Until handles carry their own meta-type, `Grounded` stays advisory. */
-const META_PARAM_TYPES = new Set(["Symbol", "Expression", "Variable"]);
-
-/** Is `a`'s meta-type already final, i.e. can evaluation no longer change it? Only an irreducible atom
- *  qualifies — MOPS calls exactly this `insensitive(t, k)`, "t unifies with no rule left-hand side".
- *  It is what separates the two expressions that look alike to a meta-typed parameter: `(doc)` under
- *  `(= (doc) <a grounded dict>)` is written as an Expression but evaluates to a Grounded, so its
- *  meta-type says nothing yet, while `(This is an expression)` reduces to itself and is an Expression
- *  for good. Deliberately conservative: anything that might still rewrite (a variable-headed rule in
- *  scope, an expression-headed application, a grounded or embedded op) counts as not final. */
-function metaTypeIsFinal(env: MinEnv, w: World, a: Atom): boolean {
-  if (a.kind !== "expr") return true;
-  if (env.varRulesVar.length > 0 || w.selfVarRules.length > 0) return false;
-  const head = a.items[0];
-  if (head === undefined || head.kind !== "sym") return false;
-  return (
-    !env.ruleIndex.has(head.name) &&
-    !w.selfRules.has(head.name) &&
-    !env.gt.has(head.name) &&
-    !isEmbeddedOp(a)
-  );
-}
 
 function typeCheckArgs(
   env: MinEnv,
@@ -3599,33 +3560,19 @@ function typeCheckArgs(
   // computed expression like `(+ 5 5)` (inferred value-type Number, meta-type Expression) satisfies an
   // `Expression` parameter. Without this, ops with meta-typed parameters (lib_he's `evalc`/`noreduce-eq`,
   // `map-atom`) wrongly raise BadArgType on unevaluated expression arguments.
-  const argMeta = metaType(prepped);
-  if (ti.kind === "sym" && ti.name === argMeta)
+  if (ti.kind === "sym" && ti.name === metaType(prepped))
     return typeCheckArgs(env, w, argTypes, i + 1, tb, argsLeft.slice(1));
-  // A parameter declared with a concrete meta-type (`Symbol`, `Expression`, `Grounded`, `Variable`) is
-  // satisfied only by an argument of THAT meta-type. Hyperon says the same in `match_meta_types`
-  // (interpreter.rs): only `Atom` is universal, everything else is equality. It never reaches that check
-  // for an untyped argument though, so `(: foo (-> Symbol Type))` happily accepts
-  // `(This is an expression)` — the value type is `%Undefined%`, `%Undefined%` matches anything, and the
-  // meta-type is never consulted. Every atom HAS a meta-type, so an unknown value type is no reason to
-  // admit the wrong one. An unbound variable stays admissible: it stands for a value of any meta-type,
-  // which is why Hyperon answers `(foo $v)` with `$v` rather than an error.
-  const metaMismatch =
-    ti.kind === "sym" &&
-    META_PARAM_TYPES.has(ti.name) &&
-    argMeta !== "Variable" &&
-    metaTypeIsFinal(env, w, prepped);
+  // Beyond that, a meta-type name in parameter position is an ordinary type symbol: it constrains a
+  // DECLARED argument type through `matchType` and nothing else. An argument whose inferred type is
+  // `%Undefined%` satisfies every parameter, meta-type names included; that is the spec's
+  // `match_types`, and it is what makes an undeclared symbol or expression first-class at any
+  // signature (symbol-evaluation.test.ts, verified against Hyperon 0.2.10).
   const actuals = getTypes(env, prepped);
-  if (!metaMismatch)
-    for (const act of actuals) {
-      const tb2 = matchType(tb, ti, act);
-      if (tb2 !== undefined) return typeCheckArgs(env, w, argTypes, i + 1, tb2, argsLeft.slice(1));
-    }
-  // Name the meta-type when the inferred value type says nothing (`(BadArgType 1 Symbol Expression)`
-  // rather than a tuple of `%Undefined%`); a concrete inferred type is still the more useful report, and
-  // is what Hyperon prints for `(foo 100)`.
-  const concrete = actuals.find((a) => a.kind === "sym" && a.name !== "%Undefined%");
-  return [i + 1, ti, metaMismatch ? (concrete ?? sym(argMeta)) : headOr(actuals, UNDEF)];
+  for (const act of actuals) {
+    const tb2 = matchType(tb, ti, act);
+    if (tb2 !== undefined) return typeCheckArgs(env, w, argTypes, i + 1, tb2, argsLeft.slice(1));
+  }
+  return [i + 1, ti, headOr(actuals, UNDEF)];
 }
 function typeMismatch(
   env: MinEnv,
@@ -10394,30 +10341,14 @@ function* mettaEvalBodyG(
     return yield* reduceChildrenG(env, fuel, st1, reduced, () => undefined, depth, trampoline);
   }
 
-  // bare symbol / variable / grounded
-  const [pairs, st1] = yield* interpretLoopG(
-    env,
-    fuel,
-    st,
-    [{ stack: atomToStack(makeExpr(env, [sym("eval"), w]), null), bnd }],
-    depth,
-    trampoline,
-  );
-  // an irreducible symbol stays itself; an Atom-typed result is inert; anything else evaluates on.
-  return yield* reduceChildrenG(
-    env,
-    fuel,
-    st1,
-    pairs,
-    (p) =>
-      atomEq(p[0], notReducibleA) || atomEq(p[0], w)
-        ? [[w, bnd]]
-        : returnsAtom(env, w) && !isEmbeddedOp(p[0])
-          ? [p]
-          : undefined,
-    depth,
-    trampoline,
-  );
+  // A non-expression is not an application. A symbol is an identifier, a variable stands for one, a
+  // grounded value is one; only an expression can mean "apply". The full interpreter therefore passes
+  // them through unchanged (the spec's `metta` sends only expressions to `interpret_expression`;
+  // everything else takes the `type_cast` path). `(= foo bar)` stays ordinary knowledge about `foo`:
+  // `match` retrieves it and the explicit instruction `(eval foo)` queries it, but no implicit
+  // evaluation ever applies it, and a catch-all `(= $x ...)` rule never fires here either.
+  // Executable spec: symbol-evaluation.test.ts, each cell verified against Hyperon 0.2.10.
+  return [[[w, bnd]], st];
 }
 
 /** Hyperon's `Empty` marker: rewriting an atom to `Empty` means "no results", not "the result is the

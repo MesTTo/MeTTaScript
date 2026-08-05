@@ -588,10 +588,11 @@ describe("carried and symbolic values on the compiled fast path", () => {
     expect(compareCompiledAndInterpreted(`${rules}\n!(sign -2)`)).toEqual([["-2"]]);
   });
 
-  it("declines a bare symbol that is itself a nullary rule head", () => {
-    // `a` is not data: it reduces to 5, so compiling it as a literal would answer with the symbol.
+  it("treats a bare symbol as data even when an equation shares its name", () => {
+    // A symbol never reduces, so `(= a 5)` is knowledge about `a`, not an alias: both branches answer
+    // with the symbol itself, on the compiled route and the interpreted one alike (Hyperon agrees).
     const src = `(= a 5)\n(= (pick $n) (if (== $n 0) a b))\n!(pick 0)\n!(pick 1)`;
-    expect(compareCompiledAndInterpreted(src)).toEqual([["5"], ["b"]]);
+    expect(compareCompiledAndInterpreted(src)).toEqual([["a"], ["b"]]);
   });
 
   it("builds a constructor term so a loop can carry a growing structure", () => {

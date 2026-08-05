@@ -140,21 +140,20 @@ describe("superpose argument policy (Hyperon-identical)", () => {
     ]);
   });
 
-  it("reports the declared type violation, not superpose's free-text message", () => {
-    // DELIBERATE DIVERGENCE. Hyperon 0.2.10 answers
-    // `[(Error (superpose c) superpose expects single expression as an argument)]`: its type check lets
-    // the call through, because it never enforces a meta-typed parameter against an argument whose
-    // value type is unknown, and the grounded op then complains in prose.
-    //
-    // `superpose` is declared `(-> Expression %Undefined%)` and `c` is an irreducible Symbol, so the
-    // signature is violated and the type checker is the right place to say so. `BadArgType` also names
-    // the position, the expected type and the actual one, and is an expression a program can match on;
-    // the prose version is a bare space-containing symbol that carries none of that. Same rejection,
-    // strictly more information. mops.pdf does not specify either message.
+  it("lets an undeclared symbol reach superpose, which then complains in prose", () => {
+    // `superpose` is declared `(-> Expression %Undefined%)`, but `c` has no declared type, so its
+    // inferred `%Undefined%` matches the parameter and the call goes through; the grounded op then
+    // reports the malformed argument itself. Hyperon 0.2.10 answers byte-identically. A DECLARED
+    // mismatch is still the type checker's to reject, pinned below.
     const source = `
       (= (a b) c)
       !(let $t (a b) (superpose $t))`;
-    expect(query(source)).toEqual(["(Error (superpose c) (BadArgType 1 Expression Symbol))"]);
+    expect(query(source)).toEqual([
+      "(Error (superpose c) superpose expects single expression as an argument)",
+    ]);
+    expect(query("(: c Nat)\n!(superpose c)")).toEqual([
+      "(Error (superpose c) (BadArgType 1 Expression Nat))",
+    ]);
   });
 
   it("splits a variable bound to a tuple value", () => {

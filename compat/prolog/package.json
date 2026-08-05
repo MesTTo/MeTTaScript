@@ -1,6 +1,6 @@
 {
   "name": "@metta-ts/prolog",
-  "version": "3.3.2",
+  "version": "3.4.0",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",

@@ -251,30 +251,29 @@ describe("silent-garbage paths report an error instead", () => {
   });
 });
 
-describe("a meta-typed parameter constrains the argument's meta-type", () => {
-  // Hyperon's `match_meta_types` is exact equality (only `Atom` is universal), but the check is never
-  // reached for an argument whose value type is unknown, so `(: foo (-> Symbol Type))` accepts an
-  // expression. Every atom HAS a meta-type, so an unknown value type is no reason to admit the wrong one.
-  it("rejects an expression where a Symbol is declared", () => {
+describe("a meta-typed parameter admits any undeclared argument", () => {
+  // A meta-type name in parameter position is an ordinary type symbol. An argument with no declared
+  // type infers `%Undefined%`, and `%Undefined%` matches every parameter type, meta-type names
+  // included, so the meta-type of the argument is never a reason to reject it. Only a DECLARED type
+  // that fails to match rejects. Hyperon 0.2.10 agrees on every line (one directive per file).
+  it("passes an undeclared expression or symbol where a Symbol is declared", () => {
     const src = "(: foo (-> Symbol Type))\n(= (foo $x) $x)\n";
-    expect(q(src + "!(foo (This is an expression))", 0)).toEqual([
-      "(Error (foo (This is an expression)) (BadArgType 1 Symbol Expression))",
-    ]);
+    expect(q(src + "!(foo (This is an expression))", 0)).toEqual(["(This is an expression)"]);
     expect(q(src + "!(foo S)", 0)).toEqual(["S"]);
+    // A declared type that does not match still rejects: 100 is a Number, and Number is not Symbol.
     expect(q(src + "!(foo 100)", 0)).toEqual(["(Error (foo 100) (BadArgType 1 Symbol Number))"]);
     // An unbound variable stands for a value of any meta-type, so it stays admissible.
     expect(q(src + "!(foo $v)", 0)).toEqual(["$v"]);
   });
 
-  it("rejects a symbol or expression where a Variable is declared", () => {
-    const src = "(: foo_var (-> Variable Type))\n(= (foo_var $x) (get-type $x))\n";
-    expect(q(src + "!(foo_var S)", 0)).toEqual([
-      "(Error (foo_var S) (BadArgType 1 Variable Symbol))",
-    ]);
-    expect(q(src + "!(foo_var (an expression))", 0)).toEqual([
-      "(Error (foo_var (an expression)) (BadArgType 1 Variable Expression))",
-    ]);
-    expect(q(src + "!(foo_var $x)", 0)).toEqual(["%Undefined%"]);
+  it("passes an undeclared symbol or expression where a Variable is declared", () => {
+    // The body echoes the argument rather than calling get-type, so the assertion isolates
+    // admission. (get-type on an all-undeclared expression is a separate, pre-existing divergence:
+    // Hyperon answers %Undefined% where this engine builds the tuple type (%Undefined% %Undefined%).)
+    const src = "(: foo_var (-> Variable Type))\n(= (foo_var $x) (got $x))\n";
+    expect(q(src + "!(foo_var S)", 0)).toEqual(["(got S)"]);
+    expect(q(src + "!(foo_var (an expression))", 0)).toEqual(["(got (an expression))"]);
+    expect(q(src + "!(foo_var $x)", 0)).toEqual(["(got $x)"]);
   });
 
   it("still admits an expression that evaluates to the declared meta-type", () => {
