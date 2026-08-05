@@ -1,3 +1,42 @@
+# MeTTaScript 3.3.1
+
+Importing `@mettascript/grapher` in Node works again. 3.2.0 and 3.3.0 threw `HTMLElement is not
+defined` on the package's root entry, which took the whole package down for any consumer outside a
+browser.
+
+## The grapher package loads outside a browser
+
+3.2.0 added `<metta-grapher>`, the embeddable custom element, and the root entry re-exported its
+class. A class's `extends` clause runs when the module loads rather than when the class is used, so
+naming `HTMLElement` there meant that merely importing the package threw where there is no DOM:
+
+```ts
+import { MeTTaGrapher } from "@mettascript/grapher";
+```
+
+That is a browser widget, but the package is imported server-side too. A language server reducing a
+query for a hover, a test, a build script that renders a graph to SVG: none of them construct an
+element, and all of them were broken by the import itself. The element now extends an inert stand-in
+where there is no DOM, so loading the package costs nothing and only using the browser parts needs a
+browser. `defineMeTTaGrapherElement()` already declined to register without `customElements`, and
+still does, returning the tag it would have used.
+
+The program a page puts in the tag is unchanged:
+
+```metta
+(= (fact $n) (if (> $n 0) (* $n (fact (- $n 1))) 1))
+!(fact 5)
+```
+
+```text
+[120]
+```
+
+The defect survived a release because every grapher suite that touches the element asks vitest for a
+DOM, so nothing ever loaded the package the way Node does. A suite that deliberately runs without one
+now loads all three entries and asserts the registration guard's behaviour; it fails with the exact
+`HTMLElement is not defined` error when the guard is removed.
+
 # MeTTaScript 3.3.0
 
 Three ways a query could answer with the wrong number are fixed, a query whose head is a variable is

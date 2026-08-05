@@ -51,7 +51,17 @@ const SHEET = `
   }
 `;
 
-export class MeTTaGrapherElement extends HTMLElement {
+/** `HTMLElement` in a browser, an inert stand-in anywhere else. A class's `extends` clause is evaluated
+ *  when the module loads, not when the class is used, so naming `HTMLElement` directly made importing this
+ *  package throw `HTMLElement is not defined` in Node before any of its no-DOM guards could run. The
+ *  package's root entry re-exports this class, so that took the whole package down for a server-side
+ *  consumer: a language server reducing a query, a test, a build script. Everything that touches the DOM
+ *  lives in the lifecycle callbacks, which the platform only calls once the element is in a document, and
+ *  `defineMeTTaGrapherElement` already declines to register without `customElements`. */
+const ElementBase: typeof HTMLElement =
+  typeof HTMLElement === "undefined" ? (class {} as unknown as typeof HTMLElement) : HTMLElement;
+
+export class MeTTaGrapherElement extends ElementBase {
   static get observedAttributes(): readonly string[] {
     return OBSERVED;
   }
