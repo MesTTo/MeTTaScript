@@ -177,10 +177,17 @@ describe("an equation is never shadowed by partial application", () => {
 describe("silent-garbage paths report an error instead", () => {
   it("charsToString rejects an element that is not a single character", () => {
     // Answered "stringToCharswolf" before, by spelling out the unreduced inner call. Hyperon answers
-    // with its own garbage, "tringToCharwolf".
+    // with its own garbage, "tringToCharwolf". The message names the unreduced call and the binding
+    // that fixes it, because the failure otherwise looks like it depends on the string's contents:
+    // this is the same error for "wolf" as for "w0lf", and a reader who tries a different string
+    // learns nothing. Hyperon and MeTTaScript agree that an Expression-typed parameter takes its
+    // argument unreduced, verified byte-for-byte against 0.2.10 on `(car-atom (cdr-atom (a b c)))`,
+    // so the composition is the caller's to sequence and the message has to say so.
     expect(q('!(charsToString (stringToChars "wolf"))')).toEqual([
       '(Error (charsToString (stringToChars "wolf")) ' +
-        '"charsToString expects an Expression of single-character symbols")',
+        '"charsToString expects an Expression of single-character symbols, but was given the ' +
+        "unreduced call (stringToChars ...): an Expression-typed parameter does not reduce its " +
+        'argument, so bind it first, as in (let $cs (stringToChars ...) (charsToString $cs))")',
     ]);
     expect(
       q('!(case (charsToString (stringToChars "x")) (((Error $a $b) caught) ($_ other)))'),
@@ -189,6 +196,46 @@ describe("silent-garbage paths report an error instead", () => {
     expect(q("!(charsToString (a b c))")).toEqual(['"abc"']);
     expect(q("!(charsToString ())")).toEqual(['""']);
     expect(q('!(let $c (stringToChars "wolf") (charsToString $c))')).toEqual(['"wolf"']);
+  });
+
+  it("the round trip holds for every character class, digits included", () => {
+    // A digit character is the SYMBOL `1`, not the number 1, so it survives the round trip like any
+    // other character. Worth pinning because the opposite was reported: the unreduced-call error
+    // above was read as a digit defect, since the reporter's failing repro happened to contain one.
+    for (const s of ["abc", "123", "a1b?", "x1", " ", "!@#", "PascalCase"])
+      expect(q(`!(let $c (stringToChars ${JSON.stringify(s)}) (charsToString $c))`)).toEqual([
+        JSON.stringify(s),
+      ]);
+    expect(
+      q('!(let $c (stringToChars "1") (let ($h $t) (decons-atom $c) (get-metatype $h)))'),
+    ).toEqual(["Symbol"]);
+    expect(q('!(let $c (stringToChars "1") (let ($h $t) (decons-atom $c) (== $h 1)))')).toEqual([
+      "False",
+    ]);
+  });
+
+  it("charsToString names what is wrong with an element it cannot take", () => {
+    // A one-character String is what a program written against the releases that stringified
+    // leniently arrives with, so the message spells out the symbol it wanted.
+    expect(q('!(let $c ("a" "b") (charsToString $c))')).toEqual([
+      '(Error (charsToString ("a" "b")) "charsToString expects an Expression of single-character ' +
+        'symbols, but element 0 is the String \\"a\\": a char is the symbol a, not \\"a\\"")',
+    ]);
+    expect(q("!(let $c (a 42 b) (charsToString $c))")).toEqual([
+      '(Error (charsToString (a 42 b)) "charsToString expects an Expression of single-character ' +
+        'symbols, but element 1 is 42")',
+    ]);
+    // A multi-character symbol away from the head is an element complaint, not a call complaint.
+    expect(q("!(let $c (a bc) (charsToString $c))")).toEqual([
+      '(Error (charsToString (a bc)) "charsToString expects an Expression of single-character ' +
+        'symbols, but element 1 is bc")',
+    ]);
+    // A nullary call arrives unreduced the same way, and is named without invented arguments.
+    expect(q("(= (mkchars) (a b))\n!(charsToString (mkchars))")).toEqual([
+      '(Error (charsToString (mkchars)) "charsToString expects an Expression of single-character ' +
+        "symbols, but was given the unreduced call (mkchars): an Expression-typed parameter does " +
+        'not reduce its argument, so bind it first, as in (let $cs (mkchars) (charsToString $cs))")',
+    ]);
   });
 
   it("a malformed case clause names itself instead of annihilating the case", () => {

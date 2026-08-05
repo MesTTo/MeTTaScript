@@ -1,3 +1,41 @@
+# MeTTaScript 3.3.2
+
+`charsToString` says what is actually wrong with its argument, instead of restating what it wanted.
+
+## An error that names the mistake
+
+An `Expression`-typed parameter takes its argument as written, so `(charsToString (stringToChars $s))`
+hands `charsToString` the two-element expression `(stringToChars $s)`, unreduced. That is MeTTa
+semantics, and Hyperon agrees byte for byte: `(car-atom (cdr-atom (a b c)))` answers `cdr-atom` in
+both engines. Composing these operations is the caller's to sequence.
+
+The old message said only that single-character symbols were expected, which sent at least one
+careful reader down the wrong path: the failing example happened to contain a digit, so the digit
+looked responsible. It was not. `(charsToString (stringToChars "abc"))` fails exactly as
+`(charsToString (stringToChars "a1b"))` does, and a reader who tries another string learns nothing.
+The message now names the unreduced call and the binding that fixes it:
+
+```metta
+!(let $cs (stringToChars "a1b?") (charsToString $cs))
+```
+
+```text
+["a1b?"]
+```
+
+That round trip holds for every character, digits included: `stringToChars` emits the character `1`
+as the symbol `1`, not the number, and the release pins the round trip over letters, digits, spaces,
+punctuation and mixed case.
+
+Two other elements now get named rather than lumped together. A one-character `String` is what a
+program written against the releases before 3.0.0 arrives with, so the message spells out the symbol
+it wanted instead: `element 0 is the String "a": a char is the symbol a, not "a"`. Anything else is
+reported with its position and its value.
+
+The strictness itself is unchanged and deliberate. Joining whatever an element happens to render as
+produced a plausible wrong string, which is the worst way to fail; Hyperon still answers
+`"tringToChara1b?"` for the composition above.
+
 # MeTTaScript 3.3.1
 
 Importing `@mettascript/grapher` in Node works again. 3.2.0 and 3.3.0 threw `HTMLElement is not

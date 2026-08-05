@@ -145,6 +145,37 @@ function asBool(a: Atom): boolean | undefined {
 function asStr(a: Atom): string | undefined {
   return a.kind === "gnd" && a.value.g === "str" ? a.value.s : undefined;
 }
+/** Why `charsToString` rejected this argument, in terms the caller can act on.
+ *
+ *  The op is deliberately strict, so its message is the only thing standing between a caller and a
+ *  wrong guess about what a char is. Two mistakes actually happen, and a bare "expects an Expression
+ *  of single-character symbols" points at neither:
+ *
+ *  1. The argument is an unreduced call. An `Expression`-typed parameter takes its argument as
+ *     written, so `(charsToString (stringToChars $s))` hands over the two-element expression
+ *     `(stringToChars $s)`. Nothing about the term is wrong; it simply never ran. This is the one
+ *     that misleads, because the failure looks like it depends on the string's contents when it does
+ *     not: the same call fails on "abc" as on "a1b". Naming the culprit and the `let` that fixes it
+ *     is the difference between a minute and an afternoon.
+ *  2. The elements are one-character Strings rather than symbols. Releases before 3.0.0 stringified
+ *     those leniently, so this is what a program being migrated hits.
+ *
+ *  Anything else names the element and its position, since the caller then has to look at where it
+ *  came from. */
+function charsToStringComplaint(items: readonly Atom[], bad: Atom, at: number): string {
+  const expected = "charsToString expects an Expression of single-character symbols";
+  // A multi-character symbol in head position is what an unreduced call looks like from here,
+  // whether or not it was given arguments.
+  if (at === 0 && bad.kind === "sym") {
+    const call = items.length > 1 ? `(${bad.name} ...)` : `(${bad.name})`;
+    return `${expected}, but was given the unreduced call ${call}: an Expression-typed parameter does not reduce its argument, so bind it first, as in (let $cs ${call} (charsToString $cs))`;
+  }
+  const asString = asStr(bad);
+  if (asString !== undefined && [...asString].length === 1)
+    return `${expected}, but element ${at} is the String ${format(bad)}: a char is the symbol ${asString}, not ${format(bad)}`;
+  return `${expected}, but element ${at} is ${format(bad)}`;
+}
+
 /** The f64 value of an Int or Float atom (Int is coerced, with the usual precision caveat). */
 function asFloat(a: Atom): number | undefined {
   if (a.kind !== "gnd") return undefined;
@@ -1607,7 +1638,8 @@ const pettaEntries: Array<[string, GroundFn]> = [
       if (a.length !== 1 || chars.kind !== "expr")
         return ierr("charsToString expects an Expression of characters");
       let s = "";
-      for (const x of chars.items) {
+      for (let i = 0; i < chars.items.length; i++) {
+        const x = chars.items[i]!;
         // Every element must be a single-character symbol, which is exactly what stringToChars
         // produces. Joining whatever an element happens to render as instead turned a wrong argument
         // into a plausible-looking string: `(charsToString (stringToChars "wolf"))` answered
@@ -1617,7 +1649,7 @@ const pettaEntries: Array<[string, GroundFn]> = [
         // (hyperon-experimental returns its own garbage here, "tringToCharwolf"; mops.pdf specifies
         // the operational core and the ground literals, not this op, so being loud is compliant.)
         if (x.kind !== "sym" || [...x.name].length !== 1)
-          return ierr("charsToString expects an Expression of single-character symbols");
+          return ierr(charsToStringComplaint(chars.items, x, i));
         s += x.name;
       }
       return ok(gstr(s));
