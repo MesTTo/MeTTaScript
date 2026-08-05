@@ -67,6 +67,8 @@ const DEFAULT_TABLING = true;
 const DEFAULT_FLAT_ATOMSPACE = true;
 const DEFAULT_CONJ_NESTED = true;
 const DEFAULT_RANGE_INDEX = true;
+const DEFAULT_VAR_HEAD_INDEX = true;
+const DEFAULT_EMIT_NUMERIC_LOOP = true;
 const DEFAULT_MATCH_EVAL_MARK = true;
 const DEFAULT_STATIC_COMPACT = true;
 const DEFAULT_DIRECT_MATCH = true;
@@ -81,6 +83,14 @@ function conjNestedEnabled(opts: RunOptions): boolean {
 
 function rangeIndexEnabled(opts: RunOptions): boolean {
   return opts.experimental?.rangeIndex ?? DEFAULT_RANGE_INDEX;
+}
+
+function varHeadIndexEnabled(opts: RunOptions): boolean {
+  return opts.experimental?.varHeadIndex ?? DEFAULT_VAR_HEAD_INDEX;
+}
+
+function emitNumericLoopEnabled(opts: RunOptions): boolean {
+  return opts.experimental?.emitNumericLoop ?? DEFAULT_EMIT_NUMERIC_LOOP;
 }
 
 function matchEvalMarkEnabled(opts: RunOptions): boolean {
@@ -149,6 +159,8 @@ function buildDefaultEnv(imports: ImportMap, tabling: boolean, opts: RunOptions 
   // reference path for differential tests and profiling.
   env.useConjNested = conjNestedEnabled(opts);
   env.useRangeIndex = rangeIndexEnabled(opts);
+  env.useVarHeadIndex = varHeadIndexEnabled(opts);
+  env.useEmitLoop = emitNumericLoopEnabled(opts);
   env.useMatchEvalMark = matchEvalMarkEnabled(opts);
   env.useDirectMatch = directMatchEnabled(opts);
   if (flatAtomspaceEnabled(opts)) env.useFlatAtomspace = true;
@@ -191,6 +203,15 @@ export interface RunOptions {
     // functor pattern enumerates the sorted numeric column slice, then restores source order. Byte-identical
     // to the full scan under its guards; on by default, set false to force the scan.
     readonly rangeIndex?: boolean;
+    // A `match` whose head is a variable selects candidates from an argument column rather than reading the
+    // whole space. Cached conjuncts freshen each selected fact once, so each incoming solution may choose an
+    // argument column, head bucket, or full scan independently. The result multiset is equal up to alpha
+    // renaming under its guards; on by default, set false to force the scan.
+    readonly varHeadIndex?: boolean;
+    // A single-tail-call numeric functor's loop is emitted as one JS source function instead of running
+    // through the closure nodes, which the JIT cannot inline through. Byte-identical including fuel
+    // boundaries; on by default, set false to force the closures.
+    readonly emitNumericLoop?: boolean;
     // Normal-form ground results from single-pattern `match` plans are pre-marked in the evaluated-atom cache
     // so their first consumer visit skips the redundant reduce probe. Byte-identical to letting that probe
     // discover the same no-op reduction; on by default, set false for differential tests and profiling.

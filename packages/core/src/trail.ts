@@ -28,8 +28,14 @@ export class Trail {
     while (t.length > m) this.binds.delete(t.pop()!);
   }
 
-  /** Bind `$name` to `a` and record it on the trail. The caller guarantees `$name` is currently unbound. */
+  /** Bind `$name` to `a` and record it on the trail. The caller guarantees `$name` is currently unbound.
+   *  A variable chain that already ends at `$name` is the same equivalence, so leave it unbound instead of
+   *  creating a cycle that `deref` could never escape. */
   bind(name: string, a: Atom): void {
+    if (a.kind === "var") {
+      const target = this.deref(a);
+      if (target.kind === "var" && target.name === name) return;
+    }
     this.binds.set(name, a);
     this.trail.push(name);
   }

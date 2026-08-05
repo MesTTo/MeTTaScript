@@ -68,4 +68,14 @@ describe("trail unifier matches the reference matcher", () => {
     tr.undo(m);
     expect(format(tr.resolve(variable("x")))).toBe("$x");
   });
+
+  it("ignores direct and indirect variable cycles", () => {
+    const tr = new Trail();
+    tr.bind("x", variable("x"));
+    expect(format(tr.resolve(expr([variable("x")])))).toBe("($x)");
+
+    tr.bind("x", variable("y"));
+    tr.bind("y", variable("x"));
+    expect(format(tr.resolve(expr([variable("x"), variable("y")])))).toBe("($y $y)");
+  });
 });

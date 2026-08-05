@@ -14,6 +14,7 @@ import { parseAll } from "./parser";
 import { standardTokenizer } from "./runner";
 import { format } from "./parser";
 import { matchAtoms } from "./match";
+import { canonicalMultiset } from "./alpha-multiset-fixture";
 import { instantiate } from "./instantiate";
 
 const last = (src: string): string[] => {
@@ -238,12 +239,14 @@ describe("static nested argument-head indexing", () => {
 
     const actual = staticMatch(facts, query, template);
     expect(actual.results).toEqual(["custom", "exact"]);
-    expect(actual.counter).toBe(facts.length);
+    // Fuel counts the candidates the index admits (the red bucket plus the residual), not the
+    // bucket the selection skipped.
+    expect(actual.counter).toBe(2);
 
     const unknown = A(sym("edge"), A(sym("green"), variable("key")), variable("value"));
     expect(staticMatch(facts, unknown, template)).toEqual({
       results: ["custom"],
-      counter: facts.length,
+      counter: 1,
     });
   });
 
@@ -329,7 +332,9 @@ describe("static nested argument-head indexing", () => {
     ).toEqual(["(first)"]);
   });
 
-  it("preserves the full candidate counter through once", () => {
+  it("charges only the candidates the index admits through once", () => {
+    // Fuel measures work done: the red bucket admits one candidate, so the counter advances by one,
+    // not by the size of the scan the selection replaced.
     const outputs = runProgram(`
       (edge (blue a) skipped)
       (edge (red b) hit)
@@ -338,7 +343,7 @@ describe("static nested argument-head indexing", () => {
       !(fresh)
     `).map((result) => result.results.map(format));
 
-    expect(outputs).toEqual([["hit"], ["$answer#2"]]);
+    expect(outputs).toEqual([["hit"], ["$answer#1"]]);
   });
 
   it("matches a naive scan for random ground facts, including order, multiplicity, and counter", () => {
@@ -371,9 +376,12 @@ describe("static nested argument-head indexing", () => {
           const query = pattern(left, right);
           const actual = staticMatch(facts, query, template);
           const scanned = staticMatch(facts, query, template, false);
-          expect(actual).toEqual(scanned);
+          // Same answers in the same order; the indexed side may consume less fuel than the scan,
+          // never more, because it freshens only the candidates it admits.
+          expect(actual.results).toEqual(scanned.results);
           expect(actual.results).toEqual(scanMatch(facts, query, template));
-          expect(actual.counter).toBe(facts.length);
+          expect(scanned.counter).toBe(facts.length);
+          expect(actual.counter).toBeLessThanOrEqual(scanned.counter);
         },
       ),
       { numRuns: 500 },
@@ -399,7 +407,97 @@ describe("static nested argument-head indexing", () => {
     const elapsedMs = performance.now() - start;
 
     expect(pairs.map((pair) => format(pair[0]))).toEqual(["50000"]);
-    expect(end.counter).toBe(100_000);
+    // The needle bucket holds one fact and the query consumes exactly it: fuel is now proportional
+    // to the selection, which is the point of indexing under a step budget.
+    expect(end.counter).toBe(1);
     expect(elapsedMs).toBeLessThan(20);
   });
+});
+
+// The widened nested-index admission: runtime overlays, removals, var-headed facts, and the cached
+// conjunct route all reach the selection now, with the assembly handling each uniformly. Every case
+// compares against the scan (index disabled) as the reference; conjunction results compare as
+// canonical multisets, the compliance bar.
+describe("nested argument-head indexing, widened admission", () => {
+  const nested = (head: string, value: string): Atom => A(sym(head), sym(value));
+
+  it("runtime overlay atoms still answer next to a nested selection", () => {
+    const src = `
+      (edge (red static-key) s1)
+      (edge (blue static-key) skipped)
+      !(add-atom &self (edge (red runtime-key) r1))
+      !(collapse (match &self (edge (red $k) $v) $v))`;
+    expect(last(src)).toEqual(["(s1 r1)"]);
+  });
+
+  it("a removed static fact stays removed through the nested selection", () => {
+    const src = `
+      (edge (red a) first)
+      (edge (red b) second)
+      (edge (blue c) other)
+      !(remove-atom &self (edge (red a) first))
+      !(collapse (match &self (edge (red $k) $v) $v))`;
+    expect(last(src)).toEqual(["(second)"]);
+  });
+
+  it("a variable-headed fact still matches through the nested selection", () => {
+    const src = `
+      (edge (red a) exact)
+      ($f (red b) loose)
+      !(collapse (match &self (edge (red $k) $v) $v))`;
+    expect(last(src)).toEqual(["(exact loose)"]);
+  });
+
+  it("a cached conjunct's goal selects by nested head and agrees with the scan", () => {
+    const facts = [
+      A(sym("edge"), nested("red", "a"), sym("v1")),
+      A(sym("edge"), nested("blue", "b"), sym("v2")),
+      A(sym("edge"), nested("red", "c"), sym("v3")),
+      A(sym("link"), sym("v1"), sym("v3")),
+      A(sym("link"), sym("v2"), sym("v1")),
+    ];
+    const conj = parseAll(
+      "!(match &self (, (link $a $b) (edge (red $k) $a)) (Row $a $b $k))",
+      standardTokenizer(),
+    )[0]!.atom;
+    const run = (useNestedIndex: boolean): string[] => {
+      const env = buildEnv([...facts], stdTable());
+      if (!useNestedIndex) env.nestedMatchIndex = undefined;
+      const [pairs] = mettaEval(env, 2_000_000, initSt(), [], conj);
+      return canonicalMultiset(pairs.map((pair) => pair[0]));
+    };
+    const indexed = run(true);
+    expect(indexed.length).toBeGreaterThan(0);
+    expect(indexed).toEqual(run(false));
+  });
+
+  it("random conjunctions with nested-head goals agree with the scan as multisets", () => {
+    const heads = fc.constantFrom("red", "blue", "green");
+    const vals = fc.constantFrom("x", "y", "z");
+    const arbEdge = fc
+      .tuple(heads, vals, vals)
+      .map(([h, k, v]) => A(sym("edge"), A(sym(h), sym(k)), sym(v)));
+    const arbLink = fc.tuple(vals, vals).map(([a, b]) => A(sym("link"), sym(a), sym(b)));
+    fc.assert(
+      fc.property(
+        fc.array(arbEdge, { minLength: 1, maxLength: 8 }),
+        fc.array(arbLink, { minLength: 1, maxLength: 5 }),
+        heads,
+        (edges, links, h) => {
+          const conj = parseAll(
+            `!(match &self (, (link $a $b) (edge (${h} $k) $b)) (Row $a $b $k))`,
+            standardTokenizer(),
+          )[0]!.atom;
+          const run = (useNestedIndex: boolean): string[] => {
+            const env = buildEnv([...edges, ...links], stdTable());
+            if (!useNestedIndex) env.nestedMatchIndex = undefined;
+            const [pairs] = mettaEval(env, 2_000_000, initSt(), [], conj);
+            return canonicalMultiset(pairs.map((pair) => pair[0]));
+          };
+          expect(run(true)).toEqual(run(false));
+        },
+      ),
+      { numRuns: 200 },
+    );
+  }, 60_000);
 });

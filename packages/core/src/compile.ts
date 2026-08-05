@@ -26,6 +26,7 @@ import {
   NUMBER_FAMILY_TYPE_NAMES,
 } from "./atom";
 import { type CellVar, mkCell, derefCell, occursCell, unifyCellOccurs } from "./trail";
+import { DEFAULT_TABLE_BUDGET } from "./table-space";
 import {
   type JitGroup,
   type JitSearchState,
@@ -197,7 +198,7 @@ interface ScalarHolder {
   clauseCount: number;
   run: (vals: FrameVal[], runtime?: FunctionalRuntime, entered?: boolean) => FrameVal | boolean;
 }
-interface FunctionalRuntime {
+export interface FunctionalRuntime {
   readonly depth: EvaluationDepth;
   readonly limit: number;
   readonly counterBase: number;
@@ -928,6 +929,211 @@ const bailRun = (): FrameVal | boolean => {
   throw BAIL;
 };
 
+// ---------- emitted numeric tail loops ----------
+
+/** Thrown by an emitted loop on a value its unboxed arithmetic cannot carry: a bigint argument, or an
+ *  operation whose true integer result leaves the safe range. The emitted function restores the fuel
+ *  counter to its entry value first, and `makeRun` re-runs the same call through the closure nodes, which
+ *  promote to bigint instead. The function is pure and every fuel charge is a deterministic function of
+ *  the evaluation path, so the re-run reproduces what the closures alone would have done, byte for byte. */
+const EMIT_RERUN = Symbol("emit-rerun");
+
+/** Statements plus the name of the value they leave behind. */
+interface EmittedValue {
+  readonly ref: string;
+  readonly type: "int" | "bool";
+}
+
+/** Compile a single-tail-call numeric functor to one JS source function replacing `makeRun`'s loop.
+ *
+ *  The closure nodes evaluate the same body as a tree of `node(frame, runtime)` calls, which V8 cannot
+ *  inline through, and every self-call allocates an argument frame. Emitting the loop as source lets the
+ *  JIT unbox the whole body into machine arithmetic: the trial-division loop this targets measured 16x
+ *  faster hand-written than through the closures, answers identical.
+ *
+ *  Faithfulness is the whole design:
+ *  - Ints run as plain numbers with a `Number.isSafeInteger` guard after each `+`/`-`/`*`, which is
+ *    exactly `addInt`'s own fast path; the guard failing is the case where `addInt` promotes to bigint,
+ *    and it throws `EMIT_RERUN` so the closures take the call instead. `%` and `/` of safe ints are
+ *    always safe, so they carry no guard, and both check the divisor first and throw `BAIL` on zero,
+ *    in the closure nodes' own evaluation order.
+ *  - Fuel is charged where the closures charge it and nowhere else: +1 per loop iteration after the
+ *    first with the same limit check, +2 after an `if` condition, +1 after a `let` value. A body that
+ *    declines emission anywhere keeps the closures, so a decline is always safe.
+ *  - Anything outside the proven subset declines: float or atom types, tuple parameters, any call
+ *    (including a non-tail self-call), `unify`, symbols. The subset is what the profile showed the time
+ *    in, and every widening is another differential surface.
+ */
+export function emitNumericTailLoop(
+  params: readonly ParamPat[],
+  paramTypes: readonly Ty[],
+  retType: Ty,
+  body: Atom,
+  self: string,
+): ((vals: FrameVal[], runtime: FunctionalRuntime) => FrameVal | boolean) | undefined {
+  if (retType !== "int" && retType !== "bool") return undefined;
+  if (params.some((p) => typeof p !== "string")) return undefined;
+  if (paramTypes.some((t) => t !== "int" && t !== "bool")) return undefined;
+  const DECLINE = Symbol("decline");
+  let temps = 0;
+  const fresh = (): string => `t${String(temps++)}`;
+  type Scope2 = ReadonlyMap<string, EmittedValue>;
+  const scope0 = new Map<string, EmittedValue>(
+    params.map((p, i) => [p as string, { ref: `p${String(i)}`, type: paramTypes[i] as "int" }]),
+  );
+
+  /** Emit `a` as statements into `out`, returning the ref holding its value. Throws DECLINE. */
+  const value = (a: Atom, scope: Scope2, out: string[]): EmittedValue => {
+    if (a.kind === "var") {
+      const bound = scope.get(a.name);
+      if (bound === undefined) throw DECLINE;
+      return bound;
+    }
+    if (a.kind === "gnd") {
+      const v = a.value;
+      if (v.g !== "int" || typeof v.n !== "number" || !Number.isSafeInteger(v.n)) throw DECLINE;
+      return { ref: `(${String(v.n)})`, type: "int" };
+    }
+    if (a.kind !== "expr" || a.items.length === 0 || a.items[0]!.kind !== "sym") throw DECLINE;
+    const op = (a.items[0] as { name: string }).name;
+    const args = a.items.slice(1);
+    const int2 = (): [EmittedValue, EmittedValue] => {
+      if (args.length !== 2) throw DECLINE;
+      const x = value(args[0]!, scope, out);
+      const y = value(args[1]!, scope, out);
+      if (x.type !== "int" || y.type !== "int") throw DECLINE;
+      return [x, y];
+    };
+    // The divisor evaluates before the dividend and is checked first, which is the closure nodes' own
+    // order; the order is observable through the fuel the dividend charges when the divisor is zero.
+    const divisorFirst = (emitResult: (x: string, d: string) => string): EmittedValue => {
+      if (args.length !== 2) throw DECLINE;
+      const y = value(args[1]!, scope, out);
+      if (y.type !== "int") throw DECLINE;
+      const d = fresh();
+      out.push(`const ${d} = ${y.ref};`, `if (${d} === 0) throw B;`);
+      const x = value(args[0]!, scope, out);
+      if (x.type !== "int") throw DECLINE;
+      const r = fresh();
+      out.push(`const ${r} = ${emitResult(x.ref, d)};`);
+      return { ref: r, type: "int" };
+    };
+    if (op === "+" || op === "-" || op === "*") {
+      const [x, y] = int2();
+      const r = fresh();
+      out.push(`const ${r} = G(${x.ref} ${op} ${y.ref});`);
+      return { ref: r, type: "int" };
+    }
+    if (op === "%") return divisorFirst((x, d) => `${x} % ${d}`);
+    if (op === "/") return divisorFirst((x, d) => `Math.trunc(${x} / ${d})`);
+    if (op === "<" || op === "<=" || op === ">" || op === ">=" || op === "==" || op === "!=") {
+      const [x, y] = int2();
+      const js = op === "==" ? "===" : op === "!=" ? "!==" : op;
+      const r = fresh();
+      out.push(`const ${r} = ${x.ref} ${js} ${y.ref};`);
+      return { ref: r, type: "bool" };
+    }
+    if (op === "if" && args.length === 3) {
+      const c = value(args[0]!, scope, out);
+      if (c.type !== "bool") throw DECLINE;
+      const r = fresh();
+      out.push(`rt.counterDelta += 2;`, `let ${r};`, `if (${c.ref}) {`);
+      const t = value(args[1]!, scope, out);
+      out.push(`${r} = ${t.ref};`, `} else {`);
+      const e = value(args[2]!, scope, out);
+      out.push(`${r} = ${e.ref};`, `}`);
+      if (t.type !== e.type) throw DECLINE;
+      return { ref: r, type: t.type };
+    }
+    if (op === "let" && args.length === 3 && args[0]!.kind === "var") {
+      const v = value(args[1]!, scope, out);
+      out.push(`rt.counterDelta += 1;`);
+      const next = new Map(scope).set(args[0]!.name, v);
+      return value(args[2]!, next, out);
+    }
+    throw DECLINE;
+  };
+
+  /** Emit `a` in tail position: every path returns, or reassigns the parameters and continues. */
+  const tail = (a: Atom, scope: Scope2, out: string[]): void => {
+    if (a.kind === "expr" && a.items.length > 0 && a.items[0]!.kind === "sym") {
+      const op = (a.items[0] as { name: string }).name;
+      if (op === "if" && a.items.length === 4) {
+        const c = value(a.items[1]!, scope, out);
+        if (c.type !== "bool") throw DECLINE;
+        out.push(`rt.counterDelta += 2;`, `if (${c.ref}) {`);
+        tail(a.items[2]!, scope, out);
+        out.push(`} else {`);
+        tail(a.items[3]!, scope, out);
+        out.push(`}`);
+        return;
+      }
+      if (op === "let" && a.items.length === 4 && a.items[1]!.kind === "var") {
+        const v = value(a.items[2]!, scope, out);
+        out.push(`rt.counterDelta += 1;`);
+        tail(a.items[3]!, new Map(scope).set(a.items[1]!.name, v), out);
+        return;
+      }
+      if (op === self && a.items.length - 1 === params.length) {
+        const args = a.items.slice(1).map((x) => value(x, scope, out));
+        if (args.some((x, i) => x.type !== paramTypes[i])) throw DECLINE;
+        // Into temporaries first: an argument may read a parameter a previous assignment overwrites.
+        const staged = args.map((x) => {
+          const s = fresh();
+          out.push(`const ${s} = ${x.ref};`);
+          return s;
+        });
+        staged.forEach((s, i) => out.push(`p${String(i)} = ${s};`));
+        out.push(`continue;`);
+        return;
+      }
+    }
+    const r = value(a, scope, out);
+    if (r.type !== retType) throw DECLINE;
+    out.push(`return ${r.ref};`);
+  };
+
+  const lines: string[] = [];
+  try {
+    tail(body, scope0, lines);
+  } catch (error) {
+    if (error === DECLINE) return undefined;
+    throw error;
+  }
+  const decls = params.map((_, i) => `let p${String(i)} = vals[${String(i)}];`);
+  const checks = paramTypes.map(
+    (t, i) => `if (typeof p${String(i)} !== "${t === "int" ? "number" : "boolean"}") throw O;`,
+  );
+  const src = `"use strict";
+const B = S.bail, O = S.rerun;
+const G = (v) => { if (!Number.isSafeInteger(v)) throw O; return v; };
+return function (vals, rt) {
+${decls.join("\n")}
+${checks.join("\n")}
+const d0 = rt.counterDelta;
+try {
+let first = true;
+for (;;) {
+if (first) first = false; else rt.counterDelta += 1;
+if (rt.counterLimit !== undefined && rt.counterDelta > rt.counterLimit) throw B;
+${lines.join("\n")}
+}
+} catch (e) {
+if (e === O) rt.counterDelta = d0;
+throw e;
+}
+};`;
+  try {
+    const factory = new Function("S", src) as (s: {
+      bail: symbol;
+      rerun: symbol;
+    }) => (vals: FrameVal[], runtime: FunctionalRuntime) => FrameVal | boolean;
+    return factory({ bail: BAIL, rerun: EMIT_RERUN });
+  } catch {
+    return undefined; // CSP without 'unsafe-eval', or an emitter bug caught by the syntax check
+  }
+}
+
 /** How many times `functor` is applied inside `body`. Tree recursion (>=2 self-calls, e.g. fib) has
  *  overlapping subproblems that memoisation collapses from exponential to polynomial; a single tail call
  *  (find-divisor's trial-division loop) has no overlap, so memoising it only grows an unbounded cache of
@@ -949,11 +1155,12 @@ function makeRun(
   node: Node,
   memoize: boolean,
   handoffDepth = EVALUATION_TRAMPOLINE_DEPTH,
+  fast?: (vals: FrameVal[], runtime: FunctionalRuntime) => FrameVal | boolean,
 ): FunctionalHolder["run"] {
   // A tail-recursive body (compiled by compileTail) returns the next argument frame as an array; loop on it
   // instead of recursing. A non-tail-recursive body never returns an array, so the loop runs exactly once.
   // (`Tup` and Atom results are objects, not arrays, so neither is mistaken for a tail-call frame.)
-  const loop = (vals: FrameVal[], runtime: FunctionalRuntime): FrameVal | boolean => {
+  const closureLoop = (vals: FrameVal[], runtime: FunctionalRuntime): FrameVal | boolean => {
     let frame = vals;
     let first = true;
     for (;;) {
@@ -969,6 +1176,19 @@ function makeRun(
       return r as FrameVal | boolean;
     }
   };
+  // The emitted loop went first, met a value its unboxed arithmetic cannot carry, and restored the fuel
+  // counter to the call's entry; the closures take the same call from the same state instead.
+  const loop =
+    fast === undefined
+      ? closureLoop
+      : (vals: FrameVal[], runtime: FunctionalRuntime): FrameVal | boolean => {
+          try {
+            return fast(vals, runtime);
+          } catch (error) {
+            if (error === EMIT_RERUN) return closureLoop(vals, runtime);
+            throw error;
+          }
+        };
   const memo = memoize
     ? new Map<
         unknown,
@@ -999,6 +1219,13 @@ function makeRun(
       freshSuffix: "",
     };
     if (!entered) {
+      // The memo lives as long as the holder, and a long-lived env answering many distinct calls would
+      // grow it without bound. Reset it between outermost calls once it exceeds the same completed-entry
+      // budget the table space enforces (TableSpace.key's interner reset is the same idiom). Never inside
+      // a call: one call's working set is what makes tree recursion polynomial. Observably neutral by
+      // construction — a hit charges the fuel and replays the depth the computation itself would have,
+      // so forgetting an entry only recomputes it.
+      if (memo !== undefined && memo.size > DEFAULT_TABLE_BUDGET.maxCompletedEntries) memo.clear();
       const boundary = runtime.depth.enterBoundary(runtime.limit, handoffDepth);
       if (boundary !== undefined)
         throwEvaluationDepthBoundary(boundary, expr([sym(name), ...vals.map(frameValueToAtom)]));
@@ -1031,7 +1258,7 @@ function makeRun(
 }
 
 // A parameter is either a plain variable or a flat tuple-of-variables pattern `($t $i $sum)`.
-type ParamPat = string | string[];
+export type ParamPat = string | string[];
 
 /** A single-clause `(= (f $a ($x $y) ...) body)` whose parameters are distinct variables or flat tuple
  *  patterns, or undefined. */
@@ -5231,8 +5458,15 @@ export function compileEnv(env: MinEnv): CompiledFns {
     if (!removed) {
       for (const [f, { node, arity }] of result) {
         const h = holders.get(f)!;
-        h.memoized = selfCallCount(cand.get(f)!.body, f) >= 2;
-        h.run = makeRun(f, arity, node, h.memoized);
+        const cd = cand.get(f)!;
+        h.memoized = selfCallCount(cd.body, f) >= 2;
+        // The memoised (tree-recursive) shape keeps the closures: its cost is in the memo, not the body,
+        // and the emitted loop has no replay bookkeeping.
+        const fast =
+          h.memoized || env.useEmitLoop === false
+            ? undefined
+            : emitNumericTailLoop(cd.params, h.paramTypes, h.retType, cd.body, f);
+        h.run = makeRun(f, arity, node, h.memoized, undefined, fast);
       }
       const compiled: CompiledFns = new Map(holders);
       for (const [f, h] of compileScalarHolders(env, pure, holders)) compiled.set(f, h);
@@ -5284,6 +5518,9 @@ export function runCompiled(
 ): CompiledRunResult | undefined {
   const h = env.compiled?.get(op);
   if (h === undefined || partAtoms.length !== h.arity) return undefined;
+  // `RunOptions.declineCompiled`: the caller asked for these holders to stand down (the trace-diff
+  // workflow runs a program once as-is and once declined to localise a compiled/interpreted drift).
+  if (env.declineCompiled?.(op, h.kind) === true) return undefined;
   if (
     depth !== undefined &&
     depth.current >= EVALUATION_TRAMPOLINE_DEPTH &&

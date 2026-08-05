@@ -21,12 +21,14 @@ import {
   gbool,
   gint,
   gstr,
+  hashOf,
   type InternTable,
   internAtom,
   internBuiltExpr,
   isErrorAtom,
   metaType,
   NUMBER_FAMILY_TYPE_NAMES,
+  strHash,
   sym,
   variable,
 } from "./atom";
@@ -170,21 +172,23 @@ function isEvalRequest(value: Susp): value is EvalRequest {
   return !isPromiseLike(value) && value.kind === EVAL_REQUEST;
 }
 interface CandidateSource extends Iterable<Atom> {
-  readonly counterPadding?: number;
   readonly synthetic?: true;
 }
 
-function exactCandidateSource(atom: Atom, count: number, total: number): CandidateSource {
+type VarHeadCounterProtocol = "none" | "source" | "cached";
+
+interface CandidateGetter {
+  (pInst: Atom, protocol?: VarHeadCounterProtocol): CandidateSource;
+}
+
+function exactCandidateSource(atom: Atom, count: number): CandidateSource {
   return {
-    counterPadding: total - count,
     synthetic: true,
     *[Symbol.iterator](): Iterator<Atom> {
       for (let i = 0; i < count; i++) yield atom;
     },
   };
 }
-
-const candidateCounterPadding = (source: CandidateSource): number => source.counterPadding ?? 0;
 
 const syntheticCandidateSource = (source: CandidateSource): boolean => source.synthetic === true;
 
@@ -267,7 +271,13 @@ function* callGroundedG(
     if (fuzzSandboxDenies(env, effect))
       return { tag: "ok", results: [fuzzEffectDeniedAtom(call, effect, op)] };
   }
-  return callGrounded(env.gt, op, args);
+  const r = callGrounded(env.gt, op, args);
+  // The one emit point for table-driven grounded runs, so the trace contract ("one `grounded`
+  // event per native operation that ran") holds on every route through this dispatcher; the native
+  // list/aggregate walkers emit at their own sites because they never pass through here. A
+  // noReduce probe is not a run and stays silent.
+  if (env.trace && r.tag === "ok") env.trace({ kind: "grounded", op });
+  return r;
 }
 
 function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
@@ -914,6 +924,12 @@ export interface MinEnv {
   /** Canonical module ids loaded into each space during this evaluator run. */
   loadedModules: Map<string, Set<string>>;
   exprTypes: Array<[Atom, Atom]>;
+  /** `exprTypes` bucketed by the subject's structural hash. Both the dedupe on insert and the lookup
+   *  walked the whole list with `atomEq`, so a program declaring N expression types cost O(N^2) to load:
+   *  measured 46ms at 1,000 declarations and 1,305ms at 4,000. */
+  exprTypesByHash?: Map<number, Array<[Atom, Atom]>> | undefined;
+  /** How many leading `exprTypes` are in the buckets. */
+  exprTypesIndexed?: number | undefined;
   /** Async grounded operations, dispatched by the async runner; empty for pure synchronous evaluation. */
   agt: Map<string, AsyncGroundFn>;
   /** Effect declarations for named sync and async grounded operations. Missing sync declarations are
@@ -950,6 +966,17 @@ export interface MinEnv {
   nonGroundAtPos: Map<string, Atom[]>;
   /** Internal static nested-head index. Optional so existing structural `MinEnv` values stay compatible. */
   nestedMatchIndex?: StaticNestedMatchIndex | undefined;
+  /** Argument columns over the static atoms, for a pattern whose head is a variable. Every index above is
+   *  keyed by head, so `($rel 500000 $y)` names no bucket and falls back to reading the space; a column
+   *  keys on one argument position instead, so the ground argument selects even though the head does not.
+   *  Keyed by `arity|position`, built for a position a query actually asks about and only when a sample
+   *  says the key is selective enough to be worth it, then extended per added atom. A program that never
+   *  writes such a pattern never pays for one. Occurrence ids stay valid across a compaction sweep, which
+   *  swaps a slot's storage without renumbering. */
+  varHeadPosIndex?: Map<string, VarHeadPosIndex> | undefined;
+  /** Per column site, what the selectivity sample has been deciding, so a site it keeps refusing stops
+   *  paying for the sample that refuses it. */
+  varHeadPosPredict?: Map<string, VarHeadSitePrediction> | undefined;
   varHeadedFacts: Atom[];
   /** Automatic tabling storage: structural variant keys over token tries and bounded completed entries.
    *  `undefined` when tabling is disabled. */
@@ -1023,6 +1050,15 @@ export interface MinEnv {
    *  the sorted numeric column slice instead of scanning the whole functor bucket. The selected slice is
    *  restored to source order before yielding. */
   useRangeIndex?: boolean;
+  /** Argument-column candidate selection for a `match` whose head is a variable
+   *  (`experimental.varHeadIndex`, on by default). Cached conjuncts freshen each selected fact once and may
+   *  choose a head bucket, argument column, or full scan independently for each incoming solution. */
+  useVarHeadIndex?: boolean;
+  /** Emit a single-tail-call numeric functor's loop as JS source (`experimental.emitNumericLoop`, on by
+   *  default) instead of running it through the closure nodes. Byte-identical including fuel boundaries:
+   *  the emitted loop charges the counter exactly where the closures do, and bails back to them on any
+   *  value its unboxed arithmetic cannot carry. */
+  useEmitLoop?: boolean;
   /** Mark normal-form ground `match` results as already evaluated (`experimental.matchEvalMark`, on by
    *  default) so the first consumer visit takes the existing evaluatedAtoms short-circuit. */
   useMatchEvalMark?: boolean;
@@ -1036,6 +1072,18 @@ export interface MinEnv {
    *  loop preserves multiplicity. Only functors with no duplicate facts route to the nested loop, so the two
    *  paths stay byte-identical. Computed once (conjNested only) from factIndex and cached here. */
   duplicateFactHeadsCache?: Set<string> | undefined;
+  /** Per-head "every stored static fact is a normal form" verdicts for the collapse-count gate
+   *  (matchCountsSolutionsAsResults). Valid only for the stamped rule/removal/grounded state — the
+   *  same validity axes as the normal-form cache — and reset wherever the fact buckets change,
+   *  alongside duplicateFactHeadsCache. */
+  normalFactHeadsCache?:
+    | {
+        selfRuleVersion: number;
+        removedStatic: unknown;
+        groundedEpoch: number;
+        byHead: Map<string, boolean>;
+      }
+    | undefined;
   /** Compact static fact storage (`experimental.staticCompact`, on by default for buildEnv loads): large
    *  all-ground flat-fact functors are swept into one shared StaticCompactBase; their slots, factIndex
    *  buckets, and argIndex postings release the object forest, and candidates decode on demand through the
@@ -1205,6 +1253,7 @@ function compactStaticFacts(env: MinEnv, skippedArgIndexHeads?: ReadonlySet<stri
   env.compactHeads = heads;
   env.atoms.adoptCompact(base, factIds);
   env.duplicateFactHeadsCache = undefined;
+  env.normalFactHeadsCache = undefined;
   env.numericRangeIndexCache = undefined;
 }
 
@@ -1222,6 +1271,7 @@ function decompactFunctor(env: MinEnv, k: string): void {
   for (const fact of bucket) indexFactArgs(env, fact as ExprAtom, k);
   env.compactHeads!.delete(k);
   env.duplicateFactHeadsCache = undefined;
+  env.normalFactHeadsCache = undefined;
   env.numericRangeIndexCache = undefined;
 }
 
@@ -1300,6 +1350,45 @@ function orderedIndexedAtoms(
   return out;
 }
 
+/** `exprTypes` bucketed by subject hash, brought up to date with anything appended to the list directly.
+ *  Structural equality still decides a hit; the hash only narrows what has to be compared. */
+function exprTypesIndex(env: MinEnv): Map<number, Array<[Atom, Atom]>> {
+  let index = env.exprTypesByHash;
+  if (index === undefined) {
+    index = new Map();
+    env.exprTypesByHash = index;
+    env.exprTypesIndexed = 0;
+  }
+  for (let i = env.exprTypesIndexed ?? 0; i < env.exprTypes.length; i++) {
+    const entry = env.exprTypes[i]!;
+    const h = hashOf(entry[0]);
+    const bucket = index.get(h);
+    if (bucket === undefined) index.set(h, [entry]);
+    else bucket.push(entry);
+  }
+  env.exprTypesIndexed = env.exprTypes.length;
+  return index;
+}
+
+/** The declarations whose subject hashes like `a`. */
+function exprTypeBucket(env: MinEnv, a: Atom): Array<[Atom, Atom]> {
+  return exprTypesIndex(env).get(hashOf(a)) ?? [];
+}
+
+/** Record `(: subj t)` for an expression subject. The duplicate check reads one hash bucket rather than
+ *  every declaration made so far, which is what made loading them quadratic. */
+function addExprType(env: MinEnv, subj: Atom, t: Atom): void {
+  const index = exprTypesIndex(env);
+  const h = hashOf(subj);
+  const bucket = index.get(h);
+  if (bucket?.some(([s, tt]) => atomEq(s, subj) && atomEq(tt, t)) === true) return;
+  const entry: [Atom, Atom] = [subj, t];
+  env.exprTypes.push(entry);
+  if (bucket === undefined) index.set(h, [entry]);
+  else bucket.push(entry);
+  env.exprTypesIndexed = env.exprTypes.length;
+}
+
 function pushUniqueType(m: Map<string, Atom[]>, k: string, x: Atom): void {
   const cur = m.get(k);
   if (cur === undefined) m.set(k, [x]);
@@ -1363,6 +1452,8 @@ export function emptyEnv(gt: GroundingTable): MinEnv {
     // `experimental` options and direct field writes turn them off for differential tests and profiling.
     useConjNested: true,
     useRangeIndex: true,
+    useVarHeadIndex: true,
+    useEmitLoop: true,
     useMatchEvalMark: true,
     useDirectMatch: true,
   };
@@ -1739,9 +1830,11 @@ function addAtomToEnvPlanned(
   if (fk === undefined) env.varHeadedFacts.push(atom);
   else {
     pushTo(env.factIndex, fk, atom);
-    // A new fact can introduce a duplicate or extend an indexed numeric column, and evalSequential
-    // extends the env between directives, so the lazily-built routing caches must not survive the add.
+    // A new fact can introduce a duplicate, extend an indexed numeric column, or carry a reducible
+    // subterm, and evalSequential extends the env between directives, so the lazily-built routing
+    // caches must not survive the add.
     env.duplicateFactHeadsCache = undefined;
+    env.normalFactHeadsCache = undefined;
     env.numericRangeIndexCache = undefined;
     if (!atom.ground) nestedMatchIndex?.nonGroundFactHeads.add(fk);
     if (atom.kind === "expr") {
@@ -1786,8 +1879,7 @@ function addAtomToEnvPlanned(
         env.sigs.set(subj.name, t.items.slice(1));
       pushUniqueType(env.types, subj.name, t);
     } else if (subj.kind === "expr") {
-      if (!env.exprTypes.some(([s, tt]) => atomEq(s, subj) && atomEq(tt, t)))
-        env.exprTypes.push([subj, t]);
+      addExprType(env, subj, t);
     }
     env.typeCache = undefined; // a new type declaration invalidates the getTypes memo
   }
@@ -1839,8 +1931,7 @@ function registerImportedTypes(env: MinEnv, atoms: readonly Atom[]): void {
       const cur = env.types.get(subj.name) ?? [];
       if (!cur.some((e) => atomEq(e, t))) env.types.set(subj.name, [...cur, t]);
     } else if (subj.kind === "expr") {
-      if (!env.exprTypes.some(([s, tt]) => atomEq(s, subj) && atomEq(tt, t)))
-        env.exprTypes.push([subj, t]);
+      addExprType(env, subj, t);
     }
     env.typeCache = undefined; // a new type declaration invalidates the getTypes memo
   }
@@ -2127,11 +2218,7 @@ function namedSpaceEnv(env: MinEnv, w: World, name: string): MinEnv {
   return view;
 }
 
-function namedSpaceCandidateGetter(
-  env: MinEnv,
-  w: World,
-  name: string,
-): (pInst: Atom) => CandidateSource {
+function namedSpaceCandidateGetter(env: MinEnv, w: World, name: string): CandidateGetter {
   let scan: Atom[] | undefined;
   const backend = spaceBackend(env, name);
   const space = backend === undefined ? ptGet(w.spaces, name) : undefined;
@@ -2142,7 +2229,7 @@ function namedSpaceCandidateGetter(
     if (backend === undefined) {
       const log = space ?? emptyLog;
       if (pInst.ground && logNonGround(log) === 0 && w.store.size === 0) {
-        return exactCandidateSource(pInst, idxCount(logGroundIdx(log), pInst), logSize(log));
+        return exactCandidateSource(pInst, idxCount(logGroundIdx(log), pInst));
       }
     }
     scan ??= namedSpaceRead(env, w, name).map((x) => resolveStates(w, x));
@@ -3354,7 +3441,7 @@ function getTypesUncached(env: MinEnv, a: Atom): Atom[] {
   if (a.items.length === 0) return UNDEF_T;
   if (opOf(a) === "StateValue" && a.items.length === 2)
     return [expr([sym("StateMonad"), headOr(getTypes(env, a.items[1]!), UNDEF)])];
-  const direct = env.exprTypes.filter((p) => atomEq(p[0], a));
+  const direct = exprTypeBucket(env, a).filter((p) => atomEq(p[0], a));
   if (direct.length > 0) return direct.map((p) => p[1]);
   const f = a.items[0]!;
   const fTypes = getTypes(env, f);
@@ -4222,18 +4309,427 @@ function* evalTopKByAtomG(
 }
 
 // ---------- conjunctive match ----------
+/** How many atoms to look at when estimating how much of the space a key selects. */
+const VAR_HEAD_SAMPLE = 1024;
+
+/** Below this the space just scans: the selectivity sample reads `VAR_HEAD_SAMPLE` atoms, so under it the
+ *  estimate would read the whole space, which is the scan it exists to avoid. Derived, not tuned. */
+const VAR_HEAD_INDEX_MIN_ATOMS = VAR_HEAD_SAMPLE;
+
+/** Most index entries the columns may hold, per atom in the space. An entry costs about 35 bytes and a
+ *  decoded atom about a kilobyte, measured over 200,000 arity-5 facts, so two entries per atom keeps the
+ *  whole index near 7% of the data it indexes however the space grows. A budget in entries rather than a
+ *  count of columns, because memory follows entries: many small columns are cheap and a few wide ones are
+ *  not, and a fixed column count got that exactly backwards. */
+const VAR_HEAD_INDEX_ENTRIES_PER_ATOM = 2;
+
+/** Occurrence ids of the static atoms holding each ground leaf at one (arity, argument position).
+ *  Argument columns rather than a feature index over whole terms: a path index costs about six times as
+ *  much to build here, which is more than the scan it replaces, so it lost on the query it was meant to
+ *  win. */
+interface VarHeadPosIndex {
+  /** Ids per leaf bucket, ascending. A bucket held by exactly one atom stores that id unboxed, because a
+   *  selective position has nearly as many distinct buckets as there are atoms and boxing every one of
+   *  them is a large part of what the build costs. */
+  readonly exact: Map<number, number | number[]>;
+  /** Ids that cannot be discriminated at this position and are admitted against any query leaf: an atom
+   *  that is itself a variable, and a grounded value whose own matcher decides what it accepts. */
+  readonly residual: number[];
+  /** How many leading `atoms` are indexed; the column extends rather than rebuilds. */
+  indexed: number;
+  /** Ids stored, across the postings and the residual: what this column costs, in budget units. */
+  entries: number;
+}
+
+/** Can this atom match a query term it does not structurally agree with? */
+function admitsAnyShape(a: Atom): boolean {
+  return a.kind === "var" || (a.kind === "gnd" && a.match !== undefined);
+}
+
+/** A number that structurally equal keyable leaves share, or `undefined` for a leaf nothing can be keyed
+ *  on. Unlike `argKey` this need not be exact, because a column only narrows the candidate list and every
+ *  candidate is still put through the matcher: two unrelated leaves landing in one bucket costs a
+ *  rejected candidate, not a wrong answer. That is what lets it avoid building a string per atom, which
+ *  is what a build spends most of its time on. A number keys itself, so the common case allocates
+ *  nothing. */
+function argBucket(a: Atom): number | undefined {
+  if (a.kind === "sym") return strHash(a.name);
+  if (a.kind === "gnd") {
+    if (a.match !== undefined) return undefined;
+    const v = a.value;
+    switch (v.g) {
+      case "int":
+      case "float":
+        // Ground equality compares mixed ints and floats through Number, so both kinds share a bucket.
+        return Number(v.n);
+      case "str":
+        return strHash(v.s);
+      case "bool":
+        return v.b ? 0.5 : -0.5;
+      default:
+        return undefined;
+    }
+  }
+  return undefined;
+}
+
+const varHeadColumnKey = (arity: number, pos: number): string =>
+  String(arity) + KEY_SEP + String(pos);
+
+function addPosting(m: Map<number, number | number[]>, k: number, id: number): void {
+  const cur = m.get(k);
+  if (cur === undefined) m.set(k, id);
+  else if (typeof cur === "number") m.set(k, [cur, id]);
+  else cur.push(id);
+}
+
+const postingIds = (p: number | number[] | undefined): readonly number[] =>
+  p === undefined ? EMPTY_IDS : typeof p === "number" ? [p] : p;
+
+const postingCount = (p: number | number[] | undefined): number =>
+  p === undefined ? 0 : typeof p === "number" ? 1 : p.length;
+
+const EMPTY_IDS: readonly number[] = [];
+
+/** The index entries every column together currently holds. Column counts stay small (the budget divides
+ *  a space's atoms among them), so summing on demand costs less than keeping a shadow total in step. */
+function varHeadIndexEntries(columns: ReadonlyMap<string, VarHeadPosIndex>): number {
+  let used = 0;
+  for (const column of columns.values()) used += column.entries;
+  return used;
+}
+
+/** Build or extend one column per requested position, in a single pass over the atoms. The pass and the
+ *  arity test are shared, so covering several positions costs little more than covering one, and a query
+ *  with more than one ground argument can then be answered from whichever is the most selective.
+ *
+ *  The columns together hold at most `VAR_HEAD_INDEX_ENTRIES_PER_ATOM` entries per atom in the space, a
+ *  budget that grows with the data rather than a fixed count of columns. A new column is refused while
+ *  the budget could not fit another full one, and a column whose own growth crosses the budget is
+ *  dropped and its site marked, so a set of columns that fit when the space was small cannot silently
+ *  outgrow it. Only the columns this call touched are ever dropped, newest first: a column that fit
+ *  yesterday is never evicted by today's query, so the survivors are stable. A dropped or refused
+ *  position falls back to the scan, which is what every position did before columns existed.
+ *
+ *  Returns only the columns that survived; the caller reads the rest from the scan. */
+function varHeadColumns(
+  env: MinEnv,
+  arity: number,
+  positions: readonly number[],
+): { columns: VarHeadPosIndex[]; kept: number[] } {
+  let columns = env.varHeadPosIndex;
+  if (columns === undefined) {
+    columns = new Map();
+    env.varHeadPosIndex = columns;
+  }
+  const budget = env.atoms.length * VAR_HEAD_INDEX_ENTRIES_PER_ATOM;
+  const cols: VarHeadPosIndex[] = [];
+  const kept: number[] = [];
+  const keys: string[] = [];
+  let from = Infinity;
+  for (const pos of positions) {
+    const key = varHeadColumnKey(arity, pos);
+    let column = columns.get(key);
+    if (column === undefined) {
+      // A full column can hold up to one entry per atom, so refuse creation unless that worst case
+      // fits. Conservative for a rare arity, but refusing without a pass is what keeps a site the
+      // predictor re-samples from paying a build it is about to lose. The refusal saturates the site's
+      // prediction to refused, the same as an eviction: without that, every query on the site would
+      // sample, find the key selective, and be refused here again, which is the per-query cost the
+      // predictor exists to remove. The occasional resample recovers the site if the budget grows.
+      if (varHeadIndexEntries(columns) + env.atoms.length > budget) {
+        let predictions = env.varHeadPosPredict;
+        if (predictions === undefined) {
+          predictions = new Map();
+          env.varHeadPosPredict = predictions;
+        }
+        predictions.set(key, { score: 0, since: 0 });
+        continue;
+      }
+      column = { exact: new Map(), residual: [], indexed: 0, entries: 0 };
+      columns.set(key, column);
+    }
+    cols.push(column);
+    kept.push(pos);
+    keys.push(key);
+    // Columns for the same arity are usually built together, but one asked about earlier is already
+    // further along, so each extends from its own watermark.
+    if (column.indexed < from) from = column.indexed;
+  }
+  if (cols.length === 0) return { columns: cols, kept };
+  // Read through the store's memoized array, the same one a full scan walks. Going through `get` per id
+  // decodes every compacted slot again, which cost more than the scan the column is meant to replace.
+  const all = env.atoms.toArray();
+  for (let id = from; id < all.length; id++) {
+    const a = all[id]!;
+    if (a.kind === "expr") {
+      // A different arity cannot unify with this pattern, so it is left out of the columns entirely.
+      if (a.items.length !== arity) continue;
+      for (let i = 0; i < cols.length; i++) {
+        const column = cols[i]!;
+        if (id < column.indexed) continue;
+        const item = a.items[kept[i]!]!;
+        const k = argBucket(item);
+        if (k !== undefined) {
+          addPosting(column.exact, k, id);
+          column.entries += 1;
+        }
+        // A column is only ever asked about a symbol or a plain grounded value, since that is what makes
+        // a position keyable, and neither can match an expression. Leaving those out is what keeps the
+        // residual small: every rule in the standard library has an expression in argument position, and
+        // admitting them on every lookup put the whole prelude through the unifier each time.
+        else if (item.kind !== "expr") {
+          column.residual.push(id);
+          column.entries += 1;
+        }
+      }
+    } else if (admitsAnyShape(a)) {
+      for (const column of cols)
+        if (id >= column.indexed) {
+          column.residual.push(id);
+          column.entries += 1;
+        }
+    }
+  }
+  for (const column of cols) column.indexed = all.length;
+  // The space may have grown since these columns were admitted. Drop this call's columns, newest first,
+  // until what remains fits. The site's prediction saturates straight to refused, not merely down one:
+  // the column was built and did not fit, which is not evidence a retry can argue with, and a gradual
+  // decrement would rebuild and re-drop it twice more before giving up. The predictor's occasional
+  // resample remains the recovery path once the budget has grown.
+  while (cols.length > 0 && varHeadIndexEntries(columns) > budget) {
+    cols.pop();
+    kept.pop();
+    const key = keys.pop()!;
+    columns.delete(key);
+    let predictions = env.varHeadPosPredict;
+    if (predictions === undefined) {
+      predictions = new Map();
+      env.varHeadPosPredict = predictions;
+    }
+    predictions.set(key, { score: 0, since: 0 });
+  }
+  return { columns: cols, kept };
+}
+
+/** Merge two ascending id lists, keeping source order. */
+function mergeIds(a: readonly number[], b: readonly number[]): number[] {
+  if (b.length === 0) return a.slice() as number[];
+  if (a.length === 0) return b.slice() as number[];
+  const out: number[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) out.push(a[i]! < b[j]! ? a[i++]! : b[j++]!);
+  while (i < a.length) out.push(a[i++]!);
+  while (j < b.length) out.push(b[j++]!);
+  return out;
+}
+
+/** The most of the space a selection may cover and still be worth making. A column narrows the candidates
+ *  but costs a pass to build, a merged id list to allocate, and one indexed read per candidate instead of
+ *  a walk along the array a scan already has in hand. Selecting half the space loses to scanning it:
+ *  measured over 200,000 facts, a position holding two distinct values ran 1.35x slower indexed, ten
+ *  values broke even, and a hundred ran 1.98x faster. An eighth sits below the break-even point. */
+const VAR_HEAD_MAX_SELECTION = 1 / 8;
+
+/** Knuth's multiplicative constant. Odd, so `i * STEP mod n` scatters rather than steps. */
+const VAR_HEAD_SAMPLE_STEP = 2654435761;
+
+/** Would keying this position on this leaf select a small enough part of the space to be worth it?
+ *
+ *  Estimated by counting what the column would actually hand back over a sample: the atoms sharing the
+ *  key, plus the ones no key can discriminate. That is the selection itself rather than a proxy for it.
+ *  Sampling before building is what keeps a dull position from paying for a column it gains nothing from.
+ *
+ *  The sample is scattered rather than strided, because a stride resonates with data that repeats: two
+ *  thousand facts alternating between two values, sampled every second atom, show one value two thousand
+ *  times and the other never, and the position looks perfectly selective when it selects half the space.
+ *  Walking `i * STEP mod n` mixes the positions instead, and stays deterministic. */
+function varHeadKeyLooksSelective(
+  all: readonly Atom[],
+  arity: number,
+  pos: number,
+  leaf: number,
+): boolean {
+  const n = all.length;
+  const sampled = Math.min(n, VAR_HEAD_SAMPLE);
+  let selected = 0;
+  for (let i = 0; i < sampled; i++) {
+    const a = all[(i * VAR_HEAD_SAMPLE_STEP) % n]!;
+    if (a.kind === "expr") {
+      if (a.items.length !== arity) continue;
+      const item = a.items[pos]!;
+      const k = argBucket(item);
+      if (k === leaf || (k === undefined && item.kind !== "expr")) selected += 1;
+    } else if (admitsAnyShape(a)) selected += 1;
+  }
+  return selected <= sampled * VAR_HEAD_MAX_SELECTION;
+}
+
+/** How sure the predictor has to be before it stops sampling a site, and how often it looks again. */
+const VAR_HEAD_PREDICT_MAX = 3;
+const VAR_HEAD_PREDICT_RESAMPLE = 8;
+
+/** What the sample has been deciding about one `(arity, position)` site. */
+interface VarHeadSitePrediction {
+  /** Saturating confidence that the site is worth indexing: 0 means keep refusing it. */
+  score: number;
+  /** Queries refused on the prediction alone since the site was last sampled. */
+  since: number;
+}
+
+/** Should the sample run for this site, or has it refused often enough to be trusted without it?
+ *
+ *  A refused position never gets a column, so it re-samples on every query, and the sample reads a
+ *  thousand atoms: over a small space that is half a scan, and it showed up as 7% on two thousand facts
+ *  queried sixty times. A saturating counter per site, as a branch predictor keeps per branch, makes the
+ *  common answer free. Guessing wrong costs a scan that could have been an indexed read and never a wrong
+ *  answer, and one query in eight samples anyway, so a site recovers when the data changes under it. */
+function varHeadSiteWorthSampling(env: MinEnv, site: string): boolean {
+  const p = env.varHeadPosPredict?.get(site);
+  if (p === undefined || p.score > 0) return true;
+  p.since += 1;
+  if (p.since < VAR_HEAD_PREDICT_RESAMPLE) return false;
+  p.since = 0;
+  return true;
+}
+
+/** Record what the sample decided, so the next query can skip it. */
+function varHeadSiteSampled(env: MinEnv, site: string, selective: boolean): void {
+  let predictions = env.varHeadPosPredict;
+  if (predictions === undefined) {
+    predictions = new Map();
+    env.varHeadPosPredict = predictions;
+  }
+  const p = predictions.get(site);
+  if (p === undefined)
+    predictions.set(site, {
+      score: selective ? VAR_HEAD_PREDICT_MAX : VAR_HEAD_PREDICT_MAX - 1,
+      since: 0,
+    });
+  else p.score = selective ? Math.min(VAR_HEAD_PREDICT_MAX, p.score + 1) : Math.max(0, p.score - 1);
+}
+
+/** The stable static atom count available to a variable-head argument column. */
+function varHeadStaticScanSize(env: MinEnv, w: World): number | undefined {
+  if (env.useVarHeadIndex !== true) return undefined;
+  if (w.removedStatic !== null || w.store.size !== 0) return undefined;
+  if (w.selfExtra !== null || (w.flatSelfExtra?.size ?? 0) !== 0) return undefined;
+  return env.atoms.length;
+}
+
+/** Occurrence ids a variable-headed pattern could match, or `undefined` to read the space as before.
+ *
+ *  Every other clause index is keyed by an atom's head, so a pattern without one named no bucket and read
+ *  the whole space however selective its arguments were. This keys on one argument position instead.
+ *
+ *  A selection hands back only the selected atoms; every caller freshens what it consumes at the running
+ *  counter, so skipped facts and solution-dependent source choices are unobservable up to alpha-renaming,
+ *  which is the compliance bar. The admission rules keep the ids meaningful: a static removal or a resolved state cell
+ *  would make the id-to-atom mapping and the scan order disagree, and runtime additions live in a separate
+ *  store this column does not cover. */
+function varHeadCandidateIds(env: MinEnv, w: World, pInst: Atom): number[] | undefined {
+  if (varHeadStaticScanSize(env, w) === undefined) return undefined;
+  if (pInst.kind !== "expr") return undefined;
+  const arity = pInst.items.length;
+  const positions: number[] = [];
+  const leaves: number[] = [];
+  for (let pos = 0; pos < arity; pos++) {
+    const k = argBucket(pInst.items[pos]!);
+    if (k !== undefined) {
+      positions.push(pos);
+      leaves.push(k);
+    }
+  }
+  // Nothing rigid to key on: a column would hand back everything it just walked.
+  if (positions.length === 0) return undefined;
+  const all = env.atoms.toArray();
+  const columns = env.varHeadPosIndex;
+  // Keep only the positions worth a column. One already built answers exactly, from its own postings;
+  // one that would have to be built is estimated from a sample, so a dull position is refused before it
+  // costs a pass rather than after.
+  const wanted: number[] = [];
+  const wantedLeaves: number[] = [];
+  for (let i = 0; i < positions.length; i++) {
+    const pos = positions[i]!;
+    const leaf = leaves[i]!;
+    const site = varHeadColumnKey(arity, pos);
+    const built = columns?.get(site);
+    let selective: boolean;
+    if (built !== undefined && built.indexed === all.length) {
+      selective =
+        postingCount(built.exact.get(leaf)) + built.residual.length <=
+        all.length * VAR_HEAD_MAX_SELECTION;
+    } else if (all.length < VAR_HEAD_INDEX_MIN_ATOMS) {
+      // Below the sampling floor an estimate is the whole space anyway: build outright and let the
+      // budget and the final selection-size check decide. A one-shot small scan was already cheap;
+      // a cached conjunct asks once per solution, and the small column amortizes immediately.
+      selective = true;
+    } else if (!varHeadSiteWorthSampling(env, site)) {
+      selective = false;
+    } else {
+      selective = varHeadKeyLooksSelective(all, arity, pos, leaf);
+      varHeadSiteSampled(env, site, selective);
+    }
+    if (selective) {
+      wanted.push(pos);
+      wantedLeaves.push(leaf);
+    }
+  }
+  if (wanted.length === 0) return undefined;
+  // A position past the column cap is dropped, so the leaves have to be read back through what was kept.
+  // Nothing is usually dropped, and then the two lists are the same list.
+  const { columns: cols, kept } = varHeadColumns(env, arity, wanted);
+  if (cols.length === 0) return undefined;
+  const keptLeaves =
+    kept.length === wanted.length
+      ? wantedLeaves
+      : kept.map((pos) => wantedLeaves[wanted.indexOf(pos)]!);
+  // Each column's postings for its own leaf, plus that column's residual, is independently a superset of
+  // what can match, so the smallest of them is the one to read.
+  let best = 0;
+  let bestPosting: number | number[] | undefined;
+  let bestSize = Infinity;
+  for (let i = 0; i < cols.length; i++) {
+    const column = cols[i]!;
+    const posting = column.exact.get(keptLeaves[i]!);
+    const size = postingCount(posting) + column.residual.length;
+    if (size < bestSize) {
+      bestSize = size;
+      bestPosting = posting;
+      best = i;
+    }
+  }
+  // The sample can be wrong about a skewed position. Now that the column says exactly how large the
+  // selection is, a scan is still the better answer when it turns out to cover much of the space.
+  if (bestSize > all.length * VAR_HEAD_MAX_SELECTION) return undefined;
+  return mergeIds(postingIds(bestPosting), cols[best]!.residual);
+}
+
 /** Candidate `&self` atoms that could match a (instantiated) pattern, using the functor index. A
  *  functor-headed pattern only scans atoms with that head key plus the variable-headed atoms (which can
  *  unify with any functor); a variable-headed pattern must scan everything. State atoms are resolved
- *  only when the world actually holds state. This is what turns a linear `match` into an indexed one. */
+ *  only when the world actually holds state. This is what turns a linear `match` into an indexed one.
+ *
+ *  `protocol` routes the selection surfaces: `none` keeps the full scan, `source` additionally admits the
+ *  nested-argument index, and both `source` and `cached` admit the variable-head argument column. Every
+ *  caller freshens consumed candidates at the running counter (alpha-equivalent, the compliance bar). */
 function matchCandidates(
   env: MinEnv,
   w: World,
   pInst: Atom,
-  allowNested: boolean,
+  protocol: VarHeadCounterProtocol,
 ): CandidateSource {
   const k = headKey(pInst);
   if (k === undefined) {
+    const ids = protocol === "none" ? undefined : varHeadCandidateIds(env, w, pInst);
+    if (ids !== undefined) {
+      return {
+        *[Symbol.iterator](): Iterator<Atom> {
+          for (const id of ids) yield env.atoms.get(id);
+        },
+      };
+    }
     return {
       *[Symbol.iterator](): Iterator<Atom> {
         // A variable-headed pattern must consider everything.
@@ -4244,18 +4740,18 @@ function matchCandidates(
   }
   const headCandidates = env.factIndex.get(k) ?? [];
   const nestedMatchIndex = env.nestedMatchIndex;
-  // Skipping a failed non-ground candidate changes the suffix used to freshen later facts. Restrict nested
-  // indexing to a ground, state-free candidate domain and restore the skipped attempts through counterPadding.
-  // Leaf indexing keeps its established admission and counter behavior.
+  // The nested-argument index serves both selection routes. What still gates is load-bearing:
+  // non-ground facts of this head are never position-indexed at insert, so a bucket would silently
+  // miss them (indexing their wildcard positions is its own measured change), and a state cell can
+  // resolve a stored argument to a different nested head than the bucket saw. Everything else the
+  // assembly below already handles uniformly for every selection — var-headed facts append,
+  // removals filter, runtime overlays yield after the selected candidates — and the old one-shot
+  // restriction guarded only the deleted byte-counter protocol.
   const nestedIndexSafe =
-    allowNested &&
+    protocol !== "none" &&
     nestedMatchIndex !== undefined &&
     !nestedMatchIndex.nonGroundFactHeads.has(k) &&
-    env.varHeadedFacts.length === 0 &&
-    w.removedStatic === null &&
-    w.store.size === 0 &&
-    w.selfExtra === null &&
-    (w.flatSelfExtra?.size ?? 0) === 0;
+    w.store.size === 0;
   // Compact functors have no factIndex bucket or argIndex postings: sizes and candidate slices come
   // from the base's sorted columns, and candidates decode on demand through the memoized decoder in
   // the same source order the object postings kept.
@@ -4312,7 +4808,6 @@ function matchCandidates(
       }
     }
   let cands: Atom[];
-  let counterPadding = 0;
   if (bestKey !== undefined) {
     if (bestIsNested) {
       cands = orderedIndexedAtoms(
@@ -4320,7 +4815,6 @@ function matchCandidates(
         nestedMatchIndex!.byHead.get(bestKey) ?? [],
         nestedMatchIndex!.wildcardAtPos.get(bestPosKey!) ?? [],
       );
-      counterPadding = headCount - cands.length;
     } else if (compactMeta !== undefined) {
       // The equality slice is ascending by fact id, which is the bucket's insertion order.
       const ids = env.staticBase!.equalRange(k, bestPos, bestArg);
@@ -4363,9 +4857,7 @@ function matchCandidates(
     for (const atom of resolveAll(w, cands)) yield atom;
     yield* runtimeCandidates(w, k, pInst);
   };
-  return counterPadding === 0
-    ? { [Symbol.iterator]: iterate }
-    : { counterPadding, [Symbol.iterator]: iterate };
+  return { [Symbol.iterator]: iterate };
 }
 
 /** Apply state resolution to candidate atoms only when the world actually holds state. */
@@ -4388,7 +4880,7 @@ function* runtimeCandidates(w: World, k: string | undefined, pattern?: Atom): It
 
 function matchConj(
   env: MinEnv,
-  getCandidates: (pInst: Atom) => CandidateSource,
+  getCandidates: CandidateGetter,
   patterns: readonly Atom[],
   st: St,
   sols: Bindings[],
@@ -4397,16 +4889,24 @@ function matchConj(
   let counter = st.counter;
   for (const p of patterns) {
     const next: Bindings[] = [];
+    // One fresh copy per distinct fact per conjunct, matchConjJoin's own cache discipline: each
+    // solution's bindings capture the copy's variables independently, so sharing it is invisible up
+    // to alpha-renaming, and a schematic fact freshens once instead of once per solution.
+    const freshCache = new Map<Atom, Atom>();
     for (const b of cur) {
       const pInst = inst(env, b, p);
-      const source = getCandidates(pInst);
+      const source = getCandidates(pInst, "source");
+      const cache = syntheticCandidateSource(source) ? undefined : freshCache;
       for (const atom of source) {
-        const atom2 = freshenRule(counter, atom, atom)[0];
-        counter += 1;
+        let atom2 = cache?.get(atom);
+        if (atom2 === undefined) {
+          atom2 = freshenRule(counter, atom, atom)[0];
+          counter += 1;
+          cache?.set(atom, atom2);
+        }
         for (const mb of matchAtoms(pInst, atom2))
           for (const m of merge(b, mb)) if (!hasLoop(m)) next.push(m);
       }
-      counter += candidateCounterPadding(source);
     }
     cur = next;
   }
@@ -4415,7 +4915,7 @@ function matchConj(
 
 function matchConjLimited(
   env: MinEnv,
-  getCandidates: (pInst: Atom) => CandidateSource,
+  getCandidates: CandidateGetter,
   patterns: readonly Atom[],
   st: St,
   sols: Bindings[],
@@ -4441,14 +4941,6 @@ function matchConjLimited(
         for (const mb of matchAtoms(pInst, atom2))
           for (const m of merge(b, mb)) if (!hasLoop(m)) next.push(m);
       }
-      const padded = counter + candidateCounterPadding(source);
-      if (padded > limit)
-        return {
-          sols: patternIndex === patterns.length - 1 ? next : [],
-          endState: { counter: limit, world: st.world },
-          resourceLimited: true,
-        };
-      counter = padded;
     }
     cur = next;
   }
@@ -4472,7 +4964,7 @@ function matchConjLimited(
 // and matchConjCount (which folds it), so neither duplicates the wcoJoin setup.
 function splitConjGoals(
   env: MinEnv,
-  getCandidates: (pInst: Atom) => CandidateSource,
+  getCandidates: CandidateGetter,
   patterns: readonly Atom[],
   st: St,
   b0: Bindings,
@@ -4521,11 +5013,10 @@ function splitConjGoals(
     // the row, so distinct matching atoms project to distinct rows. Keying the candidate is therefore the
     // same test, at one `format` per atom rather than one per variable per row.
     const rowKeys = new Set<string>();
-    const source = getCandidates(pInst);
+    const source = getCandidates(pInst, "source");
     for (const atom of source) {
       const fresh = freshenRule(counter, atom, atom)[0];
       counter += 1;
-      let matched = false;
       for (const mb of matchAtoms(pInst, fresh)) {
         const t = new Map<string, Atom>();
         for (const v of pvars) {
@@ -4533,16 +5024,18 @@ function splitConjGoals(
           t.set(v, val);
           if (!val.ground && (joinVars === undefined || joinVars.has(v))) relational = false;
         }
-        matched = true;
         tuples.push(t);
-      }
-      if (matched) {
-        const key = format(atom);
+        // The trie dedups identical rows, so relational admission requires every row distinct — and
+        // the row itself is the only sound key. A ground candidate is fully determined by the
+        // pattern and its row, so keying it by the row loses nothing; a schematic candidate can
+        // coincide with a different candidate (or with itself through a second match branch) on the
+        // projected values while spelling differently, which a candidate-identity key misses and
+        // the join would then silently dedup where the nested loops answer per match.
+        const key = pvars.map((v) => format(t.get(v)!)).join(" ");
         if (rowKeys.has(key)) relational = false;
         rowKeys.add(key);
       }
     }
-    counter += candidateCounterPadding(source);
     if (relational) groundRels.push({ vars: pvars, tuples });
     else otherPatterns.push(p);
   }
@@ -4552,7 +5045,7 @@ function splitConjGoals(
 // The join phase for matchConjJoin: split the goals, then materialize the wcoJoin solutions as binding sets.
 function conjJoinPartials(
   env: MinEnv,
-  getCandidates: (pInst: Atom) => CandidateSource,
+  getCandidates: CandidateGetter,
   patterns: readonly Atom[],
   st: St,
   b0: Bindings,
@@ -4589,7 +5082,7 @@ function conjJoinPartials(
 
 function matchConjJoin(
   env: MinEnv,
-  getCandidates: (pInst: Atom) => CandidateSource,
+  getCandidates: CandidateGetter,
   patterns: readonly Atom[],
   st: St,
   b0: Bindings,
@@ -4611,7 +5104,7 @@ function matchConjJoin(
     const freshCache = new Map<Atom, Atom>();
     for (const b of cur) {
       const pInst = inst(env, b, p);
-      const source = getCandidates(pInst);
+      const source = getCandidates(pInst, "cached");
       const cache = syntheticCandidateSource(source) ? undefined : freshCache;
       for (const atom of source) {
         let fresh = cache?.get(atom);
@@ -4623,7 +5116,6 @@ function matchConjJoin(
         for (const mb of matchAtoms(pInst, fresh))
           for (const m of merge(b, mb)) if (!hasLoop(m)) next.push(m);
       }
-      counter += candidateCounterPadding(source);
     }
     cur = next;
   }
@@ -4633,11 +5125,11 @@ function matchConjJoin(
 // Count a multi-goal conjunctive `match` without materializing its answers: run wcoJoin for the
 // ground-relational goals (its partials are far fewer than the final answer set, ~40k vs ~360k for
 // permutations), then count the remaining non-ground goals per partial on the zero-allocation trail. The
-// count is name-independent, so it is byte-identical to counting matchConjJoin's solutions. Returns
+// count is name-independent, so it equals the count of matchConjJoin's solution multiset. Returns
 // undefined to fall back when the trail tail declines (a custom grounded matcher, or the node budget).
 function matchConjCount(
   env: MinEnv,
-  getCandidates: (pInst: Atom) => CandidateSource,
+  getCandidates: CandidateGetter,
   patterns: readonly Atom[],
   st: St,
   b0: Bindings,
@@ -4646,16 +5138,17 @@ function matchConjCount(
     groundRels,
     otherPatterns,
     counter: c0,
-    // Match the result path's admission gate (conjJoinPartials) so the fold and the materializing count split
-    // goals identically and advance the gensym counter in lockstep: the conservative all-ground split by
-    // default (byte-identical, the reference the corpus pins), the per-position unify-capable admission only
-    // under experimental.trail (where the result path also admits, so both stay consistent).
+    // Match the result path's admission gate (conjJoinPartials) so the fold and materializing routes split
+    // goals identically: conservative all-ground admission by default, and per-position unify-capable
+    // admission only under experimental.trail, where the result path also admits it.
   } = splitConjGoals(env, getCandidates, patterns, st, b0, env.useTrail === true);
   // No ground-relational goal: there is no join to fold, so count the whole (non-ground) conjunction on a
   // single trail seeded from b0.
   if (groundRels.length === 0) {
     for (const p of patterns) if (atomHasCustomGrounded(p)) return undefined;
-    return countTrailDFS(seededTrail(b0), getCandidates, patterns, c0);
+    return countTrailDFS(seededTrail(b0), getCandidates, patterns, c0, {
+      caches: patterns.map(() => new Map<Atom, Atom>()),
+    });
   }
   for (const p of otherPatterns) if (atomHasCustomGrounded(p)) return undefined;
   // One trail, synced to the wcoJoin descent: each join variable binds in place on the way down and undoes
@@ -4664,7 +5157,9 @@ function matchConjCount(
   const tr = seededTrail(b0);
   // One freshen cache per tail goal, each shared across all join leaves: a tail candidate freshens once per
   // goal, but two goals matching the same stored fact get distinct fresh variables (see countTrailDFS).
-  const tailFreshCaches = otherPatterns.map(() => new Map<Atom, Atom>());
+  const tailFreshening: CachedTrailFreshening = {
+    caches: otherPatterns.map(() => new Map<Atom, Atom>()),
+  };
   let counter = c0;
   let count = 0;
   let bailed = false;
@@ -4681,7 +5176,7 @@ function matchConjCount(
         count += 1;
         return;
       }
-      const tc = countTrailDFS(tr, getCandidates, otherPatterns, counter, tailFreshCaches);
+      const tc = countTrailDFS(tr, getCandidates, otherPatterns, counter, tailFreshening);
       if (tc === undefined) {
         bailed = true;
         return;
@@ -4722,28 +5217,20 @@ function duplicateFactHeads(env: MinEnv): Set<string> {
 // matchConjJoin byte-for-byte. A non-ground fact (static or runtime) makes the two paths advance the gensym
 // counter differently, so results diverge in order or naming (the fuzz witness: an anchored goal over
 // `(edge $a 0 $a $c)` facts). Removals and state resolution also change the candidate stream, so they decline.
-function conjNestedGroundDomain(env: MinEnv, w: World): boolean {
-  if (env.varHeadedFacts.length !== 0) return false;
-  if (w.removedStatic !== null || w.store.size !== 0) return false;
-  if (w.selfExtra !== null && logNonGround(w.selfExtra) !== 0) return false;
-  if ((w.flatSelfExtra?.nonGroundCount ?? 0) !== 0) return false;
-  return true;
-}
-
-// Route a `(, ...)` to the source-ordered nested loop (matchConj) instead of matchConjJoin's WCO when it is
-// anchored-acyclic over a ground candidate domain: the first goal is anchored by a ground argument (a
-// constant, or a variable bound by b, at an indexed position, so its candidate bucket is a selective slice,
-// not the whole functor), every goal's functor has only ground facts, and every later goal shares a variable
-// with the goals before it. Then each later goal is matched with its join variables already bound, so matchConj
-// probes the argument index per solution rather than scanning the whole functor, and matchConjJoin's per-goal
-// full-relation materialization (the 120k-row build the two-hop pays) never happens. Routing preserves the
-// solution multiset and multiplicity (the duplicate-free and ground-domain guards make freshening and dedup
-// invisible). Enumeration order coincides with the WCO's when every goal carries a unique-entity variable
-// (the DataScript shapes) but can interleave differently when the anchor bucket is not grouped by the join
-// variable — MeTTa does not fix a query enumeration order (the MOPS workspace is a multiset), and the
-// eval-conj-nested witnesses pin both classes. An unanchored first goal (the all-variable goals of the
-// cyclic triangle among them), a non-ground-fact functor, or a disconnected goal fails a test and stays on
-// matchConjJoin, whose variable-at-a-time intersection is worst-case optimal for the cyclic case.
+// Route a `(, ...)` to the source-ordered nested loop (matchConj) instead of matchConjJoin's WCO when it
+// is anchored-acyclic: the first goal is anchored by a ground argument (a constant, or a variable bound by
+// b, at an indexed position, so its candidate bucket is a selective slice, not the whole functor), and
+// every later goal shares exactly one variable with the goals before it. Then each later goal is matched
+// with its join variable already bound, so matchConj probes the argument index per solution rather than
+// scanning the whole functor, and matchConjJoin's per-goal full-relation materialization (the 120k-row
+// build the two-hop pays) never happens. The routes agree on the solution multiset up to alpha-renaming —
+// the compliance bar — and the per-conjunct freshen cache makes a schematic fact one copy per conjunct on
+// both. Non-ground facts, runtime overlays, and removals route fine: both paths draw candidates from the
+// same matchCandidates domain. What still declines: a duplicate ground fact under a goal head (the WCO
+// trie dedups relation tuples where the nested loop preserves multiplicity — a compact functor's check
+// comes from its sweep metadata), state cells (resolution timing stays a single question per query), a
+// variable-headed goal (its per-solution scan has no index to probe), an unanchored first goal, and a
+// cycle-closing or disconnected goal — the fold's territory.
 // Differential-gated behind experimental.conjNested.
 function anchoredAcyclicSourceOrder(
   env: MinEnv,
@@ -4752,9 +5239,7 @@ function anchoredAcyclicSourceOrder(
   b: Bindings,
 ): boolean {
   if (patterns.length < 2) return false;
-  if (!conjNestedGroundDomain(env, w)) return false;
-  const ngHeads = env.nestedMatchIndex?.nonGroundFactHeads;
-  if (ngHeads === undefined) return false;
+  if (w.store.size !== 0) return false;
   const insts = patterns.map((p) => inst(env, b, p));
   const first = insts[0]!;
   const anchored =
@@ -4764,9 +5249,7 @@ function anchoredAcyclicSourceOrder(
   const accumulated = new Set<string>(atomVars(first));
   for (let i = 0; i < insts.length; i++) {
     const k = headKey(insts[i]!);
-    // Variable-headed, non-ground-fact, or duplicate-fact functor: keep it on matchConjJoin. A compact
-    // functor's duplicate check comes from its sweep metadata (it has no factIndex bucket).
-    if (k === undefined || ngHeads.has(k) || dupHeads.has(k)) return false;
+    if (k === undefined || dupHeads.has(k)) return false;
     if (env.compactHeads?.get(k)?.hasDup === true) return false;
     if (i > 0) {
       const vs = atomVars(insts[i]!);
@@ -4776,6 +5259,278 @@ function anchoredAcyclicSourceOrder(
     }
   }
   return true;
+}
+
+// ---------- solution-count = result-count gate ----------
+// A match's result count equals its solution count only when no solution's instantiated template can
+// evaluate further. Two things must hold: the template is a normal form assuming its variables, and
+// every candidate a goal can bind those variables from is itself normal — a stored fact's reducible
+// subterm, or a nullary-ruled symbol reaching a bare-variable template, still rewrites after
+// instantiation, fanning out to several results or reducing to none. The counting fast paths
+// (tryCountAggregate, matchConjCount, matchCountTrail, and the template-neutralizing stream) all
+// count solutions, so they are only honest behind this gate; without it `(length (collapse X))`
+// disagrees with the cardinality of `(collapse X)` itself. Everything here is conservative: state
+// cells, or a store that cannot be proven normal, just decline, and the caller counts the real
+// interpretation instead.
+
+/** Every static fact stored under `k` (object bucket and compact base) is a normal form. Cached per
+ *  head under the normal-form cache's own validity axes; the manual resets next to
+ *  duplicateFactHeadsCache cover static adds, which change the bucket without moving any stamp. */
+function headFactsAllNormal(env: MinEnv, w: World, k: string): boolean {
+  let cache = env.normalFactHeadsCache;
+  if (
+    cache === undefined ||
+    cache.selfRuleVersion !== w.selfRuleVersion ||
+    cache.removedStatic !== w.removedStatic ||
+    cache.groundedEpoch !== env.groundedEpoch
+  ) {
+    cache = {
+      selfRuleVersion: w.selfRuleVersion,
+      removedStatic: w.removedStatic,
+      groundedEpoch: env.groundedEpoch,
+      byHead: new Map(),
+    };
+    env.normalFactHeadsCache = cache;
+  }
+  const hit = cache.byHead.get(k);
+  if (hit !== undefined) return hit;
+  let all = true;
+  for (const f of env.factIndex.get(k) ?? [])
+    if (!isNormalForm(env, w, f)) {
+      all = false;
+      break;
+    }
+  if (all && env.compactHeads?.get(k) !== undefined) {
+    // One decode pass per head per stamp; the base's memoized decoder keeps the atoms canonical, so
+    // the per-atom normal-form cache carries later queries. An encoded walk could avoid the decode,
+    // but compact heads are static, so the pass runs once per rule-state change.
+    for (const id of env.staticBase!.factsForHead(k).ids())
+      if (!isNormalForm(env, w, env.staticBase!.factAtom(id))) {
+        all = false;
+        break;
+      }
+  }
+  cache.byHead.set(k, all);
+  return all;
+}
+
+/** Every `&self` candidate a pattern with head `k` (undefined: any pattern) can match is a normal
+ *  form, across the object buckets, the compact base, the flat store, the plain runtime log, and the
+ *  head-keyless facts. */
+function selfDomainNormal(env: MinEnv, w: World, k: string | undefined): boolean {
+  for (const f of env.varHeadedFacts) if (!isNormalForm(env, w, f)) return false;
+  if (k === undefined) {
+    for (const head of env.factIndex.keys()) if (!headFactsAllNormal(env, w, head)) return false;
+    if (env.compactHeads !== undefined)
+      for (const head of env.compactHeads.keys())
+        if (!headFactsAllNormal(env, w, head)) return false;
+  } else if (!headFactsAllNormal(env, w, k)) return false;
+  if (
+    w.flatSelfExtra !== undefined &&
+    w.flatSelfExtra.anySuspectFactFor(
+      k,
+      (name) => isDefinedHead(env, w, name),
+      w.selfRuleVersion,
+      env.groundedEpoch,
+    )
+  )
+    return false;
+  // The plain log is the small non-compactable overflow; the fast tally walks it anyway, so one more
+  // walk with the per-atom cache stays within the same order. Same head filter as runtimeCandidates.
+  for (const atom of logToArray(w.selfExtra)) {
+    if (k !== undefined) {
+      const ak = headKey(atom);
+      if (ak !== undefined && ak !== k) continue;
+    }
+    if (!isNormalForm(env, w, atom)) return false;
+  }
+  return true;
+}
+
+/** Per-log-node "this node and everything older than it is normal" verdicts, stamped like the
+ *  normal-form cache. A named log grows by prepending nodes, so a count against a growing space
+ *  judges only the atoms added since the last ask instead of re-walking the whole log per query
+ *  (the tilepuzzle shape: repeated counted matches interleaved with adds). A removal builds new
+ *  nodes or leaves a stale FALSE on a reused suffix, which only widens the conservative answer. */
+const namedLogNormalCache = new WeakMap<
+  object,
+  {
+    selfRuleVersion: number;
+    removedStatic: unknown;
+    groundedEpoch: number;
+    allNormal: boolean;
+  }
+>();
+
+function namedLogAllNormal(env: MinEnv, w: World, log: AtomLog): boolean {
+  const fresh: Array<{ atom: Atom; prev: AtomLog }> = [];
+  let inherited = true;
+  let node = log;
+  while (node !== null) {
+    const hit = namedLogNormalCache.get(node);
+    if (
+      hit !== undefined &&
+      hit.selfRuleVersion === w.selfRuleVersion &&
+      hit.removedStatic === w.removedStatic &&
+      hit.groundedEpoch === env.groundedEpoch
+    ) {
+      inherited = hit.allNormal;
+      break;
+    }
+    fresh.push(node);
+    node = node.prev;
+  }
+  let allNormal = inherited;
+  for (let i = fresh.length - 1; i >= 0; i--) {
+    const n = fresh[i]!;
+    if (allNormal && !isNormalForm(env, w, n.atom)) allNormal = false;
+    namedLogNormalCache.set(n, {
+      selfRuleVersion: w.selfRuleVersion,
+      removedStatic: w.removedStatic,
+      groundedEpoch: env.groundedEpoch,
+      allNormal,
+    });
+  }
+  return allNormal;
+}
+
+/** A template instance's normality judged from stable objects, so the per-atom normal-form cache
+ *  carries repeated calls: the uninstantiated template and each binding value are long-lived, where
+ *  the instance is a fresh tree every call and misses the cache on all of it. Conservative: any
+ *  reducible binding value declines, whether or not the template mentions its variable. */
+function instanceStaysNormal(env: MinEnv, w: World, template: Atom, b: Bindings): boolean {
+  if (!isNormalFormAssumingVars(env, w, template)) return false;
+  for (const r of b) if (r.tag === "val" && !isNormalForm(env, w, r.a)) return false;
+  return true;
+}
+
+/** The gate itself: counting this match's solutions counts its results. `patterns` must be the
+ *  matchSetup split of the match's pattern (comma-split, state-resolved). */
+function matchCountsSolutionsAsResults(
+  env: MinEnv,
+  w: World,
+  spaceInst: Atom,
+  patterns: readonly Atom[],
+  template: Atom,
+  bnd: Bindings,
+): boolean {
+  if (!isNormalFormAssumingVars(env, w, template)) return false;
+  if (w.store.size !== 0) return false; // state resolution can rewrite any candidate
+  const sn = spaceName(w, spaceInst);
+  if (sn !== undefined && sn !== "&self") {
+    if (spaceBackend(env, sn) !== undefined) {
+      // A backend's atoms decode fresh per read: judge them per query, on the same universe the
+      // getter serves. The backend path scans per match anyway, so this stays within its order.
+      for (const atom of namedSpaceRead(env, w, sn)) if (!isNormalForm(env, w, atom)) return false;
+      return true;
+    }
+    return namedLogAllNormal(env, w, ptGet(w.spaces, sn) ?? emptyLog);
+  }
+  // &self — and matchSetup routes an unresolvable space atom to the &self machinery too.
+  for (const p of patterns) if (!selfDomainNormal(env, w, headKey(inst(env, bnd, p)))) return false;
+  return true;
+}
+
+// How the goals connect in source order, which is the whole routing question. A goal sharing exactly
+// one variable with the goals before it extends a connected acyclic chain — the shape that runs
+// FASTEST as the nested stream it already is, each hop probing the argument index with its join
+// variable bound (measured: streaming 71ms vs the WCO fold 180ms and a source-ordered trail count
+// 260ms on a two-relation join at n=400). A goal sharing two or more closes a cycle, the fold's
+// territory in both contexts (triangle 1.2x counted and materialized). A goal sharing none is a
+// cross product, and there the contexts SPLIT: the counting fold never materializes and wins 25x at
+// m=800, while a materialized result pays the join's per-row binding merge and loses 3-5x to the
+// stream — so only the count context flattens it.
+interface ChainShape {
+  readonly connected: boolean;
+  readonly cycleClosing: boolean;
+  readonly disconnected: boolean;
+}
+
+function chainShapeSourceOrder(patterns: readonly Atom[]): ChainShape {
+  const accumulated = new Set<string>(atomVars(patterns[0]!));
+  let cycleClosing = false;
+  let disconnected = accumulated.size === 0;
+  for (let i = 1; i < patterns.length; i++) {
+    const vs = atomVars(patterns[i]!);
+    const shared = vs.filter((v) => accumulated.has(v));
+    if (shared.length === 0) disconnected = true;
+    if (shared.length >= 2) cycleClosing = true;
+    for (const v of vs) accumulated.add(v);
+  }
+  return { connected: !cycleClosing && !disconnected, cycleClosing, disconnected };
+}
+
+// A nested match chain in a COUNTING context flattens to one conjunction: the chain's result
+// multiset is Σ over its joint solutions of each final-template instance's results, and that is the
+// flattened conjunction's result multiset too, so their cardinalities agree and the conjunctive
+// count machinery (order-free, per the MOPS multiset semantics) may serve the chain. The guards keep
+// the two joint-solution multisets identical:
+//   - every hop's inner match sits EXACTLY in template position and reads the same space atom;
+//   - &self only, with symbol-headed goals over duplicate-free static facts and empty runtime
+//     overlays — the WCO trie dedups duplicate relation tuples where the nested loops preserve
+//     multiplicity, and duplicateFactHeads only sees the static buckets;
+//   - the final template's own reducibility is the count gate's job, not this one's.
+// Returns the flattened match, or undefined to leave the chain to the streaming count.
+const matchShaped = (a: Atom): a is ExprAtom =>
+  a.kind === "expr" && a.items.length === 4 && opOf(a) === "match";
+
+function flattenMatchChain(
+  env: MinEnv,
+  w: World,
+  match: ExprAtom,
+  bnd: Bindings,
+  context: "count" | "result",
+): ExprAtom | undefined {
+  // The overwhelmingly common template is not a match: answer that with one shape check before any
+  // instantiation, because this runs on every match evaluation, inner hops of streamed chains
+  // included.
+  if (!matchShaped(match.items[3]!)) return undefined;
+  if (w.store.size !== 0) return undefined;
+  if (logSize(w.selfExtra) !== 0 || (w.flatSelfExtra?.size ?? 0) !== 0) return undefined;
+  const space = inst(env, bnd, match.items[1]!);
+  const sn = spaceName(w, space);
+  if (sn !== undefined && sn !== "&self") return undefined;
+  const splitGoals = (pattern: Atom): Atom[] =>
+    pattern.kind === "expr" && opOf(pattern) === "," ? pattern.items.slice(1) : [pattern];
+  const goals: Atom[] = [];
+  const dupHeads = duplicateFactHeads(env);
+  const admit = (pattern: Atom): boolean => {
+    for (const goal of splitGoals(pattern)) {
+      const k = headKey(inst(env, bnd, goal));
+      if (k === undefined || dupHeads.has(k)) return false;
+      if (env.compactHeads?.get(k)?.hasDup === true) return false;
+      goals.push(goal);
+    }
+    return true;
+  };
+  if (!admit(match.items[2]!)) return undefined;
+  let template: Atom = match.items[3]!;
+  let hops = 0;
+  while (matchShaped(template) && atomEq(inst(env, bnd, template.items[1]!), space)) {
+    if (!admit(template.items[2]!)) return undefined;
+    template = template.items[3]!;
+    hops += 1;
+  }
+  if (hops === 0) return undefined;
+  // A connected acyclic chain stays on its nested stream in both contexts; a materialized result
+  // additionally declines the disconnected cross product, whose flattened join measured 3-5x slower
+  // than streaming while the counting fold wins it 25x.
+  const shape = chainShapeSourceOrder(goals.map((g) => inst(env, bnd, g)));
+  if (shape.connected) return undefined;
+  if (context === "result" && shape.disconnected) return undefined;
+  return expr([match.items[0]!, match.items[1]!, expr([sym(","), ...goals]), template]);
+}
+
+/** Test hook: the chain flatten's routing decision, so tests pin which spellings flatten without
+ *  depending on fuel or wall time. */
+export function flattenMatchChainForTests(
+  env: MinEnv,
+  w: World,
+  match: ExprAtom,
+  bnd: Bindings,
+  context: "count" | "result" = "count",
+): ExprAtom | undefined {
+  return flattenMatchChain(env, w, match, bnd, context);
 }
 
 // ---------- get-doc ----------
@@ -5914,7 +6669,7 @@ function matchSetup(
   space: Atom,
   pattern: Atom,
   b: Bindings,
-): { getCandidates: (pInst: Atom) => CandidateSource; patterns: Atom[] } {
+): { getCandidates: CandidateGetter; patterns: Atom[] } {
   const sn = spaceName(st.world, inst(env, b, space));
   const subbed = subTokens(st.world, pattern, env.intern);
   const patterns =
@@ -5924,8 +6679,10 @@ function matchSetup(
   // &self uses the functor index. Named spaces use the same exact-ground log index when it is sound,
   // otherwise they scan in insertion order.
   if (sn === undefined || sn === "&self") {
+    const defaultProtocol: VarHeadCounterProtocol = patterns.length === 1 ? "source" : "none";
     return {
-      getCandidates: (pInst) => matchCandidates(env, st.world, pInst, patterns.length === 1),
+      getCandidates: (pInst: Atom, protocol: VarHeadCounterProtocol = defaultProtocol) =>
+        matchCandidates(env, st.world, pInst, protocol),
       patterns,
     };
   }
@@ -5970,8 +6727,16 @@ function tryFastNamedOnceMatch(
   const pInst = inst(env, b, resolveStates(st.world, subbed));
   const space = ptGet(st.world.spaces, sn) ?? emptyLog;
   if (!pInst.ground || logNonGround(space) !== 0 || st.world.store.size !== 0) return undefined;
-  const st2 = { counter: st.counter + logSize(space), world: st.world };
-  if (idxCount(logGroundIdx(space), pInst) === 0) return { value: undefined, state: st2 };
+  // Charge the occurrences the general path would consume: the ground-pattern source yields exactly
+  // the stored copies, so fuel reflects work done rather than a simulated whole-log scan.
+  const hits = idxCount(logGroundIdx(space), pInst);
+  const st2 = { counter: st.counter + hits, world: st.world };
+  if (hits === 0) return { value: undefined, state: st2 };
+  // The real path evaluates the instantiated template; returning a still-reducible instance would
+  // leak it unevaluated (a `(f2)` with rules must come back as its results, not as `(f2)`). Judged
+  // from the stable template and binding values so the per-atom cache carries repeated calls.
+  if (countGateEnabled() && !instanceStaysNormal(env, st.world, body.items[3]!, b))
+    return undefined;
   return { value: inst(env, b, body.items[3]!), state: st2 };
 }
 
@@ -6007,8 +6772,15 @@ function tryFastNamedAddIfAbsent(
   if (name === undefined || name === "&self") return undefined;
   const space = ptGet(st.world.spaces, name) ?? emptyLog;
   if (!matchAtom.ground || logNonGround(space) !== 0 || st.world.store.size !== 0) return undefined;
-  const checked: St = { counter: st.counter + logSize(space), world: st.world };
-  if (idxCount(logGroundIdx(space), matchAtom) !== 0) return { added: false, state: checked };
+  // The emptiness check runs on the EVALUATED template's results, so a stored-but-empty-reducing
+  // atom really is empty and the add must run: membership alone cannot answer that. Judged from the
+  // stable pre-substitution template and binding values (token substitution only swaps in grounded
+  // space handles, which are normal forms) so the per-atom cache carries the add-if-absent loop.
+  if (countGateEnabled() && !instanceStaysNormal(env, st.world, match.items[2]!, b))
+    return undefined;
+  const occurrences = idxCount(logGroundIdx(space), matchAtom);
+  const checked: St = { counter: st.counter + occurrences, world: st.world };
+  if (occurrences !== 0) return { added: false, state: checked };
   if (opOf(addAtom) === "=") disableTabling(env);
   return {
     added: true,
@@ -6560,7 +7332,7 @@ const TRAIL_COUNT_BUDGET = 8_000_000;
 // place over a DFS of the candidate facts, undoing on backtrack, never building a `Bindings`. The immutable
 // `merge` path allocates a binding set per solution (`permutations` builds ~360k); this allocates none. A
 // solution *count* is name-independent, so the gensym ordering that blocks a byte-identical result-producing
-// trail match does not affect it — this is byte-identical to counting the immutable matcher's solutions.
+// trail match does not affect it. The scalar count equals the immutable matcher's solution count.
 // Returns undefined to fall back when a pattern/candidate carries a custom grounded matcher unifyTrail
 // cannot reproduce.
 // A fresh trail seeded with `b0`'s value bindings and eq aliases: the starting point for a trail count.
@@ -6571,15 +7343,19 @@ function seededTrail(b0: Bindings): Trail {
   return tr;
 }
 
+interface CachedTrailFreshening {
+  readonly caches: ReadonlyArray<Map<Atom, Atom>>;
+}
+
 // Count the solutions of `patterns` over a pre-seeded trail: bind each candidate in place over a DFS,
 // undoing on backtrack, never building a binding set. Returns undefined to decline (a custom grounded
 // matcher, or the node budget). Shared by matchCountTrail (the whole match) and matchConjCount's tail.
 function countTrailDFS(
   tr: Trail,
-  getCandidates: (pInst: Atom) => CandidateSource,
+  getCandidates: CandidateGetter,
   patterns: readonly Atom[],
   counter0: number,
-  freshCaches?: ReadonlyArray<Map<Atom, Atom>>,
+  freshening?: CachedTrailFreshening,
 ): { count: number; counter: number } | undefined {
   let counter = counter0;
   let count = 0;
@@ -6595,21 +7371,20 @@ function countTrailDFS(
       return;
     }
     const pInst = tr.resolve(patterns[i]!);
-    const source = getCandidates(pInst);
+    const source = getCandidates(pInst, freshening === undefined ? undefined : "cached");
     // One freshen cache PER GOAL LEVEL, not one shared across the whole tail: two tail goals can match the
     // same stored fact, and a single cache would hand them the SAME freshened copy, so a fresh variable that
     // goal i bound to a query variable would reappear in goal i+1's candidate and fail to unify (a spurious
     // coreference). matchConjJoin allocates a fresh cache per tail goal for exactly this reason; mirror it.
     // The per-level cache is still shared across all join leaves, so each tail candidate freshens once.
-    const cache = syntheticCandidateSource(source) ? undefined : freshCaches?.[i];
+    const cache = syntheticCandidateSource(source) ? undefined : freshening?.caches[i];
     for (const cand of source) {
       if (atomHasCustomGrounded(cand)) {
         bailed = true;
         return;
       }
       // Freshen the candidate's variables. The same fact recurs at every join leaf (the E template over all
-      // 40320 permutations), so a cache shared across leaves freshens it once, not once per leaf — and the
-      // counter then advances exactly as matchConjJoin's freshCache, keeping the fold's gensym in step.
+      // 40320 permutations), so a cache shared across leaves freshens it once rather than once per leaf.
       let fresh = cache?.get(cand);
       if (fresh === undefined) {
         fresh = freshenRule(counter, cand, cand)[0];
@@ -6621,14 +7396,13 @@ function countTrailDFS(
       tr.undo(mk);
       if (bailed) return;
     }
-    counter += candidateCounterPadding(source);
   };
   rec(0);
   return bailed ? undefined : { count, counter };
 }
 
 function matchCountTrail(
-  getCandidates: (pInst: Atom) => CandidateSource,
+  getCandidates: CandidateGetter,
   patterns: readonly Atom[],
   st: St,
   b0: Bindings,
@@ -6935,7 +7709,7 @@ function tryRangeScan(
 
 function* matchSingleSolutions(
   env: MinEnv,
-  getCandidates: (pInst: Atom) => CandidateSource,
+  getCandidates: CandidateGetter,
   pattern: Atom,
   st: St,
   b0: Bindings,
@@ -6953,12 +7727,11 @@ function* matchSingleSolutions(
     for (const mb of matchAtoms(pInst, fresh))
       for (const m of merge(b0, mb)) if (!hasLoop(m)) yield m;
   }
-  counter += candidateCounterPadding(source);
 }
 
 function matchSingleEndState(
   env: MinEnv,
-  getCandidates: (pInst: Atom) => CandidateSource,
+  getCandidates: CandidateGetter,
   pattern: Atom,
   template: Atom,
   st: St,
@@ -6986,11 +7759,6 @@ function matchSingleEndState(
     candidateCount += 1;
     if (valuesAreNormal && !isNormalForm(env, st.world, atom)) valuesAreNormal = false;
   }
-  const paddedCounter = counter + candidateCounterPadding(source);
-  if (limit !== undefined && paddedCounter > limit) {
-    counter = limit;
-    resourceLimited = true;
-  } else counter = paddedCounter;
   return {
     endState: { counter, world: st.world },
     valuesAreNormal,
@@ -6998,6 +7766,22 @@ function matchSingleEndState(
     resourceLimited,
   };
 }
+
+/** Result-path chain memo: the flatten decision for a match whose template is itself a match,
+ *  keyed on the template subtree (stable rule syntax), verified against the same space and pattern
+ *  objects, and stamped like the count-gate memo. `null` records a decline. */
+const resultChainMemo = new WeakMap<
+  Atom,
+  {
+    space: Atom;
+    pattern: Atom;
+    selfRuleVersion: number;
+    removedStatic: unknown;
+    groundedEpoch: number;
+    spaceVersion: number;
+    flattened: ExprAtom | null;
+  }
+>();
 
 function matchPlan(
   env: MinEnv,
@@ -7007,6 +7791,48 @@ function matchPlan(
   template: Atom,
   b: Bindings,
 ): MatchPlan {
+  // A nested chain in template position flattens to one conjunction where the fold wins it — result
+  // order is free under the multiset bar — while connected chains and every declined shape stream
+  // exactly as before. The decision memoizes on the template subtree for the closed repeated query.
+  if (matchShaped(template)) {
+    const memoizable = size(b) === 0;
+    const hit = memoizable ? resultChainMemo.get(template) : undefined;
+    let flat: ExprAtom | undefined;
+    if (
+      hit !== undefined &&
+      hit.space === space &&
+      hit.pattern === pattern &&
+      hit.selfRuleVersion === st.world.selfRuleVersion &&
+      hit.removedStatic === st.world.removedStatic &&
+      hit.groundedEpoch === env.groundedEpoch &&
+      hit.spaceVersion === st.world.spaceVersion
+    ) {
+      flat = hit.flattened ?? undefined;
+    } else {
+      flat = flattenMatchChain(
+        env,
+        st.world,
+        expr([sym("match"), space, pattern, template]),
+        b,
+        "result",
+      );
+      if (memoizable)
+        resultChainMemo.set(template, {
+          space,
+          pattern,
+          selfRuleVersion: st.world.selfRuleVersion,
+          removedStatic: st.world.removedStatic,
+          groundedEpoch: env.groundedEpoch,
+          spaceVersion: st.world.spaceVersion,
+          flattened: flat ?? null,
+        });
+    }
+    if (flat !== undefined) {
+      space = flat.items[1]!;
+      pattern = flat.items[2]!;
+      template = flat.items[3]!;
+    }
+  }
   const { getCandidates, patterns } = matchSetup(env, st, space, pattern, b);
   if (patterns.length === 1) {
     const pat = patterns[0]!;
@@ -7411,8 +8237,10 @@ function groundTableVersionIfAdmissible(
   if (
     env.tableSpace === undefined ||
     !call.ground ||
-    !keyWellFormed(call) ||
-    !env.tableSpace.admitsFunctor(op)
+    // The functor probe is a Map lookup; the key check walks the call term. Probe first, so a
+    // functor tabling never admits (or has revoked) costs no walk per call.
+    !env.tableSpace.admitsFunctor(op) ||
+    !keyWellFormed(call)
   )
     return undefined;
   const runtimeRulesVisible = world.selfRules.size > 0 || world.selfVarRules.length > 0;
@@ -7566,11 +8394,12 @@ function freshenModedResult(
   return [freshened, { counter, world: st.world }];
 }
 
-// Counting `(length (collapse (match $space $pat $template)))` cares only about how many solutions the
-// match has, not their values: matchOp emits exactly one final item per solution (instantiate(m, template))
-// and the count fusion never inspects it. So for counting, swap the template for a ground unit. Then
-// instantiate(m, unit) returns the unit directly (ground short-circuit) instead of building a result tree
-// per solution, which is pure garbage in the emit-bound profile.
+// Counting `(length (collapse (match $space $pat $template)))` needs only the number of results. When
+// matchCountsSolutionsAsResults holds, every solution's instantiated template is one final item, so the
+// template can be swapped for a ground unit: instantiate(m, unit) returns the unit directly (ground
+// short-circuit) instead of building a result tree per solution, which is pure garbage in the
+// emit-bound profile. Behind the gate ONLY — a template that still evaluates fans out, empties, or
+// runs effects, and neutralizing it miscounts and suppresses them.
 const COUNT_UNIT = sym("u");
 function countOnlyMatch(z: Atom): Atom {
   return z.kind === "expr" && z.items.length === 4 && opOf(z) === "match"
@@ -7585,6 +8414,24 @@ const collapseRouteEnabled = (): boolean => readEnv(COLLAPSE_ROUTE_ENV) !== "0";
 // Disables the all-distinct-variable count-aggregate (the head/arity tally), falling back to the streaming
 // count. Off switch for A/B differentials only; the tally is byte-identical, so this stays on by default.
 const countAggregateEnabled = (): boolean => readEnv("METTA_COUNT_AGGREGATE") !== "0";
+// Disables the solutions-are-results gate (matchCountsSolutionsAsResults) on every counting shortcut.
+// Overhead-measurement switch ONLY: with the gate off, a reducible template reproduces the pre-gate
+// wrong counts. Never ship a run with this off.
+const countGateEnabled = (): boolean => readEnv("METTA_COUNT_GATE") !== "0";
+/** The flatten-plus-gate verdict for a closed repeated count, keyed on the asked match expression.
+ *  Stamped on the rule/removal/grounded axes plus spaceVersion, so a saturation loop that adds
+ *  between counts recomputes while a pure repeated count hits. */
+const countGateMemo = new WeakMap<
+  Atom,
+  {
+    selfRuleVersion: number;
+    removedStatic: unknown;
+    groundedEpoch: number;
+    spaceVersion: number;
+    flattened: ExprAtom;
+    solutionsAreResults: boolean;
+  }
+>();
 // Void-context build: when a routed `(length (collapse (FN a)))` build ends in a dead binding to a compiled
 // impure function (matespace's `($g (rewriteK Z K))`, whose tree result is never read), run that call in
 // discard mode so its add-atom side effects happen without allocating the result tree (matespace K=19 drops
@@ -7593,9 +8440,10 @@ const countAggregateEnabled = (): boolean => readEnv("METTA_COUNT_AGGREGATE") !=
 const voidBuildEnabled = (): boolean => readEnv("METTA_VOID_BUILD") !== "0";
 // Conjunctive collapse-count via the worst-case-optimal join fold (matchConjCount). A multi-goal
 // `(length/size-atom (collapse (match &self (, ...) tmpl)))` folds the same wcoJoin the default result path
-// (matchConjJoin) already runs, counting each solution instead of allocating its answer atom. The count is
-// order- and name-independent, so the fold is byte-identical to materializing-then-counting and needs no
-// experimental gate; it skips ~360k atom allocations on permutations (2.8s -> 0.48s). Off switch
+// (matchConjJoin) already runs, counting each solution instead of allocating its answer atom. The scalar count
+// is order- and name-independent, so the fold equals materializing-then-counting and needs no experimental
+// gate. Its post-count gensym state may differ when alpha-equivalent candidate selection is active. It skips
+// ~360k atom allocations on permutations (2.8s -> 0.48s). Off switch
 // (METTA_CONJ_COUNT=0) drops back to the materializing count for the differential.
 const conjCountEnabled = (): boolean => readEnv("METTA_CONJ_COUNT") !== "0";
 
@@ -7882,7 +8730,6 @@ function tryCountAggregate(
     iterated += 1;
     if (unifies(cand)) count += 1;
   }
-  iterated += candidateCounterPadding(source);
   return { count, iterated };
 }
 
@@ -7895,14 +8742,57 @@ function* countTailMatchG(
   depth: EvaluationDepth,
   trampoline: EvalTrampoline | undefined,
 ): Gen<{ count: number; state: St }> {
-  const agg = countAggregateEnabled() ? tryCountAggregate(env, st, bnd, match) : undefined;
-  if (agg !== undefined && !counterExceedsStepLimit(st, st.counter + agg.iterated))
-    return {
-      count: agg.count,
-      state: { counter: st.counter + agg.iterated, world: st.world },
-    };
-  {
-    const { getCandidates, patterns } = matchSetup(env, st, match.items[1]!, match.items[2]!, bnd);
+  // A nested chain flattens to one conjunction here (counting is order-free), so a chain whose final
+  // template passes the gate below rides the conjunctive count instead of streaming per hop. The
+  // flatten-plus-gate verdict is memoized on the match expression for the closed repeated count (the
+  // scale rows re-ask the same object thousands of times); any space or rule movement recomputes.
+  const memoizable = countGateEnabled() && size(bnd) === 0;
+  const memo = memoizable ? countGateMemo.get(match) : undefined;
+  let solutionsAreResults: boolean;
+  if (
+    memo !== undefined &&
+    memo.selfRuleVersion === st.world.selfRuleVersion &&
+    memo.removedStatic === st.world.removedStatic &&
+    memo.groundedEpoch === env.groundedEpoch &&
+    memo.spaceVersion === st.world.spaceVersion
+  ) {
+    match = memo.flattened;
+    solutionsAreResults = memo.solutionsAreResults;
+  } else {
+    const asked = match;
+    if (countGateEnabled()) match = flattenMatchChain(env, st.world, match, bnd, "count") ?? match;
+    // The solution-counting shortcuts below are only honest when a solution IS a result; a reducible
+    // template or candidate sends the count to the streaming interpretation of the REAL match, whose
+    // sink counts what evaluation actually produces (fan-out, empties, effects included).
+    const { patterns: gatePatterns } = matchSetup(env, st, match.items[1]!, match.items[2]!, bnd);
+    solutionsAreResults =
+      !countGateEnabled() ||
+      matchCountsSolutionsAsResults(
+        env,
+        st.world,
+        inst(env, bnd, match.items[1]!),
+        gatePatterns,
+        match.items[3]!,
+        bnd,
+      );
+    if (memoizable)
+      countGateMemo.set(asked, {
+        selfRuleVersion: st.world.selfRuleVersion,
+        removedStatic: st.world.removedStatic,
+        groundedEpoch: env.groundedEpoch,
+        spaceVersion: st.world.spaceVersion,
+        flattened: match,
+        solutionsAreResults,
+      });
+  }
+  const { getCandidates, patterns } = matchSetup(env, st, match.items[1]!, match.items[2]!, bnd);
+  if (solutionsAreResults) {
+    const agg = countAggregateEnabled() ? tryCountAggregate(env, st, bnd, match) : undefined;
+    if (agg !== undefined && !counterExceedsStepLimit(st, st.counter + agg.iterated))
+      return {
+        count: agg.count,
+        state: { counter: st.counter + agg.iterated, world: st.world },
+      };
     // The multi-goal conjunctive count folds the WCO join by default (order- and name-independent, so
     // byte-identical to the materializing count it replaces). The single-pattern trail count stays behind
     // experimental.trail: tryCountAggregate above already covers the common single-pattern tally, and
@@ -7919,14 +8809,17 @@ function* countTailMatchG(
         state: { counter: tc.counter, world: st.world },
       };
   }
+  // Streaming count. Only a solutions-are-results match may neutralize its template to the ground
+  // unit; otherwise the original match runs so the count reflects the templates' own evaluation.
   let count = 0;
+  const counted = solutionsAreResults ? countOnlyMatch(match) : match;
   const [, stC] = yield* interpretLoopG(
     env,
     fuel,
     st,
     [
       {
-        stack: atomToStack(expr([sym("metta"), countOnlyMatch(match), UNDEF, sym("&self")]), null),
+        stack: atomToStack(expr([sym("metta"), counted, UNDEF, sym("&self")]), null),
         bnd,
       },
     ],
@@ -7992,6 +8885,29 @@ function* tryCollapseRouteG(
       stAfterBuild = cur;
       if (buildCount === 0) return { count: 0, state: stAfterBuild };
     }
+  }
+  {
+    // The tail count is computed once and multiplied by the build count, which is only sound when
+    // the tail's solution count IS its result count at the post-build state (a reducible tail
+    // template would also run its effects once while being claimed buildCount times). Decline the
+    // whole route otherwise.
+    const tm =
+      flattenMatchChain(env, stAfterBuild.world, route.tailMatch, route.bnd, "count") ??
+      route.tailMatch;
+    const { patterns } = matchSetup(env, stAfterBuild, tm.items[1]!, tm.items[2]!, route.bnd);
+    const spaceInst = inst(env, route.bnd, tm.items[1]!);
+    if (
+      countGateEnabled() &&
+      !matchCountsSolutionsAsResults(
+        env,
+        stAfterBuild.world,
+        spaceInst,
+        patterns,
+        tm.items[3]!,
+        route.bnd,
+      )
+    )
+      return undefined;
   }
   const tailStart = stAfterBuild.counter;
   const tail = yield* countTailMatchG(
@@ -9009,26 +9925,25 @@ function* mettaEvalBodyG(
             continue;
           }
         }
-        if (
-          env.tableSpace !== undefined &&
-          !wApp.ground &&
-          keyWellFormed(wApp) &&
-          env.tableSpace.admitsFunctor(op)
-        ) {
+        if (env.tableSpace !== undefined && !wApp.ground && env.tableSpace.admitsFunctor(op)) {
           const runtimeRulesVisible =
             cur2.world.selfRules.size > 0 || cur2.world.selfVarRules.length > 0;
-          modedRuntimeVersion = runtimeRulesVisible ? cur2.world.selfRuleVersion : 0;
-          if (runtimeRulesVisible) {
-            modedTableAdmissible =
-              runtimeFunctorPureModed(env, cur2.world, op) &&
-              runtimeFunctorTableWorth(env, cur2.world, op, "moded") &&
-              !containsImpureHead(env, wApp, MODED_IMPURE_OPS);
-          } else {
-            modedTableAdmissible =
-              !staticRuleSetChanged(cur2.world) &&
+          // Functor-level verdicts first (all memoized probes), per-call term walks (the key check,
+          // the impure-head scan) last: most calls fail on the functor and never pay a walk. The
+          // moded version is only read under an admissible key, so it is set only then.
+          const functorAdmissible = runtimeRulesVisible
+            ? runtimeFunctorPureModed(env, cur2.world, op) &&
+              runtimeFunctorTableWorth(env, cur2.world, op, "moded")
+            : !staticRuleSetChanged(cur2.world) &&
               (env.modedPureFunctors?.has(op) ?? false) &&
-              (env.modedTableWorth?.has(op) ?? false) &&
-              !containsImpureHead(env, wApp, MODED_IMPURE_OPS);
+              (env.modedTableWorth?.has(op) ?? false);
+          if (
+            functorAdmissible &&
+            keyWellFormed(wApp) &&
+            !containsImpureHead(env, wApp, MODED_IMPURE_OPS)
+          ) {
+            modedRuntimeVersion = runtimeRulesVisible ? cur2.world.selfRuleVersion : 0;
+            modedTableAdmissible = true;
           }
         }
         // Compiled fast path. A nondeterministic group runs before a profitable moded table only when a
@@ -9053,8 +9968,6 @@ function* mettaEvalBodyG(
             lfuel,
             depth,
           );
-          if (env.trace && compiled !== undefined)
-            env.trace({ kind: "compiled", op, holder: compiledHolder?.kind ?? "unknown" });
           // A compiled run reports the same logical counter advance as the interpreter. If the atomic
           // compiled attempt would cross the remaining query budget, discard its persistent result and
           // replay this call through the interpreted candidate loop, which cuts at the exact candidate.
@@ -9064,6 +9977,10 @@ function* mettaEvalBodyG(
             compiled !== undefined && !compiledRunExceedsStepLimit(cur2, compiled)
               ? compiled
               : undefined;
+          // Trace only an ACCEPTED compiled answer: a result the step-limit check discards is replayed
+          // interpreted, and an event for it would claim a compiled answer the program never used.
+          if (env.trace && cr !== undefined)
+            env.trace({ kind: "compiled", op, holder: compiledHolder?.kind ?? "unknown" });
           if (cr !== undefined) {
             // A chain-internal step may carry app-local variables, the same case the interpreted transfer
             // below already allows under `inChain`: an argument that is still an unevaluated `match` puts

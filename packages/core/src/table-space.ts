@@ -161,7 +161,7 @@ export interface TableBudget {
   readonly maxInternerLeaves: number;
 }
 
-const DEFAULT_TABLE_BUDGET: TableBudget = {
+export const DEFAULT_TABLE_BUDGET: TableBudget = {
   maxCompletedEntries: 50_000,
   maxCompletedAnswers: 1_000_000,
   maxApproxCells: 1_000_000,

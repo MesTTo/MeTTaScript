@@ -115,6 +115,90 @@ export class FlatAtomSpaceTable {
   readonly factRoot = new Int32Chunks();
   readonly factHeadSym = new Int32Chunks();
 
+  // Suspect-fact scan state for `FlatAtomSpace.anySuspectFactFor`. Lives on the table because
+  // versions share it and terms are append-only and interned, so each distinct term is judged once
+  // per predicate-token state, entirely in encoded form — no decode, which is the whole point of the
+  // flat store.
+  suspectScanUpTo = 0;
+  readonly suspectHeads = new Set<number>();
+  suspectTokenA = -1;
+  suspectTokenB = -1;
+  /** Per-term verdicts under the current tokens: 0 unknown, 1 clean, 2 suspect. */
+  termSuspect: Int8Array = new Int8Array(0);
+  /** Per-symbol `isDefinedSym` answers under the current tokens: 0 unknown, 1 no, 2 yes. */
+  symDefined: Int8Array = new Int8Array(0);
+
+  /** The encoded mirror of the deep normal-form walk: a term is suspect when it is a defined symbol,
+   *  an expression whose head is not a symbol, an expression with a defined head symbol, or an
+   *  expression with a suspect child. Iterative so a deep numeral cannot overflow the host stack. */
+  termIsSuspect(root: TermId, isDefinedSym: (name: string) => boolean): boolean {
+    if (this.termSuspect.length < this.termKind.length) {
+      const grown = new Int8Array(this.termKind.length + 1024);
+      grown.set(this.termSuspect);
+      this.termSuspect = grown;
+    }
+    const memo = this.termSuspect;
+    const stack = [root];
+    while (stack.length > 0) {
+      const id = stack[stack.length - 1]!;
+      if (memo[id] !== 0) {
+        stack.pop();
+        continue;
+      }
+      const kind = this.termKind.get(id);
+      if (kind === TERM_SYM) {
+        memo[id] = this.symIsDefined(this.termStart.get(id), isDefinedSym) ? 2 : 1;
+        stack.pop();
+        continue;
+      }
+      if (kind !== TERM_EXPR) {
+        memo[id] = 1; // variables and ground values are normal forms
+        stack.pop();
+        continue;
+      }
+      const start = this.termStart.get(id);
+      const len = this.termLen.get(id);
+      if (len === 0) {
+        memo[id] = 1;
+        stack.pop();
+        continue;
+      }
+      const head = this.termData.get(start);
+      if (this.termKind.get(head) !== TERM_SYM) {
+        memo[id] = 2;
+        stack.pop();
+        continue;
+      }
+      let pending = false;
+      let suspect = false;
+      for (let i = 0; i < len; i++) {
+        const child = this.termData.get(start + i);
+        const v = memo[child]!;
+        if (v === 0) {
+          stack.push(child);
+          pending = true;
+        } else if (v === 2) suspect = true;
+      }
+      if (pending) continue; // children first; this term is revisited with their verdicts in
+      memo[id] = suspect ? 2 : 1;
+      stack.pop();
+    }
+    return memo[root] === 2;
+  }
+
+  private symIsDefined(symIndex: number, isDefinedSym: (name: string) => boolean): boolean {
+    if (this.symDefined.length < this.symbols.length) {
+      const grown = new Int8Array(this.symbols.length + 256);
+      grown.set(this.symDefined);
+      this.symDefined = grown;
+    }
+    const v = this.symDefined[symIndex]!;
+    if (v !== 0) return v === 2;
+    const defined = isDefinedSym(this.symbols[symIndex]!);
+    this.symDefined[symIndex] = defined ? 2 : 1;
+    return defined;
+  }
+
   // Open-addressing intern table (linear probing over a power-of-two Int32Array; a slot holds
   // termId + 1, 0 means empty; append-only, so no tombstones). Replaces a Map<number, TermId[]>
   // whose per-hash bucket arrays were the dominant insert allocation on bulk loads.
@@ -662,6 +746,40 @@ export class FlatAtomSpace {
         count += 1;
     }
     return { count, iterated };
+  }
+
+  /** Whether some stored fact the head filter admits contains a defined symbol or a non-symbol
+   *  expression head anywhere — the deep normal-form question, answered on the encoded terms with no
+   *  decode. Each distinct term is judged once per token state (the shared table is append-only;
+   *  repeated calls only visit facts inserted since the last call) and a suspect fact pins its head
+   *  symbol. `tokenA`/`tokenB` version `isDefinedSym`: when either moves the scan restarts, because
+   *  a new rule or grounded registration can make an old fact suspect. Dead and version-invisible
+   *  facts are included on purpose: a stale positive only widens a conservative caller's answer,
+   *  never narrows it. */
+  anySuspectFactFor(
+    head: string | undefined,
+    isDefinedSym: (name: string) => boolean,
+    tokenA: number,
+    tokenB: number,
+  ): boolean {
+    const t = this.table;
+    if (t.suspectTokenA !== tokenA || t.suspectTokenB !== tokenB) {
+      t.suspectTokenA = tokenA;
+      t.suspectTokenB = tokenB;
+      t.suspectScanUpTo = 0;
+      t.suspectHeads.clear();
+      t.termSuspect = new Int8Array(0);
+      t.symDefined = new Int8Array(0);
+    }
+    for (let fact = t.suspectScanUpTo; fact < t.factCount; fact++) {
+      if (t.termIsSuspect(t.factRoot.get(fact), isDefinedSym))
+        t.suspectHeads.add(t.factHeadSym.get(fact));
+    }
+    t.suspectScanUpTo = t.factCount;
+    if (t.suspectHeads.size === 0) return false;
+    if (t.suspectHeads.has(ABSENT) || head === undefined) return true;
+    const id = t.lookupHeadSym(head);
+    return id !== undefined && t.suspectHeads.has(id);
   }
 
   roundTrip(atom: Atom): Atom {

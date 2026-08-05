@@ -180,6 +180,42 @@ const nestedStaticSpace =
   `!(collapse (match &self (nested-static (M $x)) $x))`;
 runCase("static nested-head-index", nestedStaticSpace, [`(${mid})`], 8_000);
 
+// Every clause index is keyed by an atom's head, so a pattern whose head is a variable named no bucket
+// and read the whole space, once per query, however selective its arguments were. An argument column
+// answers from the ground argument instead. A thousand queries over SIZE facts took 3,162ms scanning and
+// 198ms indexed, so the limit below is the scan's failure and ten times the indexed run.
+const varHeadKeys = Array.from({ length: 1000 }, (_, i) => Math.floor((SIZE * (i + 1)) / 1001));
+const varHeadSpace =
+  facts(SIZE, (i) => `(vh ${i} ${i + 1})`) +
+  varHeadKeys.map((k) => `!(collapse (match &self ($f ${k} $y) $y))`).join("\n");
+runCase("variable-head column", varHeadSpace, [`(${varHeadKeys.at(-1) + 1})`], 2_000);
+
+// The schematic fact keeps the variable-headed goal in matchConjJoin's cached tail. Each `want` row binds
+// its argument before that tail runs, so the column reads the matching ground fact plus the schematic
+// residual instead of scanning the full space once per row.
+const conjunctiveVarHeadCount = Math.min(200, SIZE);
+const conjunctiveVarHeadKeys = Array.from({ length: conjunctiveVarHeadCount }, (_, i) =>
+  Math.floor((SIZE * (i + 1)) / (conjunctiveVarHeadCount + 1)),
+);
+const conjunctiveVarHeadSpace =
+  facts(SIZE, (i) => `(cvh ${i} ${i + 1})`) +
+  conjunctiveVarHeadKeys.map((key) => `(want ${key})`).join("\n") +
+  `\n(cvh $openKey $openValue)\n` +
+  `!(collapse (match &self (, (want $key) ($f $key $value)) ($f $key $value)))`;
+runBagCountCase(
+  "conjunctive variable-head column",
+  conjunctiveVarHeadSpace,
+  conjunctiveVarHeadCount * 2,
+  8_000,
+);
+
+// Declaring a type for an expression checked the new declaration against every declaration already made,
+// so loading them was quadratic: 4,000 took 1,398ms and 8,000 took 7,422ms. Bucketing by the subject's
+// structural hash makes the check constant, and the 20,000 below load in under 50ms.
+const exprTypeN = Math.min(SIZE, 20_000);
+const exprTypes = facts(exprTypeN, (i) => `(: (et ${i}) T)`) + `!(get-type (et ${exprTypeN - 1}))`;
+runCase("expression-type declarations", exprTypes, ["T"], 8_000);
+
 const runtimeSpace =
   facts(SIZE, (i) => `!(add-atom &self (rt ${i} ${i + 1}))`) +
   `!(collapse (match &self (rt ${mid} $y) $y))`;

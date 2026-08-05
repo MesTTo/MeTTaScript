@@ -17,7 +17,8 @@
 
 import { describe, expect, it } from "vitest";
 import fc from "fast-check";
-import { runProgram, format, alphaEq, type Atom } from "./index";
+import { runProgram, format, type Atom } from "./index";
+import { canonicalMultiset } from "./alpha-multiset-fixture";
 
 function answers(src: string, conjNested: boolean): Atom[] {
   return runProgram(src, 1_000_000, new Map(), { experimental: { conjNested } }).flatMap(
@@ -306,11 +307,29 @@ describe("experimental.conjNested random-conjunction differential (fast-check)",
     );
   });
 
-  it("KB with non-ground facts: still byte-identical (the ground-domain guard declines to route them)", () => {
-    // A fact whose column can be a variable. A non-ground-fact functor fails conjNestedGroundDomain, so the
-    // conjunction stays on matchConjJoin whether the flag is on or off, keeping the result byte-identical. This
-    // is the regression guard for the fuzz witness (an anchored goal over `(edge $a 0 $a $c)` facts) that
-    // diverged before the guard was added. The alphaEq import stays exercised by the smoke assertion below.
+  it("distinct schematic facts sharing one projected row keep their multiplicity", () => {
+    // The shrunk fast-check witness for a join undercount: (edge 1 0 0 $a) and (edge $a 0 0 $a)
+    // both answer (edge 1 $a $c 1) with the row ($a=0, $c=0), and (edge $a $a $a 0) then matches
+    // three facts under $a=0, so the conjunction has 2 x 3 = 6 solutions. The nested single-pattern
+    // spelling is the primitive semantics and is the reference; a candidate-identity row key let the
+    // trie dedup the two identical rows and answer 3.
+    const facts = `(edge $a $y $y 0)\n(edge 1 0 0 $a)\n(edge $a 0 0 $a)\n(edge $a $y 0 0)`;
+    const nested = `${facts}\n!(match &self (edge 1 $a $c 1) (match &self (edge $a $a $a 0) (Row $a $c)))`;
+    const conj = `${facts}\n!(match &self (, (edge 1 $a $c 1) (edge $a $a $a 0)) (Row $a $c))`;
+    const rows = (src: string, conjNested: boolean): string[] =>
+      answers(src, conjNested).map(format);
+    expect(rows(nested, false)).toEqual(Array<string>(6).fill("(Row 0 0)"));
+    expect(rows(conj, false)).toEqual(Array<string>(6).fill("(Row 0 0)"));
+    expect(rows(conj, true)).toEqual(Array<string>(6).fill("(Row 0 0)"));
+  });
+
+  it("KB with non-ground facts: routed, and alpha-equivalent to the join as a multiset", () => {
+    // A fact whose column can be a variable. The route no longer declines non-ground functors: both
+    // paths freshen at the running counter with one copy per fact per conjunct, so their solution
+    // multisets agree up to alpha-renaming — the compliance bar — while the spelled names (and, when
+    // an anchor bucket is not grouped by the join variable, the order) may differ. This keeps the
+    // old fuzz witness shape (an anchored goal over `(edge $a 0 $a $c)` facts) under test on the
+    // routed path.
     const maybeVarNode = fc.oneof(node.map(String), fc.constant("$y"));
     const anyFact = fc
       .tuple(arg(ent), maybeVarNode, maybeVarNode, arg(grp))
@@ -323,11 +342,72 @@ describe("experimental.conjNested random-conjunction differential (fast-check)",
           const src = `${facts.join("\n")}\n!(match &self (, ${goals.join(" ")}) ${template})`;
           const off = answers(src, false);
           const on = answers(src, true);
-          expect(on.map(format)).toEqual(off.map(format));
-          for (let i = 0; i < off.length; i++) expect(alphaEq(on[i]!, off[i]!)).toBe(true);
+          expect(canonicalMultiset(on)).toEqual(canonicalMultiset(off));
         },
       ),
       { numRuns: 500 },
     );
   });
+});
+
+// A nested chain in RESULT position flattens to the conjunction exactly where the counted form does:
+// cycle-closing and disconnected shapes, never connected ones. The reference is the same chain with
+// its inner hops over a named space holding identical facts — that spelling can never flatten, so it
+// is the primitive per-hop semantics — and the comparison is the canonical multiset, the bar.
+describe("nested chains in result position pick their route", () => {
+  const lastAnswers = (src: string): Atom[] => {
+    const out = runProgram(src, 1_000_000, new Map(), { experimental: { conjNested: true } });
+    return out[out.length - 1]!.results.slice();
+  };
+  const bothWays = (facts: readonly string[], chainOver: (inner: string) => string): void => {
+    const selfSrc = `${facts.join("\n")}\n${chainOver("&self")}`;
+    const kbSetup = facts.map((f) => `!(add-atom &kb ${f})`).join("\n");
+    const crossSrc = `${facts.join("\n")}\n!(bind! &kb (new-space))\n${kbSetup}\n${chainOver("&kb")}`;
+    expect(canonicalMultiset(lastAnswers(selfSrc))).toEqual(
+      canonicalMultiset(lastAnswers(crossSrc)),
+    );
+  };
+
+  it("a cycle-closing triangle agrees with its per-hop reference", () => {
+    const facts = ["(e a b)", "(e b c)", "(e c a)", "(e a c)", "(e c b)"];
+    bothWays(
+      facts,
+      (inner) =>
+        `!(match &self (e $x $y) (match &self (e $y $z) (match ${inner} (e $z $x) (Tri $x $y $z))))`,
+    );
+  });
+
+  it("a disconnected cross product agrees with its per-hop reference", () => {
+    bothWays(
+      ["(p a)", "(p b)", "(q x)", "(q y)", "(q z)"],
+      (inner) => `!(match &self (p $u) (match ${inner} (q $v) (Pair $u $v)))`,
+    );
+  });
+
+  it("a connected chain agrees with its per-hop reference", () => {
+    bothWays(
+      ["(p a b)", "(p b c)", "(p c d)"],
+      (inner) => `!(match &self (p $x $y) (match ${inner} (p $y $z) (Row $x $z)))`,
+    );
+  });
+
+  it("random result-position chains agree with their per-hop reference", () => {
+    const arbArg = fc.constantFrom("a", "b", "c");
+    const arbFact = fc.tuple(arbArg, arbArg).map(([x, y]) => `(p ${x} ${y})`);
+    const arbTemplate = fc.constantFrom("(Row $x $z)", "($z)", "(Row $y $y)");
+    fc.assert(
+      fc.property(
+        fc.array(arbFact, { minLength: 1, maxLength: 6 }),
+        fc.constantFrom("(p $y $z)", "(p $z $z)", "(p $x $z)", "(p $z $x)"),
+        arbTemplate,
+        (facts, hop2, template) => {
+          bothWays(
+            facts,
+            (inner) => `!(match &self (p $x $y) (match ${inner} ${hop2} ${template}))`,
+          );
+        },
+      ),
+      { numRuns: 150 },
+    );
+  }, 60_000);
 });

@@ -1,3 +1,111 @@
+# MeTTaScript 3.3.0
+
+Three ways a query could answer with the wrong number are fixed, a query whose head is a variable is
+indexed instead of scanned, and the step budget counts the work a program did rather than the work an
+index let it skip.
+
+## A collapsed count counts results
+
+`(size-atom (collapse ...))` does not build the tuple it is about to measure. It counts as it goes,
+which is what lets a count over a million facts run without materialising a million-element
+expression. When the match template still had reducing left to do, that count was of the match's
+solutions, so a template that answered twice was counted once:
+
+```metta
+(fact a)
+(fact b)
+(= (expand $x) ($x 1))
+(= (expand $x) ($x 2))
+!(size-atom (collapse (match &self (fact $x) (expand $x))))
+```
+
+```text
+[4]
+```
+
+Two facts, each template answering twice, is four results. Every release through 3.2.0 answered `2`.
+The count fuses now only where the template and every candidate are already in normal form, which is
+the shape it was measured on; anything else streams. The same defect reached the named-space fast
+paths, where a membership shortcut could hand back a stored atom in place of the one the call asked
+for.
+
+## A conjunction keeps every fact's multiplicity
+
+A conjunction admits its first goal's rows into a trie before joining them. Those rows were keyed by
+the candidate that produced them, so two different facts that project the same row collapsed into one
+and the join lost solutions:
+
+```metta
+(edge $a $y $y 0)
+(edge 1 0 0 $a)
+(edge $a 0 0 $a)
+(edge $a $y 0 0)
+!(size-atom (collapse (match &self (, (edge 1 $a $c 1) (edge $a $a $a 0)) (Row $a $c))))
+```
+
+```text
+[6]
+```
+
+Both `(edge 1 0 0 $a)` and `(edge $a 0 0 $a)` answer the first goal with the row where `$a` and `$c`
+are `0`, and the second goal then matches three facts, so the conjunction has six solutions. 3.2.0
+answered `3`. Rows are keyed by their projected values now, so facts that agree on the row share a
+bucket and facts that only look alike do not. Writing the same query as one match nested inside
+another is the primitive semantics and was always right; it is now the reference the join is checked
+against on generated input.
+
+## A variable-headed query reads an index
+
+A pattern that names its relation has been indexed since 3.1. One that leaves the head open had
+nothing to key on and read the whole space:
+
+```metta
+(likes sam pizza)
+(likes ana tea)
+(knows sam ana)
+!(match &self ($rel ana $what) ($rel $what))
+```
+
+```text
+[(likes tea)]
+```
+
+Such a pattern is indexed on a ground argument instead. Fifty of these queries over 100,000 facts
+take 169 ms with the index and 586 ms with it switched off on the same build, both numbers including
+the same space build. The index is consulted only where a scan would give the same answers: a runtime
+overlay, a removal, or a non-ground fact under the same head sends the query back to the scan.
+
+## The step budget measures work done
+
+An index selection used to charge the step counter for every candidate it skipped, so an indexed
+query burned exactly the fuel of the scan it had just avoided. That arithmetic existed to keep
+fresh-variable names byte-equal to the scanning route, which is not what compliance asks for: MeTTa
+answers are compared as a multiset up to renaming.
+
+Fuel measures what ran now. A nested-head probe over 100,000 facts charges one step instead of
+100,000. Two consequences for a program that sets a budget through `(pragma! mettascript-max-steps
+N)` or `--max-steps`: the same budget buys strictly more work, and the counter that names `&space-N`
+handles and fresh variables can reach different numbers than it did in 3.2.0. A test that compares
+handle names or formatted variable names against recorded output needs re-recording.
+
+## Smaller things
+
+A match chain nested inside another is routed through the conjunctive planner in both counting and
+result position, and cycle-closing and disconnected shapes are routed by what measurement says wins
+rather than by shape alone. The nested-argument index is admitted on the cached conjunct route.
+Anchored acyclic conjunctions route over schematic facts. Loading a program with many expression type
+declarations is no longer quadratic. The compiled numeric tail loop is emitted as source instead of
+walked as closure nodes. The functional holder's memo and a space's argument columns are bounded the
+way the table space is, in entries rather than in a count of columns. Tabling admission asks whether
+a functor can be tabled before walking the call term to find out whether the term can be.
+
+A binding chain that would close on itself leaves the variable unbound instead of building the cycle.
+
+Two fixes for tooling. `RunOptions.declineCompiled` was documented and set but never read, so a run
+that asked for compiled holders to stand down got them anyway. The execution trace emits a `grounded`
+event on every route that runs a grounded operation rather than only in the native list walkers, and
+emits `compiled` only for a compiled result the step budget accepted.
+
 # MeTTaScript 3.2.0
 
 A deep loop finishes instead of stopping halfway, the visual editor drops into a page with one script

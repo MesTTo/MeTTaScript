@@ -101,9 +101,13 @@ describe("@mettascript/debug", () => {
     expect(same.leftResult).toEqual(["42"]);
     expect(same.sameResult).toBe(true);
     expect(same.queryDiffs).toEqual([]);
-    // Whatever the two runs did differently, it was steps one took and the other did not: no hunk has both
-    // sides non-empty, which is what "the compiler did not change the evaluation" looks like in a trace.
-    expect(same.hunks.every((h) => h.left.length === 0 || h.right.length === 0)).toBe(true);
+    // The two routes legitimately take different steps for the same answer, and the hunks make the
+    // route difference readable: the compiled run has its dispatch event where the declined run has
+    // the equation's steps, including the grounded multiply the equation route performs natively.
+    const left = same.hunks.flatMap((h) => h.left);
+    const right = same.hunks.flatMap((h) => h.right);
+    expect(left.some((e) => e.startsWith("compiled twice"))).toBe(true);
+    expect(right.some((e) => e === "grounded *")).toBe(true);
   });
 
   it("names the query whose answer a declined holder changes", () => {

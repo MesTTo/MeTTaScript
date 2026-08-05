@@ -4,37 +4,19 @@
 import { readFileSync } from "node:fs";
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
-import { addAtomToEnv, buildEnv, initSt, mettaEval } from "./eval";
+import { addAtomToEnv, initSt, mettaEval } from "./eval";
 import { type Atom, expr, gint, sym, variable } from "./atom";
-import { stdTable } from "./builtins";
-import { parseAll, format } from "./parser";
-import { standardTokenizer, preludeAtoms, runProgram } from "./runner";
-import { analyzePurity } from "./tabling";
+import { format } from "./parser";
+import { runProgram } from "./runner";
 import { compileDependentNondetGroup, compileEnv, runCompiled } from "./compile";
-import { compiledEnvWith } from "./compile-test-utils";
+import { compiledEnvWith, envWith, evalQuery, programAtoms as atoms } from "./compile-test-utils";
 import { TableSpace } from "./table-space";
-
-const atoms = (src: string) =>
-  parseAll(src, standardTokenizer())
-    .filter((t) => !t.bang)
-    .map((t) => t.atom);
-
-function envWith(src: string) {
-  const env = buildEnv([...preludeAtoms(), ...atoms(src)], stdTable());
-  env.pureFunctors = analyzePurity(env);
-  return env;
-}
 
 function runFunctional(c: ReturnType<typeof compileEnv>, name: string, vals: number[]) {
   const h = c.get(name);
   expect(h?.kind).toBe("functional");
   if (h === undefined || h.kind !== "functional") return undefined;
   return h.run(vals);
-}
-
-function evalQuery(env: ReturnType<typeof envWith>, q: Atom) {
-  const [pairs, st] = mettaEval(env, 10_000_000, initSt(), [], q);
-  return { results: pairs.map((p) => format(p[0])), counter: st.counter };
 }
 
 function compareCompiledAndInterpreted(src: string, fuel = 100_000) {
@@ -529,6 +511,26 @@ describe("deterministic-core compiler", () => {
         expect(evalQuery(compiledEnv, ground)).toEqual(evalQuery(interpretedEnv, ground));
       }
     }
+  });
+
+  // `RunOptions.declineCompiled` is the trace-diff workflow's lever: run once as-is, once with the
+  // suspect holders declined, and diff. It must actually force the equation route, not merely exist.
+  it("declineCompiled stands a holder down and the equations answer instead", () => {
+    const src = "(= (dbl $x) (* $x 2))\n!(dbl 21)";
+    const engaged = (opts: Parameters<typeof runProgram>[3]) => {
+      let n = 0;
+      const out = runProgram(src, 100_000, new Map(), {
+        ...opts,
+        trace: (e) => {
+          if (e.kind === "compiled" && e.op === "dbl") n += 1;
+        },
+      });
+      expect(out[out.length - 1]!.results.map(format)).toEqual(["42"]);
+      return n;
+    };
+    expect(engaged({})).toBeGreaterThan(0);
+    expect(engaged({ declineCompiled: { functors: ["dbl"] } })).toBe(0);
+    expect(engaged({ declineCompiled: { kinds: ["functional"] } })).toBe(0);
   });
 });
 

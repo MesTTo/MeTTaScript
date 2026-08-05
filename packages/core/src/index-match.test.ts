@@ -171,7 +171,9 @@ describe("named-space ground index fast path", () => {
     expect(last(src)).toEqual(["(found)"]);
   });
 
-  it("once over exact named membership advances the counter as the full scan did", () => {
+  it("once over exact named membership advances the counter by the consumed occurrences", () => {
+    // Fuel reflects work done: the ground-pattern source yields exactly the stored copies (one
+    // here), and the membership fast path charges the same, not a simulated whole-log scan.
     const src = `
       !(add-atom &kb (p a))
       !(add-atom &kb (p b))
@@ -179,7 +181,7 @@ describe("named-space ground index fast path", () => {
       (= (fresh) $z)
       !(once (match &kb (p b) ok))
       !(fresh)`;
-    expect(last(src)).toEqual(["$z#3"]);
+    expect(last(src)).toEqual(["$z#1"]);
   });
 
   it("collapse once over exact named membership returns the same tuple shape", () => {
