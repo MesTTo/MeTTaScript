@@ -135,13 +135,21 @@ export function sideBySideReductionSvgs(
   const naturalLabelH = 30;
   const naturalCellW = Math.max(1, Math.round(naturalPanelH * cellAspect));
   const naturalWidth = naturalCellW * 2 + naturalGap;
-  const scale = (opts.width ?? naturalWidth) / naturalWidth;
+  const baseWidth = opts.width ?? naturalWidth;
+  const outScale = opts.scale ?? 1;
+  const width = Math.max(1, Math.round(baseWidth * outScale));
+  const scale = width / naturalWidth;
   const panelH = Math.max(1, Math.round(naturalPanelH * scale));
-  const gap = Math.max(1, Math.round(naturalGap * scale));
-  const labelH = Math.max(1, Math.round(naturalLabelH * scale));
   const cellW = Math.max(1, Math.round(naturalCellW * scale));
+  // Derive the gap from the requested width and the cell sizes, so `cellW + gap + cellW` always equals
+  // `width` exactly. Without this, the per-component rounding can drift `totalW` by a pixel, which makes
+  // `scale: 2` produce a GIF one pixel wider than the doubled base.
+  const gap = Math.max(1, width - cellW * 2);
   const totalW = cellW + gap + cellW;
-  const totalH = panelH + labelH;
+  // Round the total height directly from the natural aspect so it scales linearly with `width`; absorb any
+  // rounding drift between `panelH + labelH` and the natural total into the (smaller) label band.
+  const totalH = Math.max(1, Math.round((naturalPanelH + naturalLabelH) * scale));
+  const labelH = Math.max(1, totalH - panelH);
   const background = opts.background ?? s.canvas;
   const fontSize = Math.max(8, Math.round(13 * scale));
   const frames: SvgFrame[] = [];
@@ -183,7 +191,7 @@ export function graphReductionSvgs(states: readonly Atom[][], opts: GifOptions =
   const bg = opts.background ?? CANVAS_BG;
   const holdMs = opts.holdMs ?? 260;
   const stepMs = opts.stepMs ?? 40;
-  const width = opts.width ?? 880;
+  const width = Math.max(1, Math.round((opts.width ?? 880) * (opts.scale ?? 1)));
   const height = Math.round(width * 0.5);
 
   // Each state gets its own viewport: fit it to the frame, but never zoom out past a floor nor in past
