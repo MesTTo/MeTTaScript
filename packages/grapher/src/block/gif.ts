@@ -31,8 +31,13 @@ export interface GifEncoderLib {
 
 /** How to render the GIF. */
 export interface GifOptions {
-  /** Output width in pixels (height follows the aspect ratio). Default 720. */
+  /** Output width in pixels (height follows the aspect ratio). Default 720 for blocks, 880 for graph, the
+   *  computed natural width for side-by-side. */
   width?: number;
+  /** Multiplier applied to the output width and height. The view's default width is multiplied by this
+   *  when `width` is unset, so `--scale 2` ups a thumbnail to a high-resolution render without forcing the
+   *  caller to recompute the view's natural width. Default 1. */
+  scale?: number;
   /** Morph frames per reduction step. Default `morphMs / stepMs`, reduced to keep under `maxFrames`. */
   framesPerStep?: number;
   /** Cap on the total number of frames. Default 180. */
@@ -135,7 +140,7 @@ export function blockReductionSvgsWithSettings(
   opts: GifOptions = {},
 ): SvgAnimation {
   if (states.length === 0) throw new Error("no reduction states to export");
-  const width = opts.width ?? 720;
+  const width = Math.max(1, Math.round((opts.width ?? 720) * (opts.scale ?? 1)));
   const holdMs = opts.holdMs ?? 260;
   const stepMs = opts.stepMs ?? 40;
 

@@ -41,6 +41,14 @@ function validateOptions(opts: NodeGifOptions): void {
   )
     throw new Error(`view must be "blocks", "graph", or "side-by-side", got ${String(opts.view)}`);
   if (opts.width !== undefined) positiveInteger("width", opts.width, MAX_DIMENSION);
+  if (opts.scale !== undefined) {
+    if (!Number.isFinite(opts.scale) || opts.scale <= 0)
+      throw new Error(`scale must be a positive number, got ${opts.scale}`);
+    if (opts.scale > 16)
+      throw new Error(
+        `scale must be at most 16 (the raster-pixel safety limit), got ${opts.scale}`,
+      );
+  }
   if (opts.framesPerStep !== undefined)
     positiveInteger("framesPerStep", opts.framesPerStep, MAX_FRAMES);
   if (opts.maxFrames !== undefined) positiveInteger("maxFrames", opts.maxFrames, MAX_FRAMES);

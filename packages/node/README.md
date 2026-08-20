@@ -19,6 +19,7 @@ metta run program.metta       # run a program (metta program.metta is shorthand)
 metta check program.metta     # static analysis (--json, --undefined-symbols)
 metta debug --file program.metta why '(main)'   # engine debugger (why/eval/run)
 metta graph program.metta -o out.gif            # render the reduction as an animated GIF
+metta graph --scale 2 program.metta -o out.gif  # upscale the GIF resolution by 2×
 metta --version
 ```
 
