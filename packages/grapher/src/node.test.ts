@@ -114,8 +114,33 @@ describe("Node reduction GIFs", () => {
     [{ framesPerStep: 0 }, "framesPerStep"],
     [{ maxFrames: 0 }, "maxFrames"],
     [{ maxSteps: 0 }, "maxSteps"],
+    [{ scale: 0 }, "scale"],
+    [{ scale: -1 }, "scale"],
+    [{ scale: 17 }, "scale"],
   ])("rejects unsafe options %j", async (options, message) => {
     await expect(renderReductionGif("(+ 1 2)", { ...QUICK, ...options })).rejects.toThrow(message);
+  });
+
+  it.each<NodeGifView>(["blocks", "graph", "side-by-side"])(
+    "scales the output width by the scale option (%s view)",
+    async (view) => {
+      const baseBytes = await renderReductionGif("(+ 10 (* 25 2))", { ...QUICK, view });
+      const baseMeta = await gifMetadata(baseBytes);
+      const scaledBytes = await renderReductionGif("(+ 10 (* 25 2))", {
+        ...QUICK,
+        view,
+        scale: 2,
+      });
+      const scaledMeta = await gifMetadata(scaledBytes);
+      expect(scaledMeta.width).toBe(baseMeta.width! * 2);
+      expect(scaledMeta.height).toBe(baseMeta.height! * 2);
+    },
+  );
+
+  it("scale multiplies an explicit width by the requested factor", async () => {
+    const bytes = await renderReductionGif("(+ 1 2)", { width: 100, scale: 3 });
+    const metadata = await gifMetadata(bytes);
+    expect(metadata.width).toBe(300);
   });
 
   it("rejects a generated animation that exceeds maxFrames", async () => {
