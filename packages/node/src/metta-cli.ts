@@ -23,7 +23,7 @@ usage:
   metta run <file.metta> [options]     run a program, printing each !-query's results
   metta check <file.metta> [options]   statically analyze a program (--json, --undefined-symbols)
   metta debug (--file <p> | --source '<m>') <why|eval|run> [--llm]   debug the engine
-  metta graph <file.metta> [-o out.gif] [--view blocks|graph|side-by-side]   render a reduction GIF
+  metta graph <file.metta> [-o out.gif] [--view blocks|graph|side-by-side] [--width N] [--scale N] [--max-steps N]   render a reduction GIF
   metta fuzz <file.metta> [--exhaustive] [--json]   run declared (FuzzTest ...) properties
   metta reach <file.metta> [id]         run declared (FuzzReachTest ...) searches
   metta --version | --help

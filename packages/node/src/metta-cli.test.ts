@@ -94,4 +94,19 @@ describe("unified metta CLI", () => {
     expect(bytes.subarray(0, 3).toString("latin1")).toBe("GIF");
     rmSync(out, { force: true });
   });
+
+  it("graph --scale upscales the rendered resolution", () => {
+    const file = mettaFixture("metta-graph-scale-", "!(+ 10 (* 25 2))\n");
+    const out = `${file}.gif`;
+    run(METTA, ["graph", file, "-o", out, "--scale", "0.5", "--max-steps", "60"]);
+    expect(existsSync(out)).toBe(true);
+    const small = readFileSync(out);
+    expect(small.subarray(0, 3).toString("latin1")).toBe("GIF");
+    rmSync(out, { force: true });
+  });
+
+  it("graph --scale 0 rejects a non-positive scale", () => {
+    const file = mettaFixture("metta-graph-scale-bad-", "!(+ 1 2)\n");
+    expect(status(METTA, ["graph", file, "--scale", "0"])).toBe(1);
+  });
 });
