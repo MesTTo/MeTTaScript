@@ -16,6 +16,7 @@ import { clauseRef, collectVars, installBuiltins, compareTerms, isCyclic, varian
 import type { Clause } from "./db";
 import { installLibrary } from "./library";
 import { installConsult } from "./consult";
+import { Specializer } from "./specializer";
 import { Machine, copyTerm } from "./machine";
 import { METTA_RUNTIME_PL } from "./metta-runtime";
 import { sread, topForms } from "./metta-reader";
@@ -88,7 +89,7 @@ export class Petta {
   readonly m = new Machine();
   readonly translator = new Translator(this);
   readonly types = new Types(this);
-  readonly specializer = { maybeSpecialize: (_f: string, _a: Term[], _o: Term): Term | null => null };
+  readonly specializer = new Specializer(this);
   readonly funs = new Set<string>();
   private readonly arities = new Map<string, number[]>();
   readonly translatorRules = new Set<string>();
@@ -278,6 +279,49 @@ export class Petta {
     this.funMeta.set(f, l);
   }
 
+  /** HV's fun_meta clauses in definition order. */
+  funMetaOf(f: string): { args: Term[]; body: Term; headForm: string }[] | undefined {
+    const l = this.funMeta.get(f);
+    return l === undefined ? undefined : [...l].reverse();
+  }
+
+  /** The types T of (: F T) atoms in &self. */
+  typeChainsOf(f: string): Term[] {
+    const out: Term[] = [];
+    for (const c of this.m.visibleClauses("&self", 3)) {
+      const [h] = this.m.clauseTerms(c);
+      if (h instanceof Struct && deref(h.args[0]!) === ":" && deref(h.args[1]!) === f) out.push(h.args[2]!);
+    }
+    return out;
+  }
+
+  /** Assert a specialization clause in front, as specializer.pl's asserta, with its atom in &self. */
+  assertSpecialization(input: Term, clause: Term): void {
+    const c = this.m.addClause(clause, false);
+    const items = listToArray(deref(input))!;
+    const f = deref(listToArray(deref(items[1]!))![0]!) as string;
+    const l = this.compiled.get(f) ?? [];
+    l.unshift({ clause: c, source: copyTerm(input), dataSymbols: new Set() });
+    this.compiled.set(f, l);
+    this.m.addClause(S("translated_from", clauseRef(c), copyTerm(input)), true);
+    this.addSexp("&self", input);
+  }
+
+  /** forget_symbol/1: a function's atoms, declarations, clauses and registration go. */
+  forgetSymbol(name: string): void {
+    this.retractAll(new Struct("&self", ["=", new Cons(name, mkVar()), mkVar()]));
+    for (const t of this.typeChainsOf(name)) this.types.uncacheDecl(name, t);
+    this.retractAll(new Struct("&self", [":", name, mkVar()]));
+    for (const s of this.compiled.get(name) ?? []) {
+      this.m.db.retractClause(s.clause);
+      this.m.solveOnce(S("retractall", S("translated_from", clauseRef(s.clause), mkVar())));
+    }
+    this.compiled.delete(name);
+    this.arities.delete(name);
+    this.funs.delete(name);
+    this.funMeta.delete(name);
+  }
+
   nextLambdaName(): string {
     for (;;) {
       this.lambdaCounter++;
@@ -372,9 +416,10 @@ export class Petta {
       const f = head !== null && head.length > 0 ? deref(head[0]!) : null;
       if (typeof f === "string") {
         this.addSexp(space, t);
-        this.registerFun(f);
         this.noteArity(f, head!.length);
+        this.registerFun(f);
         this.compileAndAssert(t, "added function");
+        this.specializer.invalidate(f);
         return;
       }
     }
@@ -418,6 +463,7 @@ export class Petta {
           srcs.filter((s) => !removed.includes(s)),
         );
         this.functionChanged(f);
+        this.specializer.invalidate(f);
         if (!this.aritiesOf(f).some((a) => (this.m.db.get(f, a)?.live ?? 0) > 0) && !this.m.libraryPreds.has(f + "/" + (head!.length))) {
           this.unregisterFun(f);
           this.m.solveOnce(S("metta_on_function_removed", f));

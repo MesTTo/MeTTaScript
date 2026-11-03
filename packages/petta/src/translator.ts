@@ -12,6 +12,7 @@ import type { Petta } from "./engine";
 import { Cons, NIL, PrologError, Struct, Var, deref, isList, listToArray, mkList, mkStruct, mkVar, type Term } from "./terms";
 import { copyTerm } from "./machine";
 import { collectVars } from "./builtins";
+import { fnTypeShape } from "./types";
 
 const S = mkStruct;
 const L = (...items: Term[]): Term => mkList(items);
@@ -213,11 +214,15 @@ export class Translator {
       const [gd, hv1] = this.evalDataTerm(hv);
       return [[...gsH, ...gsT, ...gd], mkList([hv1, ...avs])];
     }
-    // unknown head (variable or compound) => runtime dispatch
+    // unknown head (variable or compound) => runtime dispatch, or a closure call when its type is known
     const [gsT, avs] = this.args(T);
     const inner = [...gsH, ...gsT];
     const out = mkVar();
     if (isVar(hv) && avs.length === 0) return [[...inner, S("reduce", L(hv), out)], out];
+    if (isVar(hv)) {
+      const closure = this.closureCall(hv, avs, inner, out);
+      if (closure !== null) return [closure, out];
+    }
     return [[...inner, S("reduce", mkList([hv, ...avs]), out)], out];
   }
 
@@ -643,6 +648,42 @@ export class Translator {
     return null;
   }
 
+  /**
+   * translate_closure_call/5: a variable head whose type is a known arrow of the call's arity, or an open
+   * assumption (which this call makes an arrow), applies the closure through apply_fnN, whose errors
+   * propagate, instead of reduce/2, which turns them into failure.
+   */
+  private closureCall(hv: Var, avs: Term[], inner: Goals, out: Term): Goals | null {
+    const types = this.p.types;
+    const k = types.knownOf(hv);
+    if (k === undefined) return null;
+    const kd = deref(k);
+    const n1 = avs.length + 1;
+    let argTs: Term[] | null = null;
+    let outT: Term | null = null;
+    if (kd instanceof Var) {
+      const xs: Term[] = [];
+      for (let i = 0; i < n1; i++) xs.push(mkVar());
+      this.unify(kd, mkList(["->", ...xs]));
+      argTs = xs.slice(0, -1);
+      outT = xs[xs.length - 1]!;
+    } else {
+      const ki = listToArray(kd);
+      const shape = ki !== null && ki.length === n1 + 1 ? fnTypeShape(kd) : null;
+      if (shape === null) return null;
+      argTs = shape.args;
+      outT = shape.out;
+    }
+    const guards = types.callGuards("closure", avs, argTs);
+    if (outT !== null) types.addKnown(out, outT);
+    const goal =
+      avs.length === 1 ? S("apply_fn1", hv, avs[0]!, out)
+      : avs.length === 2 ? S("apply_fn2", hv, avs[0]!, avs[1]!, out)
+      : avs.length === 3 ? S("apply_fn3", hv, avs[0]!, avs[1]!, avs[2]!, out)
+      : S("apply_fnN", hv, mkList(avs), out);
+    return [...inner, ...guards, goal];
+  }
+
   /** manual_dispatch_arg_checks_status/5: a uniquely declared callee's arguments are checked as at a call. */
   private manualDispatchChecks(f: string, avs: Term[], out: Term): Goals {
     const decls = this.p.types.declsArity(f, avs.length);
@@ -877,7 +918,7 @@ export class Translator {
     this.p.addFunMeta(f, args1, body, prefix.length === 0 ? "clean" : "head_goals");
     const decl = this.p.types.bindParamTypes(f, args1);
     if (decl === undefined && this.p.types.declsArity(f, args1.length).length === 0) this.p.types.assumeParamTypes(args1);
-    const [goalsBody, expOut0] = this.p.types.declaredBody(f, args1.length, body);
+    const [goalsBody, expOut0] = this.p.types.declaredBody(f, args1.length, body, decl);
     const expOut = deref(expOut0);
     let headArgs = args1;
     let finalGoals = goalsBody;

@@ -548,8 +548,8 @@ export class Types {
   }
 
   /** translate_declared_body/5: a function declared to return Atom returns its body as source data. */
-  declaredBody(f: string, n: number, body: Term): Tr {
-    if (this.declaredOutputAtom(f, n)) return [[], body];
+  declaredBody(f: string, n: number, body: Term, decl?: Decl): Tr {
+    if (decl !== undefined && deref(decl.out) === "Atom" && this.declaredOutputAtom(f, n)) return [[], body];
     return this.p.translator.expr(body);
   }
 
