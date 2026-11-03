@@ -643,7 +643,7 @@ export class Translator {
     const decls = this.p.types.declsArity(f, avs.length);
     if (decls.length !== 1) return [];
     const guards = this.p.types.callGuards(f, avs, decls[0]!.args);
-    this.p.types.addKnown(out, decls[0]!.out);
+    if (!(deref(decls[0]!.out) instanceof Var)) this.p.types.addKnown(out, decls[0]!.out);
     return guards;
   }
 
@@ -769,7 +769,7 @@ export class Translator {
         this.p.types.resolveDecl(avs, d.args);
         const guards = this.p.types.callGuards(fun, avs, d.args);
         const inner = [...gsH, ...gsT, ...guards];
-        this.p.types.addKnown(out, d.out);
+        if (!(deref(d.out) instanceof Var)) this.p.types.addKnown(out, d.out);
         const arith = this.arithInline(fun, avs, out);
         if (arith !== null) return [[...inner, ...arith], out];
         return [this.buildCallOrPartial(fun, avs, out, inner, []), out];
@@ -792,6 +792,7 @@ export class Translator {
     const [gsT, avs0] = this.args(argsT);
     const avs = [...bound, ...avs0];
     const out = mkVar();
+    this.p.types.untypedCallOut(fun, avs, out);
     return [this.buildCallOrPartial(fun, avs, out, [...gsH, ...gsT], []), out];
   }
 

@@ -218,7 +218,8 @@ export class Types {
   addKnown(t: Term, type: Term): void {
     const d = deref(t);
     const T = deref(type);
-    if (!(d instanceof Var) || T instanceof Var || isWildcard(T)) return;
+    // A type variable is knowledge too: the declaration instance, so identical unknowns are recognised.
+    if (!(d instanceof Var) || (!(T instanceof Var) && isWildcard(T))) return;
     const prior = this.known.get(d);
     if (prior === undefined) this.known.set(d, T);
     else if (prior !== null && !variant(prior, T)) this.known.set(d, null);
@@ -254,6 +255,71 @@ export class Types {
       const mark = m.trailMark();
       if (!m.solveOnce(S("type_unify", copyTerm(k), t))) m.undoTo(mark);
     });
+  }
+
+  /** list_source_elem/2: the element type of a list value: its known (List T), the open type of (), or the common type of a literal. */
+  private listSourceElem(x: Term): Term | undefined {
+    const d = deref(x);
+    if (d instanceof Var) {
+      const k = this.knownOf(d);
+      const ki = k === undefined ? null : listToArray(deref(k));
+      return ki !== null && ki.length === 2 && deref(ki[0]!) === "List" ? ki[1]! : undefined;
+    }
+    if (d === NIL) return mkVar();
+    const items = listToArray(d);
+    if (items === null || items.length === 0) return undefined;
+    const ts = items.map((e) => this.valueType(e));
+    if (ts.some((t) => t === undefined)) return undefined;
+    return ts.every((t) => variant(t!, ts[0]!)) ? ts[0] : undefined;
+  }
+
+  /**
+   * untyped_call_out/3: the output knowledge of the builtins typed by a contextual rule rather than a
+   * signature (builtin_registry.pl typing(contextual(...))): cons_list, list_element, list_tail, union_list,
+   * first_list.
+   */
+  untypedCallOut(f: string, avs: Term[], out: Term): void {
+    const rule = CONTEXTUAL[f + "/" + avs.length];
+    if (rule === undefined || !(deref(out) instanceof Var)) return;
+    const set = (t: Term): void => this.addKnown(out, t);
+    switch (rule) {
+      case "cons_list": {
+        const T = this.listSourceElem(avs[1]!);
+        if (T === undefined) return;
+        const h = deref(avs[0]!);
+        const Td = deref(T);
+        const fitsHead = (!(Td instanceof Var) && isWildcard(Td)) || (h instanceof Var ? (this.knownOf(h) !== undefined && this.fits(this.knownOf(h)!, T)) : this.checkValue(h, copyTerm(T)) === "ok");
+        if (fitsHead) set(mkList(["List", T]));
+        else {
+          const kh = h instanceof Var ? this.knownOf(h) : this.valueType(h);
+          if (!(Td instanceof Var) && kh !== undefined) set(mkList(["List", mkList(["|", T, kh])]));
+        }
+        return;
+      }
+      case "list_element": {
+        const T = this.listSourceElem(avs[0]!);
+        if (T !== undefined && !(deref(T) instanceof Var) && !isWildcard(T)) set(T);
+        return;
+      }
+      case "list_tail": {
+        const T = this.listSourceElem(avs[0]!);
+        set(mkList(["List", T !== undefined ? T : "%Undefined%"]));
+        return;
+      }
+      case "union_list": {
+        const TA = this.listSourceElem(avs[0]!);
+        const TB = this.listSourceElem(avs[1]!);
+        if (TA === undefined || TB === undefined) return;
+        if (this.fits(TA, TB)) set(mkList(["List", TA]));
+        else if (!(deref(TA) instanceof Var) && !(deref(TB) instanceof Var)) set(mkList(["List", mkList(["|", TA, TB])]));
+        return;
+      }
+      case "first_list": {
+        const T = this.listSourceElem(avs[0]!);
+        if (T !== undefined) set(mkList(["List", T]));
+        return;
+      }
+    }
   }
 
   /** bind_pattern_from/2: a destructuring let pattern types its fields from the value's tuple type. */
@@ -337,6 +403,7 @@ export class Types {
     const ai = listToArray(a);
     if (ti !== null && ti.length === 2 && deref(ti[0]!) === "List" && a instanceof Cons) {
       this.bindParamType(a.head, ti[1]!);
+      this.bindParamType(a.tail, T);
       return;
     }
     // structural_pattern_fields/4: a tagged pattern (Tag Fields...) against the tuple type (Tag FieldTs...)
@@ -361,6 +428,11 @@ export class Types {
     const guard = (): Goals => (isGroundType(T) ? [guardGoal(d, T)] : []);
     if (d instanceof Var) {
       const k = this.knownOf(d);
+      if (k !== undefined && deref(k) instanceof Var) {
+        // only a bare declaration variable is known: narrow locally and keep the boundary's guard
+        this.known.set(d, T);
+        return guard();
+      }
       if (k !== undefined) {
         if (this.fits(k, T)) return [];
         if (this.fits(T, k)) {
@@ -518,6 +590,19 @@ export class Types {
     for (const s of ["declared_value_type", "declared_newtype", "declared_type_alias", "declared_foreign_type", "declared_space_type"]) m.db.ensure(s, 2).dynamic = true;
   }
 }
+
+const CONTEXTUAL: Record<string, string> = {
+  "cons/2": "cons_list",
+  "cons-atom/2": "cons_list",
+  "first/1": "list_element",
+  "last/1": "list_element",
+  "car-atom/1": "list_element",
+  "cdr-atom/1": "list_tail",
+  "union-atom/2": "union_list",
+  "append/2": "union_list",
+  "subtraction-atom/2": "first_list",
+  "list_to_set/1": "first_list",
+};
 
 function isAtomicTerm(t: Term): boolean {
   return !(t instanceof Var) && !(t instanceof Cons) && !(t instanceof Struct);
