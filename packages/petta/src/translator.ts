@@ -941,7 +941,7 @@ export class Translator {
     const head = new Struct(f, [...headArgs, out]);
     this.p.noteArity(f, headArgs.length + 1);
     const commit = this.p.clauseCommitCut(f, args1.length) ? ["!"] : [];
-    const outChecks = headArgs === args1 ? this.p.types.clauseOutputGoals(decl, out, body) : [];
+    const outChecks = headArgs === args1 ? this.p.types.clauseOutputGoals(decl, out, body, f) : [];
     const bodyGoals = [...prefix, ...commit, ...finalGoals, ...outChecks];
     return bodyGoals.length === 0 ? head : S(":-", head, conj(bodyGoals));
   }

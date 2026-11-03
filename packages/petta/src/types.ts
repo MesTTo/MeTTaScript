@@ -386,7 +386,7 @@ export class Types {
    * clause_output_goals/6: a clause of a declared function whose result is not proven of the declared output
    * type checks it at runtime; a literal result that contradicts it is a compile error.
    */
-  clauseOutputGoals(decl: Decl | undefined, expOut: Term, body: Term): Goals {
+  clauseOutputGoals(decl: Decl | undefined, expOut: Term, body: Term, fname?: string): Goals {
     if (decl === undefined) return [];
     const OT = deref(decl.out);
     if (OT instanceof Var || isWildcard(OT)) return [];
@@ -400,11 +400,11 @@ export class Types {
     if (v instanceof Var) {
       const k = this.knownOf(v);
       if (k !== undefined && this.fits(k, OT)) return [];
-      return [guardGoal(v, OT)];
+      return [this.typeGuard(fname ?? "output", v, OT)];
     }
     const st = this.checkValue(v, copyTerm(OT));
     if (st === "mismatch") throw new PrologError(S("error", S("literal_type_mismatch", v, OT), "typecheck"));
-    if (st === "unknown") return [guardGoal(v, OT)];
+    if (st === "unknown") return [this.typeGuard(fname ?? "output", v, OT)];
     return [];
   }
 
@@ -475,6 +475,17 @@ export class Types {
     return deref(st) as string;
   }
 
+  /**
+   * type_guard/4: the residual guard. In strict mode PeTTa rejects it instead, but that rejection is sound
+   * only with PeTTa's full type knowledge; with this layer's narrower knowledge it rejected 70 valid strict
+   * examples to catch 41 (c-strict-reject-tradeoff), so it waits for the checker's inference.
+   */
+  private typeGuard(fun: string, av: Term, t: Term): Term {
+    if (this.p.strict && STRICT_REJECTION)
+      throw new PrologError(S("error", S("strict_runtime_typecheck", fun, S("typecheck_or_error", copyTerm(av), t)), "typecheck"));
+    return guardGoal(av, t);
+  }
+
   /** check_call_arg/5 in declared mode: a literal mismatch is a compile error, an unresolved value a guard. */
   callGuards(fun: string, avs: Term[], ats: Term[]): Goals {
     const gs: Goals = [];
@@ -488,7 +499,7 @@ export class Types {
         const k = this.knownOf(v);
         // type_unify(K, T) in place: an open assumption or declaration variable takes the required type.
         if (k !== undefined && this.unifyTypes(k, T)) return;
-        gs.push(guardGoal(v, T));
+        gs.push(this.typeGuard(fun, v, T));
         return;
       }
       const st = this.checkValue(v, t);
@@ -496,7 +507,7 @@ export class Types {
       if (st === "mismatch") throw new PrologError(S("error", S("literal_type_mismatch", v, deref(t)), "typecheck"));
       const T = deref(t);
       if (T instanceof Var || isWildcard(T)) return;
-      gs.push(guardGoal(v, T));
+      gs.push(this.typeGuard(fun, v, T));
     });
     void fun;
     return gs;
@@ -608,6 +619,9 @@ export class Types {
     for (const s of ["declared_value_type", "declared_newtype", "declared_type_alias", "declared_foreign_type", "declared_space_type"]) m.db.ensure(s, 2).dynamic = true;
   }
 }
+
+/** Whether strict mode rejects residual guards (off until the checker's inference lands). */
+const STRICT_REJECTION = false;
 
 const CONTEXTUAL: Record<string, string> = {
   "cons/2": "cons_list",
