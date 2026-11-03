@@ -50,6 +50,12 @@ export const isWildcard = (t: Term): boolean => {
 export class Types {
   /** Function declarations by name, in declaration order, with aliases expanded. */
   readonly fnDecls = new Map<string, Decl[]>();
+  /**
+   * Compile-time type knowledge of variables (type_lang.pl's tknown attribute, one candidate kept): a
+   * declared parameter's type, a typed call's output, a let binder's value type. A guard on a variable whose
+   * known type fits the required one is elided, as check_call_arg/5 does with known_singleton/2.
+   */
+  private readonly known = new Map<Var, Term | null>();
   private readonly aliases = new Map<string, Term>();
   private readonly kindOf = new Map<string, string>();
   constructor(private readonly p: Petta) {}
@@ -92,6 +98,7 @@ export class Types {
           return;
         }
         if (prior === kw) return;
+        if (kw === "SpaceOf") this.validateExistingRows(n, value);
         this.kindOf.set(n, kw);
         if (kw === "Alias") this.aliases.set(n, value);
         m.addClause(S(KINDS[kw]!, n, value), true);
@@ -113,6 +120,26 @@ export class Types {
       if (h instanceof Struct && deref(h.args[0]!) === n && variant(h.args[1]!, tn)) return;
     }
     m.addClause(S("declared_value_type", n, tn), true);
+  }
+
+  /** validate_existing_space_rows/2: a SpaceOf declaration rejects a space that already holds a contradicting row. */
+  private validateExistingRows(space: string, schema: Term): void {
+    const m = this.p.m;
+    const rows: Term[] = [];
+    for (const p of [...m.db.preds.values()]) {
+      if (p.name !== space) continue;
+      for (const c of m.visibleClauses(p.name, p.arity)) {
+        const [h] = m.clauseTerms(c);
+        if (h instanceof Struct) rows.push(mkList(h.args));
+      }
+    }
+    for (const c of m.visibleClauses("space_primitive", 2)) {
+      const [h] = m.clauseTerms(c);
+      if (h instanceof Struct && deref(h.args[0]!) === space) rows.push(h.args[1]!);
+    }
+    for (const row of rows)
+      if (m.solveOnce(S("value_definitely_mismatch", row, copyTerm(schema))))
+        throw new PrologError(S("error", S("space_schema_row_mismatch", space, row, schema), "typecheck"));
   }
 
   uncacheDecl(name: Term, type: Term): void {
@@ -171,6 +198,172 @@ export class Types {
     return out;
   }
 
+  /** known_singleton/2: the one known type of a variable, or undefined. */
+  knownOf(t: Term): Term | undefined {
+    const d = deref(t);
+    if (!(d instanceof Var)) return undefined;
+    const k = this.known.get(d);
+    return k === null ? undefined : k;
+  }
+
+  /** add_known_type/2: a second, different candidate makes the type unknown. */
+  addKnown(t: Term, type: Term): void {
+    const d = deref(t);
+    const T = deref(type);
+    if (!(d instanceof Var) || T instanceof Var || isWildcard(T)) return;
+    const prior = this.known.get(d);
+    if (prior === undefined) this.known.set(d, T);
+    else if (prior !== null && !variant(prior, T)) this.known.set(d, null);
+  }
+
+  /** note_candidates/2 for a value: a literal's own type, or a variable's known type. */
+  valueType(v: Term): Term | undefined {
+    const d = deref(v);
+    if (d instanceof Var) return this.knownOf(d);
+    if (typeof d === "number" || typeof d === "bigint" || (d instanceof Struct ? false : typeof d === "object" && d !== null && "v" in (d as object))) return "Number";
+    return undefined;
+  }
+
+  /** Merge knowledge when two compile-time variables are aliased (tknown's attr_unify_hook). */
+  mergeKnown(a: Term, b: Term): void {
+    const ka = this.knownOf(a);
+    const kb = this.knownOf(b);
+    if (ka !== undefined) this.addKnown(b, ka);
+    if (kb !== undefined) this.addKnown(a, kb);
+  }
+
+  /**
+   * Instantiate a declaration's type variables from what is known of the call's arguments (the effect of
+   * check_call_arg/5's type_unify on the fresh declaration copy), so its output type is specific.
+   */
+  resolveDecl(avs: Term[], ats: Term[]): void {
+    const m = this.p.m;
+    avs.forEach((av, i) => {
+      const t = ats[i];
+      if (t === undefined) return;
+      const k = this.knownOf(av);
+      if (k === undefined) return;
+      const mark = m.trailMark();
+      if (!m.solveOnce(S("type_unify", copyTerm(k), t))) m.undoTo(mark);
+    });
+  }
+
+  /** bind_pattern_from/2: a destructuring let pattern types its fields from the value's tuple type. */
+  bindPattern(pat: Term, type: Term): void {
+    const p = deref(pat);
+    const T = deref(type);
+    if (p instanceof Var) {
+      this.addKnown(p, T);
+      return;
+    }
+    const pi = listToArray(p);
+    const ti = listToArray(T);
+    if (pi === null || ti === null || pi.length !== ti.length || fnTypeShape(T) !== null) return;
+    if (ti.length > 0 && (deref(ti[0]!) === "|" || deref(ti[0]!) === "List")) return;
+    pi.forEach((x, i) => this.bindPattern(x, ti[i]!));
+  }
+
+  /** type_unify/2 on copies: whether the known type fits the required one. */
+  private fits(k: Term, t: Term): boolean {
+    const m = this.p.m;
+    const mark = m.trailMark();
+    const ok = m.solveOnce(S("type_unify", copyTerm(k), copyTerm(t)));
+    m.undoTo(mark);
+    return ok;
+  }
+
+  /**
+   * clause_param_types/3 and bind_param_type/2: the unique (or only surviving) declaration of F/N types its
+   * clause's head variables; a literal head argument that contradicts it is a compile error.
+   */
+  bindParamTypes(f: string, args: Term[]): Decl | undefined {
+    const decls = this.declsArity(f, args.length);
+    if (decls.length === 0) return undefined;
+    let chosen: Decl | undefined;
+    if (decls.length === 1) chosen = decls[0];
+    else {
+      const surv = decls.filter((d) => args.every((a, i) => deref(a) instanceof Var || this.checkValue(a, copyTerm(d.args[i]!)) !== "mismatch"));
+      if (surv.length === 0) throw new PrologError(S("error", S("no_matching_overload", f), "typecheck"));
+      if (surv.length === 1) chosen = surv[0];
+    }
+    if (chosen === undefined) return undefined;
+    args.forEach((a, i) => this.bindParamType(a, chosen!.args[i]!));
+    return chosen;
+  }
+
+  /**
+   * clause_output_goals/6: a clause of a declared function whose result is not proven of the declared output
+   * type checks it at runtime; a literal result that contradicts it is a compile error.
+   */
+  clauseOutputGoals(decl: Decl | undefined, expOut: Term, body: Term): Goals {
+    if (decl === undefined) return [];
+    const OT = deref(decl.out);
+    if (OT instanceof Var || isWildcard(OT)) return [];
+    const b = listToArray(deref(body));
+    if (b !== null && b.length === 2 && deref(b[0]!) === "quote" && !isAtomicTerm(deref(b[1]!))) {
+      const st = this.checkValue(b[1]!, copyTerm(OT));
+      if (st === "ok") return [];
+      return [guardGoal(expOut, OT)];
+    }
+    const v = deref(expOut);
+    if (v instanceof Var) {
+      const k = this.knownOf(v);
+      if (k !== undefined && this.fits(k, OT)) return [];
+      return [guardGoal(v, OT)];
+    }
+    const st = this.checkValue(v, copyTerm(OT));
+    if (st === "mismatch") throw new PrologError(S("error", S("literal_type_mismatch", v, OT), "typecheck"));
+    if (st === "unknown") return [guardGoal(v, OT)];
+    return [];
+  }
+
+  private bindParamType(arg: Term, t: Term): void {
+    const a = deref(arg);
+    const T = deref(t);
+    if (a instanceof Var) {
+      if (!(T instanceof Var) && isWildcard(T)) return;
+      this.addKnown(a, T);
+      return;
+    }
+    const ti = listToArray(T);
+    const ai = listToArray(a);
+    if (ti !== null && ti.length === 2 && deref(ti[0]!) === "List" && a instanceof Cons) {
+      this.bindParamType(a.head, ti[1]!);
+      return;
+    }
+    if (ai !== null && ti !== null && ai.length === ti.length && fnTypeShape(T) === null && deref(ti[0]!) !== "|") {
+      ai.forEach((x, i) => this.bindParamType(x, ti[i]!));
+      return;
+    }
+    if (ai === null && !(a instanceof Cons) && !(a instanceof Struct) && this.checkValue(a, T) === "mismatch")
+      throw new PrologError(S("error", S("literal_type_mismatch", a, T), "typecheck"));
+  }
+
+  /** ascribe_type/3: (the T Expr) checks Expr against T, statically where it can and by a guard otherwise. */
+  ascribe(v: Term, t: Term): Goals {
+    const T = deref(t);
+    if (T instanceof Var || isWildcard(T)) return [];
+    const d = deref(v);
+    const guard = (): Goals => (isGroundType(T) ? [guardGoal(d, T)] : []);
+    if (d instanceof Var) {
+      const k = this.knownOf(d);
+      if (k !== undefined) {
+        if (this.fits(k, T)) return [];
+        if (this.fits(T, k)) {
+          this.known.set(d, T);
+          return guard();
+        }
+        throw new PrologError(S("error", S("type_conflict", S("existing", k), S("required", T)), "typecheck"));
+      }
+      this.addKnown(d, T);
+      return guard();
+    }
+    const st = this.checkValue(d, copyTerm(T));
+    if (st === "ok") return [];
+    if (st === "mismatch") throw new PrologError(S("error", S("literal_type_mismatch", d, T), "typecheck"));
+    return guard();
+  }
+
   /** check_value/3 through the ported Prolog definition: ok, mismatch or unknown. Binds type variables. */
   checkValue(v: Term, t: Term): string {
     const st = mkVar();
@@ -189,6 +382,8 @@ export class Types {
       if (v instanceof Var) {
         const T = deref(t);
         if (T instanceof Var || isWildcard(T)) return;
+        const k = this.knownOf(v);
+        if (k !== undefined && this.fits(k, T)) return;
         gs.push(guardGoal(v, T));
         return;
       }
@@ -310,6 +505,10 @@ export class Types {
   }
 }
 
+function isAtomicTerm(t: Term): boolean {
+  return !(t instanceof Var) && !(t instanceof Cons) && !(t instanceof Struct);
+}
+
 function freshDecl(d: Decl): Decl {
   const items = listToArray(copyTerm(mkList([...d.args, d.out])))!;
   return { args: items.slice(0, -1), out: items[items.length - 1]!, det: d.det };
@@ -424,8 +623,14 @@ prim_mismatch_status(P, T, St) :- ( wildcard_type(T) -> St = ok ; is_union(T) ->
 refinement_pair(C, T) :- user_extended_get_type, ( ( primitive_type(C) ; tuple_type(C) ), user_atom_type(T) -> true ; user_atom_type(C), ( primitive_type(T) ; tuple_type(T) ) ).
 arg_soft_ok(AV, T) :- ( var(AV) -> ( known_singleton(AV, K) -> copy_term(K, K2), type_unify(K2, T) ; true ) ; check_value(AV, T, St), St \== mismatch ).
 value_definitely_mismatch(V, T) :- copy_term(T, T2), check_value(V, T2, St), !, St == mismatch.
-typecheck_or_error(V, T) :- ( var(V) -> true ; runtime_type_ok(V, T) -> true ; throw(error(literal_type_mismatch(V, T), typecheck)) ).
-typecheck_match(V, T) :- ( var(V) -> true ; runtime_type_ok(V, T) ).
+typecheck_or_error(V, T) :- ( var(V) -> constrain_var_type(V, T) ; runtime_type_ok(V, T) -> true ; throw(error(literal_type_mismatch(V, T), typecheck)) ).
+typecheck_match(V, T) :- ( var(V) -> constrain_var_type(V, T) ; runtime_type_ok(V, T) ).
+constrain_var_type(V, T) :- ( get_attr(V, mreq, Rs) -> variant_union([T], Rs, U), put_attr(V, mreq, U) ; put_attr(V, mreq, [T]) ).
+'$attr_unify_hook'(mreq, Rs, Other) :- !, ( var(Other) -> ( get_attr(Other, mreq, R2) -> variant_union(Rs, R2, U), put_attr(Other, mreq, U) ; put_attr(Other, mreq, Rs) ) ; forall(member(R, Rs), typecheck_or_error(Other, R)) ).
+'$attr_unify_hook'(_, _, _).
+variant_union([], Ys, Ys).
+variant_union([X|Xs], Ys, U) :- ( variant_member(X, Ys) -> variant_union(Xs, Ys, U) ; variant_union(Xs, [X|Ys], U) ).
+variant_member(X, [Y|Ys]) :- ( X =@= Y -> true ; variant_member(X, Ys) ).
 runtime_type_ok(V, 'Number') :- number(V), !.
 runtime_type_ok(V, 'String') :- string(V), !.
 runtime_type_ok(V, 'Bool') :- ( V == true ; V == false ), !.
@@ -441,14 +646,14 @@ runtime_type_ok(V, T) :- atom(T), nominal_value_ok(V, T), !.
 runtime_type_ok(_, _) :- nb_current('$in_typecheck', true), !.
 runtime_type_ok(V, T) :- setup_call_cleanup(nb_setval('$in_typecheck', true), ( 'get-type'(V, T) *-> true ; 'get-metatype'(V, T) ), nb_setval('$in_typecheck', false)).
 runtime_callable_at_arrow_arity(V, T) :- T = [_|Tail], length(Tail, TailLen), Required is TailLen - 1, Required >= 0, ( atom(V), fun(V), CompiledArity is Required + 1, arity(V, CompiledArity) ; nonvar(V), V = partial(F, Bound), atom(F), fun(F), is_list(Bound), length(Bound, NB), arity(F, FullArity), Required =:= FullArity - NB - 1 ).
-runtime_list_ok(V, ET) :- var(V), !, true.
+runtime_list_ok(V, ET) :- var(V), !, constrain_var_type(V, ['List', ET]).
 runtime_list_ok([], _).
-runtime_list_ok([E|Es], ET) :- ( var(E) -> true ; runtime_type_ok(E, ET) ), runtime_list_ok(Es, ET).
+runtime_list_ok([E|Es], ET) :- ( var(E) -> constrain_var_type(E, ET) ; runtime_type_ok(E, ET) ), runtime_list_ok(Es, ET).
 nominal_value_ok(V, T) :- is_list(V), V = [Ctor|Fields], atom(Ctor), !, length(Fields, N), unique_fn_decl(Ctor, N, FieldTs, OT1), OT1 == T, runtime_tuple_ok(Fields, FieldTs).
 nominal_value_ok(V, T) :- atom(V), declared_value_type(V, VT), VT == T.
 unique_fn_decl(F, N, ATs, OT) :- findall(A-O, fn_decl_arity(F, N, A, O), [ATs-OT]).
 runtime_tuple_ok([], []).
-runtime_tuple_ok([F|Fs], [T|Ts]) :- ( var(F) -> true ; runtime_type_ok(F, T) ), runtime_tuple_ok(Fs, Ts).
+runtime_tuple_ok([F|Fs], [T|Ts]) :- ( var(F) -> constrain_var_type(F, T) ; runtime_type_ok(F, T) ), runtime_tuple_ok(Fs, Ts).
 same_length([], []).
 same_length([_|T1], [_|T2]) :- same_length(T1, T2).
 `;

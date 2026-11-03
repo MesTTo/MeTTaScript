@@ -32,12 +32,21 @@ import {
 } from "./terms";
 
 /** A goal with its continuation, the choicepoint height its cut returns to, and its innermost catch. */
+/** The variable array of one clause activation; a frame's goal is a stored template read through it. */
+export type Vars = (Term | undefined)[] | null;
+
+/**
+ * A goal with its continuation, the choicepoint height its cut returns to, and its innermost catch. With
+ * `vars`, the goal is a stored clause-body template (slots and shared ground terms) read through that array,
+ * so a clause body is never copied whole: only the arguments a builtin or a call needs are instantiated.
+ */
 export class Frame {
   constructor(
     public readonly goal: Term,
     public readonly next: Frame | null,
     public readonly cb: number,
     public readonly cc: number,
+    public readonly vars: Vars = null,
   ) {}
 }
 
@@ -64,6 +73,7 @@ class CP {
   iter: Iterator<unknown> | null = null;
   catcher: Term = NIL;
   recovery: Term = NIL;
+  recVars: Vars = null;
   results: Term[] | null = null;
   template: Term = NIL;
   list: Term = NIL;
@@ -137,6 +147,8 @@ export class Machine {
   /** Variables created at or after the newest choicepoint need no trail entry. */
   private trailBoundary = 0;
   private curCC = -1;
+  /** Attribute hooks woken by binding attributed variables: [module, value, other], run before the next goal. */
+  private wakeups: Term[] = [];
   readonly ops = new OpTable();
   /** Predicates declared with `:- table`, as Name/Arity keys, and their completed answer tables by variant. */
   readonly tabled = new Set<string>();
@@ -274,9 +286,38 @@ export class Machine {
     return true;
   }
 
-  /** Attribute hooks run after unification; PeTTa's runtime attributes need none, so binding is plain. */
+  /** Bind, waking each attribute's attr_unify_hook(Value, Other) as SWI does after the unification. */
   private bindAttr(v: Var, t: Term): void {
     this.bind(v, t);
+    const a = v.attrs;
+    if (a !== null && a.size > 0) for (const [mod, val] of a) this.wakeups.push(mkStruct("$attr_unify_hook", mod, val, t));
+  }
+
+  /** put_attr/3: backtrackable. */
+  putAttr(v: Var, mod: string, val: Term): void {
+    const old = v.attrs;
+    const next = new Map(old ?? []);
+    next.set(mod, val);
+    v.attrs = next;
+    this.trail.push(() => (v.attrs = old));
+  }
+
+  delAttr(v: Var, mod: string): void {
+    const old = v.attrs;
+    if (old === null || !old.has(mod)) return;
+    const next = new Map(old);
+    next.delete(mod);
+    v.attrs = next.size > 0 ? next : null;
+    this.trail.push(() => (v.attrs = old));
+  }
+
+  /** Run the hooks woken since the last goal before the continuation. */
+  private flushWakeups(): void {
+    const w = this.wakeups;
+    this.wakeups = [];
+    let goal: Term = w[w.length - 1]!;
+    for (let i = w.length - 2; i >= 0; i--) goal = mkStruct(",", w[i]!, goal);
+    this.goals = new Frame(goal, this.goals, this.cps.length, this.curCC);
   }
 
   // ---- clause renaming ----
@@ -452,9 +493,19 @@ export class Machine {
       try {
         for (;;) {
           const f = this.goals;
-          if (f === null) return true;
+          if (f === null) {
+            if (this.wakeups.length === 0) return true;
+            this.flushWakeups();
+            continue;
+          }
           this.goals = f.next;
-          if (!this.step(f) && !this.backtrack(base)) return false;
+          if (this.step(f)) {
+            if (this.wakeups.length > 0) this.flushWakeups();
+          } else {
+            this.wakeups.length = 0;
+            if (!this.backtrack(base)) return false;
+            if (this.wakeups.length > 0) this.flushWakeups();
+          }
         }
       } catch (e) {
         if (!(e instanceof PrologError)) throw e;
@@ -538,6 +589,7 @@ export class Machine {
 
   /** Unwind to the innermost catch whose catcher unifies with the ball; false if none is in this run. */
   private handleThrow(e: PrologError, base: number): boolean {
+    this.wakeups.length = 0;
     const ball = copyTerm(e.ball);
     let c = this.curCC;
     while (c >= base) {
@@ -547,7 +599,7 @@ export class Machine {
       this.cutTo(c);
       const mark = this.trail.length;
       if (this.unify(cp.catcher, ball)) {
-        this.goals = new Frame(cp.recovery, cp.next, cp.cb, cp.cc);
+        this.goals = new Frame(cp.recovery, cp.next, cp.cb, cp.cc, cp.recVars);
         return true;
       }
       this.undoTo(mark);
@@ -604,8 +656,12 @@ export class Machine {
           }
       if (ok) {
         const body = c.body;
-        if (body !== "true") this.goals = new Frame(this.inst(body, vars), next, h, cc);
-        else this.goals = next;
+        if (body !== "true") {
+          // Every body variable exists before the body runs, so its bindings are trailed against the
+          // body's own choicepoints and a shared frame never meets a variable from a failed branch.
+          for (let k = 0; k < vars.length; k++) if (vars[k] === undefined) vars[k] = mkVar();
+          this.goals = new Frame(body, next, h, cc, vars);
+        } else this.goals = next;
         return true;
       }
       this.undoTo(mark);
@@ -620,8 +676,19 @@ export class Machine {
 
   /** Execute one goal. Returns false on failure; may replace the continuation and push choicepoints. */
   private step(f: Frame): boolean {
-    const g = deref(f.goal);
     this.curCC = f.cc;
+    let g: Term = f.goal;
+    let vars = f.vars;
+    if (vars !== null) {
+      if (g instanceof Slot) {
+        g = deref(vars[g.i] ?? (vars[g.i] = mkVar()));
+        vars = null;
+      } else if (g instanceof Ground) {
+        g = g.t;
+        vars = null;
+      }
+    } else g = deref(g);
+    const real = (t: Term): Term => (vars !== null ? this.inst(t, vars) : t);
     let name: string;
     let args: Term[];
     if (typeof g === "string") {
@@ -675,62 +742,73 @@ export class Machine {
           cp.results!.push(copyTerm(cp.template));
           return false;
         }
+        if (name === "$catch_exit") {
+          // A determinate exit of the catch goal leaves nothing to re-enter: the catch frame goes.
+          const h = deref(args[0]!) as number;
+          const cp = this.cps[h];
+          if (cp !== undefined && cp.kind === K.Catch && this.cps.length === h + 1) {
+            this.cps.pop();
+            this.trailBoundary = this.cps.length > 0 ? this.cps[this.cps.length - 1]!.varMark : 0;
+          }
+          return true;
+        }
         if (name === "\\+") {
           const h = this.cps.length;
           this.pushCP(K.Not, f.next, f.cb, f.cc);
-          this.goals = new Frame(args[0]!, new Frame(mkStruct("$nafail", h), null, h + 1, f.cc), h + 1, f.cc);
+          this.goals = new Frame(args[0]!, new Frame(mkStruct("$nafail", h), null, h + 1, f.cc), h + 1, f.cc, vars);
           return true;
         }
         if (name === "call") {
-          this.goals = new Frame(args[0]!, f.next, this.cps.length, f.cc);
+          this.goals = new Frame(args[0]!, f.next, this.cps.length, f.cc, vars);
           return true;
         }
         if (name === "once") {
           const h = this.cps.length;
-          this.goals = new Frame(args[0]!, new Frame(mkStruct("$cut", h), f.next, f.cb, f.cc), h, f.cc);
+          this.goals = new Frame(args[0]!, new Frame(mkStruct("$cut", h), f.next, f.cb, f.cc), h, f.cc, vars);
           return true;
         }
         if (name === "ignore") {
           const h = this.cps.length;
           const alt = this.pushCP(K.Alt, f.next, f.cb, f.cc);
           alt.alt = f.next;
-          this.goals = new Frame(args[0]!, new Frame(mkStruct("$cut", h), f.next, f.cb, f.cc), h + 1, f.cc);
+          this.goals = new Frame(args[0]!, new Frame(mkStruct("$cut", h), f.next, f.cb, f.cc), h + 1, f.cc, vars);
           return true;
         }
         if (name === "throw") {
-          const ball = deref(args[0]!);
+          const ball = deref(real(args[0]!));
           if (ball instanceof Var) throw instantiationError();
           throw new PrologError(copyTerm(ball));
         }
         if (name === "halt") {
-          const st = deref(args[0]!);
+          const st = deref(real(args[0]!));
           throw new Halt(typeof st === "number" ? st : 0);
         }
         break;
       case 2:
         if (name === ",") {
-          this.goals = new Frame(args[0]!, new Frame(args[1]!, f.next, f.cb, f.cc), f.cb, f.cc);
+          this.goals = new Frame(args[0]!, new Frame(args[1]!, f.next, f.cb, f.cc, vars), f.cb, f.cc, vars);
           return true;
         }
-        if (name === ";") return this.disjunction(args[0]!, args[1]!, f);
+        if (name === ";") return this.disjunction(args[0]!, args[1]!, f, vars);
         if (name === "->") {
           const h = this.cps.length;
           this.goals = new Frame(
             args[0]!,
-            new Frame(mkStruct("$cut", h), new Frame(args[1]!, f.next, f.cb, f.cc), f.cb, f.cc),
+            new Frame(mkStruct("$cut", h), new Frame(args[1]!, f.next, f.cb, f.cc, vars), f.cb, f.cc),
             h,
             f.cc,
+            vars,
           );
           return true;
         }
         if (name === "*->") {
-          this.goals = new Frame(args[0]!, new Frame(args[1]!, f.next, f.cb, f.cc), this.cps.length, f.cc);
+          this.goals = new Frame(args[0]!, new Frame(args[1]!, f.next, f.cb, f.cc, vars), this.cps.length, f.cc, vars);
           return true;
         }
-        if (name === "call_cleanup") return this.setupCallCleanup("true", args[0]!, args[1]!, f);
+        if (name === "call_cleanup") return this.setupCallCleanup("true", real(args[0]!), real(args[1]!), f);
         if (name === "forall") {
           const g2 = mkStruct("\\+", mkStruct(",", args[0]!, mkStruct("\\+", args[1]!)));
-          this.goals = new Frame(g2, f.next, f.cb, f.cc);
+          this.goals = new Frame(g2, f.next, f.cb, f.cc, vars);
           return true;
         }
         break;
@@ -739,22 +817,24 @@ export class Machine {
           const h = this.cps.length;
           const cp = this.pushCP(K.Findall, f.next, f.cb, f.cc);
           cp.results = [];
-          cp.template = args[0]!;
-          cp.list = args[2]!;
-          this.goals = new Frame(args[1]!, new Frame(mkStruct("$fa_collect", h), null, h + 1, f.cc), h + 1, f.cc);
+          cp.template = real(args[0]!);
+          cp.list = real(args[2]!);
+          this.goals = new Frame(args[1]!, new Frame(mkStruct("$fa_collect", h), null, h + 1, f.cc), h + 1, f.cc, vars);
           return true;
         }
-        if (name === "setup_call_cleanup") return this.setupCallCleanup(args[0]!, args[1]!, args[2]!, f);
+        if (name === "setup_call_cleanup") return this.setupCallCleanup(real(args[0]!), real(args[1]!), real(args[2]!), f);
         if (name === "catch") {
           const h = this.cps.length;
           const cp = this.pushCP(K.Catch, f.next, f.cb, f.cc);
-          cp.catcher = args[1]!;
+          cp.catcher = real(args[1]!);
           cp.recovery = args[2]!;
-          this.goals = new Frame(args[0]!, f.next, h + 1, h);
+          cp.recVars = vars;
+          this.goals = new Frame(args[0]!, new Frame(mkStruct("$catch_exit", h), f.next, f.cb, f.cc), h + 1, h, vars);
           return true;
         }
         break;
     }
+    if (vars !== null) args = args.map((a) => this.inst(a, vars));
     if (name === "call" && args.length > 1) {
       const goal = addArgs(args[0]!, args.slice(1));
       this.goals = new Frame(goal, f.next, this.cps.length, f.cc);
@@ -844,25 +924,36 @@ export class Machine {
     return true;
   }
 
-  private disjunction(left: Term, right: Term, f: Frame): boolean {
-    const l = deref(left);
+  private disjunction(left: Term, right: Term, f: Frame, vars: Vars): boolean {
+    let l: Term = left;
+    let lv = vars;
+    if (lv !== null) {
+      if (l instanceof Slot) {
+        l = deref(lv[l.i]!);
+        lv = null;
+      } else if (l instanceof Ground) {
+        l = l.t;
+        lv = null;
+      }
+    } else l = deref(l);
     if (l instanceof Struct && l.args.length === 2 && (l.name === "->" || l.name === "*->")) {
       const h = this.cps.length;
       const soft = l.name === "*->";
       const cp = this.pushCP(soft ? K.Soft : K.Alt, f.next, f.cb, f.cc);
-      cp.alt = new Frame(right, f.next, f.cb, f.cc);
+      cp.alt = new Frame(right, f.next, f.cb, f.cc, vars);
       const commit = soft ? mkStruct("$softcut", h) : mkStruct("$cut", h);
       this.goals = new Frame(
         l.args[0]!,
-        new Frame(commit, new Frame(l.args[1]!, f.next, f.cb, f.cc), f.cb, f.cc),
+        new Frame(commit, new Frame(l.args[1]!, f.next, f.cb, f.cc, lv), f.cb, f.cc),
         h + 1,
         f.cc,
+        lv,
       );
       return true;
     }
     const cp = this.pushCP(K.Alt, f.next, f.cb, f.cc);
-    cp.alt = new Frame(right, f.next, f.cb, f.cc);
-    this.goals = new Frame(left, f.next, f.cb, f.cc);
+    cp.alt = new Frame(right, f.next, f.cb, f.cc, vars);
+    this.goals = new Frame(l, f.next, f.cb, f.cc, lv);
     return true;
   }
 

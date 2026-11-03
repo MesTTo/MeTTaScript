@@ -421,6 +421,30 @@ export function installBuiltins(m: Machine): void {
   def("cyclic_term", 1, det(() => false));
   def("acyclic_term", 1, det(() => true));
 
+  // attributed variables
+  def("put_attr", 3, det((m2, [v, mod, val]) => {
+    const d = deref(v!);
+    if (!(d instanceof Var)) throw new PrologError(mkStruct("error", mkStruct("uninstantiation_error", d), mkVar()));
+    m2.putAttr(d, atomArg(mod!), val!);
+    return true;
+  }));
+  def("get_attr", 3, det((m2, [v, mod, val]) => {
+    const d = deref(v!);
+    if (!(d instanceof Var) || d.attrs === null) return false;
+    const a = d.attrs.get(atomArg(mod!));
+    return a !== undefined && m2.unify(val!, a);
+  }));
+  def("del_attr", 2, det((m2, [v, mod]) => {
+    const d = deref(v!);
+    if (d instanceof Var) m2.delAttr(d, atomArg(mod!));
+    return true;
+  }));
+  def("attvar", 1, det((_, [v]) => {
+    const d = deref(v!);
+    return d instanceof Var && d.attrs !== null && d.attrs.size > 0;
+  }));
+  def("term_attvars", 2, det((m2, [t, l]) => m2.unify(l!, mkList(collectVars(t!).filter((v) => v.attrs !== null && v.attrs.size > 0)))));
+
   // unification and comparison
   def("=", 2, det((m2, [a, b]) => m2.unify(a!, b!)));
   def("\\=", 2, det((m2, [a, b]) => {

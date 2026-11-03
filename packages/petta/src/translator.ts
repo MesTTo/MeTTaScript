@@ -89,9 +89,37 @@ export function specialForm(head: Term, nargs: number): string | null {
 }
 
 export class Translator {
+  /** Variables of the source form being translated (current_unified_source_variable/1). */
+  private sourceVars = new Set<Var>();
   constructor(private readonly p: Petta) {}
 
+  /** Translate a runnable's expression with its source variables known. */
+  runnable(e: Term): Tr {
+    const saved = this.sourceVars;
+    this.sourceVars = new Set(collectVars(e));
+    try {
+      return this.expr(mkList(["collapse", e]));
+    } finally {
+      this.sourceVars = saved;
+    }
+  }
+
+  /**
+   * build_isolated_branch/4: an if arm whose value is a source variable emits Out = Val instead of aliasing
+   * it to the output at compile time, which would also bind every other use of that variable.
+   */
+  private buildIsolatedBranch(con: Term, val: Term, out: Term): Term {
+    const v = deref(val);
+    if (isVar(v) && this.sourceVars.has(v)) {
+      const k = this.p.types.knownOf(v);
+      if (k !== undefined) this.p.types.addKnown(out, k);
+      return deref(con) === "true" ? S("=", out, v) : S(",", con, S("=", out, v));
+    }
+    return this.buildBranch(con, val, out);
+  }
+
   private unify(a: Term, b: Term): void {
+    this.p.types.mergeKnown(a, b);
     if (!this.p.m.unify(a, b)) throw new Error("translator: compile-time unification failed");
   }
 
@@ -369,7 +397,7 @@ export class Translator {
         const [preC, condGoal] = this.ifCond(T[0]!);
         const [conT, tv] = this.toConj(T[1]!);
         const out = mkVar();
-        const bt = this.buildBranch(conT, tv, out);
+        const bt = this.buildIsolatedBranch(conT, tv, out);
         const ite = S("->", condGoal, bt);
         return [[...gsH, preC === "true" ? ite : S(",", preC, ite)], out];
       }
@@ -377,9 +405,9 @@ export class Translator {
         const [preC, condGoal] = this.ifCond(T[0]!);
         const out = mkVar();
         const [conT, tv] = this.toConj(T[1]!);
-        const bt = this.buildBranch(conT, tv, out);
+        const bt = this.buildIsolatedBranch(conT, tv, out);
         const [conE, ev] = this.toConj(T[2]!);
-        const be = this.buildBranch(conE, ev, out);
+        const be = this.buildIsolatedBranch(conE, ev, out);
         const ite = S(";", S("->", condGoal, bt), be);
         return [[...gsH, preC === "true" ? ite : S(",", preC, ite)], out];
       }
@@ -419,6 +447,8 @@ export class Translator {
       case "let_bind": {
         const [gp, pv] = this.expr(T[0]!);
         const [gv, v] = this.expr(T[1]!);
+        const vt = this.p.types.valueType(v);
+        if (vt !== undefined) this.p.types.bindPattern(pv, vt);
         const [gi, out] = this.expr(T[2]!);
         return [[...gsH, S("=", pv, v), ...gp, ...gv, ...gi], out];
       }
@@ -527,14 +557,20 @@ export class Translator {
         return [gsH, out];
       }
       case "typed_space_update": {
+        const sp = deref(T[0]!);
+        if (typeof sp === "string") this.p.checkTypedSpaceValue(sp, T[1]!);
         const [g1, s] = this.expr(T[0]!);
         const out = mkVar();
         return [[...gsH, ...g1, new Struct(hv, [s, T[1]!, out])], out];
       }
       case "typed_space_match": {
         const [g1, s] = this.expr(T[0]!);
+        const sp = deref(T[0]!);
+        let pattern: Term = T[1]!;
+        let patternGoals: Goals = [];
+        if (typeof sp === "string" && this.p.m.solveOnce(S("declared_space_type", sp, mkVar()))) [pattern, patternGoals] = this.constrainTypedSpaceArgs(pattern);
         const [gsB, out] = this.expr(T[2]!);
-        return [[...gsH, ...g1, S("match", s, T[1]!, out, out), ...gsB], out];
+        return [[...gsH, ...g1, S("match", s, pattern, out, out), ...patternGoals, ...gsB], out];
       }
       case "translate_predicate": {
         const e = listToArray(deref(T[0]!));
@@ -548,7 +584,8 @@ export class Translator {
         const f = deref(e[0]!) as string;
         const [gs, outs] = this.args(e.slice(1));
         const out = mkVar();
-        return [[...gsH, ...gs, new Struct(f, [...outs, out])], out];
+        const guards = this.manualDispatchChecks(f, outs, out);
+        return [[...gsH, ...gs, ...guards, new Struct(f, [...outs, out])], out];
       }
       case "dynamic_reduce": {
         const e = deref(T[0]!);
@@ -557,7 +594,9 @@ export class Translator {
         const items = listToArray(e);
         if (items === null || items.length === 0) return null;
         const [gs, outs] = this.args(items.slice(1));
-        return [[...gsH, ...gs, S("reduce", mkList([items[0]!, ...outs]), out)], out];
+        const f0 = deref(items[0]!);
+        const guards = typeof f0 === "string" ? this.manualDispatchChecks(f0, outs, out) : [];
+        return [[...gsH, ...gs, ...guards, S("reduce", mkList([items[0]!, ...outs]), out)], out];
       }
       case "eval_source": {
         const a = deref(T[0]!);
@@ -574,8 +613,10 @@ export class Translator {
         return [[...gsH, ...gsE], out];
       }
       case "type_ascription": {
-        const [gsE, out] = this.expr(T[1]!);
-        return [[...gsH, ...gsE], out];
+        const [gsE, out0] = this.expr(T[1]!);
+        const tn = this.p.types.normalize(T[0]!);
+        const gsA = this.p.types.ascribe(out0, tn);
+        return [[...gsH, ...gsE, ...gsA], out0];
       }
       case "quote":
         return [gsH, T[0]!];
@@ -595,6 +636,15 @@ export class Translator {
       }
     }
     return null;
+  }
+
+  /** manual_dispatch_arg_checks_status/5: a uniquely declared callee's arguments are checked as at a call. */
+  private manualDispatchChecks(f: string, avs: Term[], out: Term): Goals {
+    const decls = this.p.types.declsArity(f, avs.length);
+    if (decls.length !== 1) return [];
+    const guards = this.p.types.callGuards(f, avs, decls[0]!.args);
+    this.p.types.addKnown(out, decls[0]!.out);
+    return guards;
   }
 
   /** translate_if_cond/3: a reified builtin comparison feeding only the condition becomes the native test. */
@@ -670,6 +720,39 @@ export class Translator {
     return [mkList(outs), goals];
   }
 
+  /**
+   * constrain_typed_space_args/3: in a schema-backed space pattern, a functional pattern whose function has a
+   * single det declaration of that arity is an exact-one inverse constraint run after the match; cons
+   * patterns become list cells.
+   */
+  private constrainTypedSpaceArgs(x: Term): [Term, Goals] {
+    const d = deref(x);
+    if (d instanceof Var || isAtomic(d)) return [d, []];
+    const items = listToArray(d);
+    if (items === null) return [d, []];
+    if (items.length === 3 && deref(items[0]!) === "cons") {
+      const [a1, g1] = this.constrainTypedSpaceArgs(items[1]!);
+      const [b1, g2] = this.constrainTypedSpaceArgs(items[2]!);
+      return [new Cons(a1, b1), [...g1, ...g2]];
+    }
+    const f = deref(items[0]!);
+    if (typeof f === "string" && f !== "cons" && this.p.isFun(f)) {
+      const decls = this.p.types.declsArity(f, items.length - 1);
+      if (decls.length === 1 && decls[0]!.det === "det") {
+        const [gs, v] = this.expr(d);
+        return [v, gs];
+      }
+    }
+    const outs: Term[] = [];
+    const goals: Goals = [];
+    for (const it of items) {
+      const [o, g] = this.constrainTypedSpaceArgs(it);
+      outs.push(o);
+      goals.push(...g);
+    }
+    return [mkList(outs), goals];
+  }
+
   // ---- calls ----
 
   /** translate_typed_call/6. */
@@ -683,8 +766,10 @@ export class Translator {
       const out = mkVar();
       if (decls.length === 1) {
         const d = decls[0]!;
+        this.p.types.resolveDecl(avs, d.args);
         const guards = this.p.types.callGuards(fun, avs, d.args);
         const inner = [...gsH, ...gsT, ...guards];
+        this.p.types.addKnown(out, d.out);
         const arith = this.arithInline(fun, avs, out);
         if (arith !== null) return [[...inner, ...arith], out];
         return [this.buildCallOrPartial(fun, avs, out, inner, []), out];
@@ -758,6 +843,16 @@ export class Translator {
    * eta-expanded into extra head arguments. Returns the clause term.
    */
   clause(input: Term, constrain = true): Term {
+    const saved = this.sourceVars;
+    this.sourceVars = new Set(collectVars(input));
+    try {
+      return this.clauseCore(input, constrain);
+    } finally {
+      this.sourceVars = saved;
+    }
+  }
+
+  private clauseCore(input: Term, constrain: boolean): Term {
     const items = listToArray(deref(input))!;
     const headItems = listToArray(deref(items[1]!))!;
     const f = deref(headItems[0]!) as string;
@@ -774,6 +869,7 @@ export class Translator {
       }
     }
     this.p.addFunMeta(f, args1, body, prefix.length === 0 ? "clean" : "head_goals");
+    const decl = this.p.types.bindParamTypes(f, args1);
     const [goalsBody, expOut0] = this.p.types.declaredBody(f, args1.length, body);
     const expOut = deref(expOut0);
     let headArgs = args1;
@@ -797,7 +893,8 @@ export class Translator {
     const head = new Struct(f, [...headArgs, out]);
     this.p.noteArity(f, headArgs.length + 1);
     const commit = this.p.clauseCommitCut(f, args1.length) ? ["!"] : [];
-    const bodyGoals = [...prefix, ...commit, ...finalGoals];
+    const outChecks = headArgs === args1 ? this.p.types.clauseOutputGoals(decl, out, body) : [];
+    const bodyGoals = [...prefix, ...commit, ...finalGoals, ...outChecks];
     return bodyGoals.length === 0 ? head : S(":-", head, conj(bodyGoals));
   }
 }

@@ -316,6 +316,14 @@ export class Petta {
     }
   }
 
+  /** typed_space_runtime_value_ok/2: a (SpaceOf Row) space rejects a row that definitely contradicts Row. */
+  checkTypedSpaceValue(space: string, value: Term): void {
+    const rowT = mkVar();
+    if (!this.m.solveOnce(S("declared_space_type", space, rowT))) return;
+    if (this.m.solveOnce(S("value_definitely_mismatch", value, rowT)))
+      throw new PrologError(S("error", S("literal_type_mismatch", copyTerm(value), deref(rowT)), "typecheck"));
+  }
+
   /** 'add-atom'/3. */
   addAtom(space: string, term: Term): void {
     const t = deref(term);
@@ -332,6 +340,7 @@ export class Petta {
         return;
       }
     }
+    this.checkTypedSpaceValue(space, t);
     this.addSexp(space, t);
   }
 
@@ -378,6 +387,7 @@ export class Petta {
         return removed.length > 0;
       }
     }
+    this.checkTypedSpaceValue(space, t);
     this.removeSexp(space, t);
     return true;
   }
@@ -466,7 +476,7 @@ export class Petta {
         this.addSexp(space, p.term);
         if (mode === "compile_functions") this.compileAndAssert(p.term, "function");
       } else {
-        const [goals, out] = this.translator.expr(mkList(["collapse", p.term]));
+        const [goals, out] = this.translator.runnable(p.term);
         if (!this.m.solveOnce(conj(goals))) continue;
         const r = listToArray(out);
         if (r !== null) results.push(...r);

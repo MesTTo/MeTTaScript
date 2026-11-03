@@ -54,6 +54,12 @@ function formalText(f: Term): string {
       return `Arrows are prefix - write (-[det]-> A B), not (A -[det]-> B) - in the declaration of ${p(a[0]!)}: ${p(a[1]!)}`;
     case "strict_runtime_typecheck/2":
       return `Strict mode rejected residual runtime type goal in ${p(a[0]!)}: ${p(a[1]!)}`;
+    case "space_schema_row_mismatch/3":
+      return `SpaceOf declaration for ${p(a[0]!)} rejects existing row ${p(a[1]!)}: it definitely contradicts schema ${p(a[2]!)}`;
+    case "unbound_det_argument/2":
+      return `Argument of ${p(a[0]!)} is unbound: a -[${w(a[1]!)}]-> function requires bound arguments`;
+    case "det_argument_not_proper_list/2":
+      return `Argument of ${p(a[0]!)} is not a proper list: its -[${w(a[1]!)}]-> proof requires a bound proper list`;
     case "strict_missing_function_type/2":
       return `Strict mode requires a declared or inferable type for ${p(a[0]!)}/${p(a[1]!)}`;
     case "type_error/2":

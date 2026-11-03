@@ -164,6 +164,28 @@ partition(Pred, List, Less, Equal, Greater) :- '$partition5'(List, Pred, Less, E
 '$partition5_'(<, H, Pred, T, [H|L], E, G) :- '$partition5'(T, Pred, L, E, G).
 '$partition5_'(=, H, Pred, T, L, [H|E], G) :- '$partition5'(T, Pred, L, E, G).
 '$partition5_'(>, H, Pred, T, L, E, [H|G]) :- '$partition5'(T, Pred, L, E, G).
+add_to_heap(heap(Q0,M),P,X,heap(Q1,N)) :- '$heap_meld'(Q0,t(X,P,[]),Q1), N is M+1.
+delete_from_heap(Q0,P,X,Q) :- get_from_heap(Q0,P,X,Q), !.
+delete_from_heap(Q0,Px,X,Q) :- get_from_heap(Q0,Py,Y,Q1), delete_from_heap(Q1,Px,X,Q2), add_to_heap(Q2,Py,Y,Q).
+empty_heap(heap(nil,0)).
+singleton_heap(heap(t(X,P,[]), 1), P, X).
+get_from_heap(heap(t(X,P,Sub),M), P, X, heap(Q,N)) :- '$heap_pairing'(Sub,Q), N is M-1.
+heap_size(heap(_,N),N).
+heap_to_list(Q,L) :- '$heap_to_list'(Q,L).
+'$heap_to_list'(heap(nil,0),[]) :- !.
+'$heap_to_list'(Q0,[P-X|Xs]) :- get_from_heap(Q0,P,X,Q), heap_to_list(Q,Xs).
+list_to_heap(Xs,Q) :- empty_heap(Empty), '$list_to_heap'(Xs,Empty,Q).
+'$list_to_heap'([],Q,Q).
+'$list_to_heap'([P-X|Xs],Q0,Q) :- add_to_heap(Q0,P,X,Q1), '$list_to_heap'(Xs,Q1,Q).
+min_of_heap(heap(t(X,P,_),_), P, X).
+min_of_heap(Q,Px,X,Py,Y) :- get_from_heap(Q,Px,X,Q0), min_of_heap(Q0,Py,Y).
+merge_heaps(heap(L,K),heap(R,M),heap(Q,N)) :- '$heap_meld'(L,R,Q), N is K+M.
+'$heap_meld'(nil,Q,Q) :- !.
+'$heap_meld'(Q,nil,Q) :- !.
+'$heap_meld'(L,R,Q) :- L = t(X,Px,SubL), R = t(Y,Py,SubR), ( Px @< Py -> Q = t(X,Px,[R|SubL]) ; Q = t(Y,Py,[L|SubR]) ).
+'$heap_pairing'([], nil).
+'$heap_pairing'([Q], Q) :- !.
+'$heap_pairing'([Q0,Q1|Qs], Q) :- '$heap_meld'(Q0, Q1, Q2), '$heap_pairing'(Qs, Q3), '$heap_meld'(Q2, Q3, Q).
 bagof(T, G, L) :- '$free_variable_set'(T^G, G1, W), ( W == v -> findall(T, G1, L), L \== [] ; findall(W-T, G1, Pairs), Pairs \== [], '$bagof_groups'(Pairs, W, L) ).
 setof(T, G, S) :- bagof(T, G, L), sort(L, S).
 '$bagof_groups'(Pairs, W, L) :- keysort(Pairs, Sorted), '$pick_groups'(Sorted, Groups), member(W-L, Groups).
