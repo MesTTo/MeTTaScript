@@ -96,15 +96,19 @@ export class Pred {
     this.live++;
   }
 
-  remove(c: Clause, gen: number): void {
+  remove(c: Clause, gen: number, compact = true): void {
     if (c.died !== Infinity) return;
     c.died = gen;
     this.live--;
     // Compact once dead clauses dominate; running calls keep the old array.
-    if (this.clauses.length > 32 && this.live * 2 < this.clauses.length) {
+    if (compact && this.clauses.length > 32 && this.live * 2 < this.clauses.length) {
       this.clauses = this.clauses.filter((x) => x.died === Infinity);
       this.indexes = null;
     }
+  }
+
+  resetIndexes(): void {
+    this.indexes = null;
   }
 
   /**
@@ -132,10 +136,48 @@ export class Pred {
   }
 }
 
+/** The clauses one open transaction added and removed, for rollback. */
+interface TxLog {
+  readonly added: Clause[];
+  readonly removed: Clause[];
+}
+
 export class Database {
   readonly preds = new Map<string, Pred>();
   generation = 0;
   private seq = 0;
+  private readonly tx: TxLog[] = [];
+
+  beginTransaction(): void {
+    this.tx.push({ added: [], removed: [] });
+  }
+
+  /** Commit the innermost transaction into its parent, or drop its log at top level. */
+  commitTransaction(): void {
+    const log = this.tx.pop()!;
+    const parent = this.tx[this.tx.length - 1];
+    if (parent !== undefined) {
+      parent.added.push(...log.added);
+      parent.removed.push(...log.removed);
+    }
+  }
+
+  /** Undo the innermost transaction: retract what it added, revive what it removed. */
+  rollbackTransaction(): void {
+    const log = this.tx.pop()!;
+    const gen = ++this.generation;
+    for (const c of log.added) c.pred.remove(c, gen, false);
+    for (const c of log.removed) {
+      if (c.died === Infinity) continue;
+      c.died = Infinity;
+      c.pred.live++;
+      if (!c.pred.clauses.includes(c)) {
+        const arr = [...c.pred.clauses, c].sort((a, b) => a.seq - b.seq);
+        c.pred.clauses = arr;
+      }
+      c.pred.resetIndexes();
+    }
+  }
 
   get(name: string, arity: number): Pred | undefined {
     return this.preds.get(name + "/" + arity);
@@ -155,11 +197,14 @@ export class Database {
   addClause(pred: Pred, head: Term, body: Term, nvars: number, atEnd: boolean): Clause {
     const c = new Clause(pred, head, body, nvars, ++this.generation, this.seq++);
     pred.add(c, atEnd);
+    this.tx[this.tx.length - 1]?.added.push(c);
     return c;
   }
 
   retractClause(c: Clause): void {
-    c.pred.remove(c, ++this.generation);
+    const intx = this.tx.length > 0;
+    if (c.died === Infinity && intx) this.tx[this.tx.length - 1]!.removed.push(c);
+    c.pred.remove(c, ++this.generation, !intx);
   }
 }
 

@@ -112,6 +112,22 @@ export class Petta {
     if (opts.err) m.err = opts.err;
     if (opts.readLine) m.readLine = opts.readLine;
     m.flags.set("argv", mkList(argv));
+    // SWI-Prolog's flags that libraries read (current_prolog_flag/2).
+    for (const [k, v] of [
+      ["bounded", "false"],
+      ["max_arity", "unbounded"],
+      ["max_tagged_integer", 1152921504606846975],
+      ["min_tagged_integer", -1152921504606846976],
+      ["double_quotes", "codes"],
+      ["unknown", "error"],
+      ["occurs_check", "false"],
+      ["version", 100120],
+      ["dialect", "swi"],
+      ["encoding", "utf8"],
+      ["prefer_rationals", "false"],
+      ["iso", "false"],
+    ] as [string, Term][])
+      m.flags.set(k, v);
     installBuiltins(m);
     installLibrary(m);
     installConsult(m);
@@ -323,6 +339,11 @@ export class Petta {
   removeAtom(space: string, term: Term): boolean {
     const t = deref(term);
     const items = listToArray(t);
+    // spaces.pl: Term = [=,[F|_],_] with F unbound must not erase program rows.
+    if (items !== null && items.length === 3 && deref(items[0]!) === "=") {
+      const h0 = deref(items[1]!);
+      if (h0 instanceof Var || (h0 instanceof Cons && deref(h0.head) instanceof Var)) throw instantiationError();
+    }
     if (items !== null && items.length === 3 && deref(items[0]!) === "=") {
       const head = listToArray(deref(items[1]!));
       const f = head !== null && head.length > 0 ? deref(head[0]!) : null;
@@ -537,8 +558,8 @@ export class Petta {
         return true;
       },
     });
-    det("add-atom", 3, ([s, t, out]) => (this.addAtom(textOfTerm(s!), t!), m.unify(out!, "true")));
-    det("remove-atom", 3, ([s, t, out]) => m.unify(out!, this.removeAtom(textOfTerm(s!), t!) ? "true" : "false"));
+    det("add-atom", 3, ([s, t, out]) => (this.addAtom(spaceName(s!), t!), m.unify(out!, "true")));
+    det("remove-atom", 3, ([s, t, out]) => m.unify(out!, this.removeAtom(spaceName(s!), t!) ? "true" : "false"));
     det("add_sexp", 2, ([s, t]) => (this.addSexp(textOfTerm(s!), t!), true));
     det("remove_sexp", 2, ([s, t]) => (this.removeSexp(textOfTerm(s!), t!), true));
     det("$space_arities", 2, ([s, out]) => {
@@ -599,6 +620,14 @@ export class Petta {
     const lines = all.map((r) => swrite(r)).join("\n");
     if (all.length > 0) this.m.out(lines + "\n");
   }
+}
+
+/** A space argument: must_be(atom, Space), as add_sexp/2 and remove_sexp/2 require. */
+function spaceName(t: Term): string {
+  const d = deref(t);
+  if (typeof d === "string") return d;
+  if (d instanceof Var) throw instantiationError();
+  throw new PrologError(S("error", S("type_error", "atom", d), mkVar()));
 }
 
 export function textOfTerm(t: Term): string {

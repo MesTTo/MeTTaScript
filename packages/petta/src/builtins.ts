@@ -590,6 +590,32 @@ export function installBuiltins(m: Machine): void {
   def("term_variables", 3, det((m2, [t, l, tail]) => m2.unify(l!, mkList(collectVars(t!), tail!))));
   def("setarg", 3, det((m2, [n, t, v]) => setArg(m2, n!, t!, v!, true)));
   def("nb_setarg", 3, det((m2, [n, t, v]) => setArg(m2, n!, t!, copyTerm(v!), false)));
+  // findnsols/4: the first chunk of at most N solutions (the call sites here use only the first chunk).
+  def("findnsols", 4, det((m2, [n, t, g, l]) => {
+    const limit = intArg(n!);
+    const out: Term[] = [];
+    if (limit > 0) m2.solveAll(g!, () => (out.push(copyTerm(t!)), out.length < limit));
+    return m2.unify(l!, mkList(out));
+  }));
+  // term_size/2: cells on SWI's 64-bit global stack: 0 for atoms and small integers, 3 for a float, 2 plus the
+  // words of a string (one byte per character and a terminator), header, size, limbs and footer for a big
+  // integer, and one cell per functor and argument of a compound.
+  def("term_size", 2, det((m2, [t, sz]) => {
+    const go = (x: Term): number => {
+      x = deref(x);
+      if (x instanceof Float) return 3;
+      if (x instanceof Str) return 2 + Math.ceil((Buffer.byteLength(x.s, "latin1") + 1) / 8);
+      if (typeof x === "bigint") {
+        const bits = (x < 0n ? -x : x).toString(2).length;
+        return 3 + Math.ceil(bits / 64);
+      }
+      if (typeof x === "number" && !Number.isSafeInteger(x)) return 3;
+      if (x instanceof Cons) return 3 + go(x.head) + go(x.tail);
+      if (x instanceof Struct) return 1 + x.args.length + x.args.reduce((a: number, y) => a + go(y), 0);
+      return 0;
+    };
+    return m2.unify(sz!, go(t!));
+  }));
   def("term_hash", 2, det((m2, [t, h]) => (isGround(t!) ? m2.unify(h!, hashString(writeTerm(t!, { quoted: true }))) : true)));
   def("variant_hash", 2, det((m2, [t, h]) => m2.unify(h!, hashString(variantKey(t!)))));
   def("numbervars", 3, det((m2, [t, s, e]) => {
@@ -1123,33 +1149,6 @@ export function installBuiltins(m: Machine): void {
   }));
 
   // control helpers
-  def("setup_call_cleanup", 3, det((m2, [s, g, c]) => {
-    m2.solveOnce(s!);
-    let ok: boolean;
-    try {
-      ok = m2.solveOnce(g!);
-    } finally {
-      try {
-        m2.solveOnce(c!);
-      } catch {
-        // cleanup errors are ignored, as SWI prints and continues
-      }
-    }
-    return ok;
-  }));
-  def("call_cleanup", 2, det((m2, [g, c]) => {
-    let ok: boolean;
-    try {
-      ok = m2.solveOnce(g!);
-    } finally {
-      try {
-        m2.solveOnce(c!);
-      } catch {
-        // ignored
-      }
-    }
-    return ok;
-  }));
   def("halt", 1, det((_, [s]) => {
     throw new Halt(intArg(s!));
   }));
@@ -1188,9 +1187,19 @@ export function installBuiltins(m: Machine): void {
     m2.pushGoal(mkStruct("once", g!));
     return true;
   }));
+  // transaction/1: once(Goal); a failure or an exception rolls back the clause changes Goal made.
   def("transaction", 1, det((m2, [g]) => {
-    m2.pushGoal(mkStruct("once", g!));
-    return true;
+    m2.db.beginTransaction();
+    let ok: boolean;
+    try {
+      ok = m2.solveOnce(g!);
+    } catch (e) {
+      m2.db.rollbackTransaction();
+      throw e;
+    }
+    if (ok) m2.db.commitTransaction();
+    else m2.db.rollbackTransaction();
+    return ok;
   }));
   def("catch_with_backtrace", 3, det((m2, [g, c, r]) => {
     m2.pushGoal(mkStruct("catch", g!, c!, r!));

@@ -50,6 +50,7 @@ const enum K {
   Not,
   Soft,
   Barrier,
+  Cleanup,
 }
 
 class CP {
@@ -219,8 +220,23 @@ export class Machine {
 
   cutTo(h: number): void {
     if (this.cps.length > h) {
+      let cleanups: Term[] | null = null;
+      for (let i = this.cps.length - 1; i >= h; i--) {
+        const cp = this.cps[i]!;
+        if (cp.kind === K.Cleanup) (cleanups ??= []).push(cp.recovery);
+      }
       this.cps.length = h;
       this.trailBoundary = h > 0 ? this.cps[h - 1]!.varMark : 0;
+      if (cleanups !== null) for (const c of cleanups) this.runCleanup(c);
+    }
+  }
+
+  /** Run a setup_call_cleanup cleanup goal once; its failure or error does not affect the caller. */
+  private runCleanup(goal: Term): void {
+    try {
+      this.solveOnce(goal);
+    } catch (e) {
+      if (!(e instanceof PrologError)) throw e;
     }
   }
 
@@ -503,6 +519,11 @@ export class Machine {
           cps.pop();
           this.trailBoundary = cps.length > 0 ? cps[cps.length - 1]!.varMark : 0;
           break;
+        case K.Cleanup:
+          cps.pop();
+          this.trailBoundary = cps.length > 0 ? cps[cps.length - 1]!.varMark : 0;
+          this.runCleanup(cp.recovery);
+          break;
         case K.Barrier:
           // Never popped here: the barrier belongs to the run that called this one.
           return false;
@@ -638,6 +659,17 @@ export class Machine {
           this.cutTo(deref(args[0]!) as number);
           return false;
         }
+        if (name === "$scc_exit") {
+          // A determinate exit (nothing left above the cleanup choicepoint) runs the cleanup now.
+          const h = deref(args[0]!) as number;
+          const cp = this.cps[h];
+          if (cp !== undefined && cp.kind === K.Cleanup && this.cps.length === h + 1) {
+            this.cps.pop();
+            this.trailBoundary = this.cps.length > 0 ? this.cps[this.cps.length - 1]!.varMark : 0;
+            this.runCleanup(cp.recovery);
+          }
+          return true;
+        }
         if (name === "$fa_collect") {
           const cp = this.cps[deref(args[0]!) as number]!;
           cp.results!.push(copyTerm(cp.template));
@@ -695,6 +727,7 @@ export class Machine {
           this.goals = new Frame(args[0]!, new Frame(args[1]!, f.next, f.cb, f.cc), this.cps.length, f.cc);
           return true;
         }
+        if (name === "call_cleanup") return this.setupCallCleanup("true", args[0]!, args[1]!, f);
         if (name === "forall") {
           const g2 = mkStruct("\\+", mkStruct(",", args[0]!, mkStruct("\\+", args[1]!)));
           this.goals = new Frame(g2, f.next, f.cb, f.cc);
@@ -711,6 +744,7 @@ export class Machine {
           this.goals = new Frame(args[1]!, new Frame(mkStruct("$fa_collect", h), null, h + 1, f.cc), h + 1, f.cc);
           return true;
         }
+        if (name === "setup_call_cleanup") return this.setupCallCleanup(args[0]!, args[1]!, args[2]!, f);
         if (name === "catch") {
           const h = this.cps.length;
           const cp = this.pushCP(K.Catch, f.next, f.cb, f.cc);
@@ -800,6 +834,16 @@ export class Machine {
     return true;
   }
 
+  /** setup_call_cleanup/3: Setup once, Goal as often as it succeeds, Cleanup once when Goal is finished. */
+  private setupCallCleanup(setup: Term, goal: Term, cleanup: Term, f: Frame): boolean {
+    if (!this.solveOnce(setup)) return false;
+    const h = this.cps.length;
+    const cp = this.pushCP(K.Cleanup, f.next, f.cb, f.cc);
+    cp.recovery = copyTerm(cleanup, new Map(collectVarsOf(cleanup).map((v) => [v, v])));
+    this.goals = new Frame(goal, new Frame(mkStruct("$scc_exit", h), f.next, f.cb, f.cc), h + 1, f.cc);
+    return true;
+  }
+
   private disjunction(left: Term, right: Term, f: Frame): boolean {
     const l = deref(left);
     if (l instanceof Struct && l.args.length === 2 && (l.name === "->" || l.name === "*->")) {
@@ -826,6 +870,21 @@ export class Machine {
   pushGoal(goal: Term): void {
     this.goals = new Frame(goal, this.goals, this.cps.length, this.curCC);
   }
+}
+
+function collectVarsOf(t: Term): Var[] {
+  const out: Var[] = [];
+  const go = (x: Term): void => {
+    x = deref(x);
+    if (x instanceof Var) {
+      if (!out.includes(x)) out.push(x);
+    } else if (x instanceof Cons) {
+      go(x.head);
+      go(x.tail);
+    } else if (x instanceof Struct) x.args.forEach(go);
+  };
+  go(t);
+  return out;
 }
 
 /** A string identifying a term up to variable renaming, for table keys. */
