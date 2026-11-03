@@ -337,6 +337,23 @@ export class Types {
     pi.forEach((x, i) => this.bindPattern(x, ti[i]!));
   }
 
+  /** type_unify/2 in place, undone when it fails. */
+  private unifyTypes(k: Term, t: Term): boolean {
+    const m = this.p.m;
+    const mark = m.trailMark();
+    if (m.solveOnce(S("type_unify", k, t))) return true;
+    m.undoTo(mark);
+    return false;
+  }
+
+  /** begin_clause_inference/4: an undeclared function's untyped parameters get open assumption types. */
+  assumeParamTypes(args: Term[]): void {
+    for (const a of args) {
+      const d = deref(a);
+      if (d instanceof Var && this.knownOf(d) === undefined) this.addKnown(d, mkVar());
+    }
+  }
+
   /** type_unify/2 on copies: whether the known type fits the required one. */
   private fits(k: Term, t: Term): boolean {
     const m = this.p.m;
@@ -469,7 +486,8 @@ export class Types {
         const T = deref(t);
         if (T instanceof Var || isWildcard(T)) return;
         const k = this.knownOf(v);
-        if (k !== undefined && this.fits(k, T)) return;
+        // type_unify(K, T) in place: an open assumption or declaration variable takes the required type.
+        if (k !== undefined && this.unifyTypes(k, T)) return;
         gs.push(guardGoal(v, T));
         return;
       }

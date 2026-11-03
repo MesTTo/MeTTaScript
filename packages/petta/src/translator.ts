@@ -876,6 +876,7 @@ export class Translator {
     }
     this.p.addFunMeta(f, args1, body, prefix.length === 0 ? "clean" : "head_goals");
     const decl = this.p.types.bindParamTypes(f, args1);
+    if (decl === undefined && this.p.types.declsArity(f, args1.length).length === 0) this.p.types.assumeParamTypes(args1);
     const [goalsBody, expOut0] = this.p.types.declaredBody(f, args1.length, body);
     const expOut = deref(expOut0);
     let headArgs = args1;
