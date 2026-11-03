@@ -19,9 +19,11 @@ const { readClauses, writeTerm, deref } = await import(join(root, "packages/pett
 const petta = resolve(process.argv[2] ?? join(root, "ai-tmp/PeTTa"));
 const text = readFileSync(join(petta, "src/typecheck/builtin_registry.pl"), "utf8");
 const facts = [];
+const cards = [];
 for (const c of readClauses(text)) {
   if (c.name !== "builtin_spec" || c.args.length !== 6) continue;
-  const [key, , typing] = c.args.map(deref);
+  const [key, , typing, , card] = c.args.map(deref);
+  if (deref(key.args[1]) !== "variadic") cards.push(`builtin_cardinality(${writeTerm(key.args[0], { quoted: true })}, ${writeTerm(key.args[1])}, ${writeTerm(card.args[0], { quoted: true })}).`);
   const sig = deref(typing.args?.[0]);
   if (typing.name !== "typing" || sig?.name !== "signature") continue;
   const [det, argTypes, outType] = sig.args.map(deref);
@@ -44,7 +46,8 @@ const out = `// SPDX-FileCopyrightText: 2026 MesTTo
 
 export const BUILTIN_SIGNATURES_PL = String.raw\`
 ${facts.join("\n")}
+${cards.join("\n")}
 \`;
 `;
 writeFileSync(join(root, "packages/petta/src/builtin-signatures.ts"), out);
-console.log(`${facts.length} signatures`);
+console.log(`${facts.length} signatures, ${cards.length} cardinalities`);

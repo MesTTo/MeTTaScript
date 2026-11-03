@@ -336,6 +336,11 @@ export class PrologReader {
     return t;
   }
 
+  /** Where the text after the last clause read begins (read_term/3 on a stream advances by it). */
+  offset(): number {
+    return this.tok.pos;
+  }
+
   private advance(): Tok {
     const t = this.tok;
     this.tok = this.lex.next();

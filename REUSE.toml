@@ -72,3 +72,17 @@ path = ["packages/petta/lib/**", "packages/petta/corpus/**"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2025 Patrick Hammer and the PeTTa contributors — PeTTa (https://github.com/trueagi-io/PeTTa)"
 SPDX-License-Identifier = "MIT"
+
+# PeTTa's own Prolog source at ee5cacb, which the hosted engine consults and runs as its semantics.
+[[annotations]]
+path = ["packages/petta/petta-src/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2025 Patrick Hammer and the PeTTa contributors — PeTTa (https://github.com/trueagi-io/PeTTa)"
+SPDX-License-Identifier = "MIT"
+
+# SWI-Prolog 10.1 library sources the hosted engine autoloads; each file keeps its own BSD-2-Clause header.
+[[annotations]]
+path = ["packages/petta/swipl/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "SWI-Prolog authors: University of Amsterdam, VU University Amsterdam, CWI Amsterdam and SWI-Prolog Solutions b.v."
+SPDX-License-Identifier = "BSD-2-Clause"

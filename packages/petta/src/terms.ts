@@ -66,6 +66,14 @@ export function deref(t: Term): Term {
   return t;
 }
 
+/** Module:Term to Term, repeatedly: the machine has one module, so a qualification names nothing. */
+// am[implements a-hp-loader]
+export function unqualify(t: Term): Term {
+  let d = deref(t);
+  while (d instanceof Struct && d.name === ":" && d.args.length === 2) d = deref(d.args[1]!);
+  return d;
+}
+
 export const isAtom = (t: Term): t is string => typeof t === "string";
 export const isInt = (t: Term): t is Int => typeof t === "number" || typeof t === "bigint";
 export const isNumber = (t: Term): boolean => isInt(t) || t instanceof Float;

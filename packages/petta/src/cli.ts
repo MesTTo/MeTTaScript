@@ -3,28 +3,15 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Purpose: the petta command, PeTTa's run.sh and main.pl over the TypeScript engine: leading .metta arguments
-// are files loaded in order, the rest flags (--silent, --strict, --strict-det); results print after the whole
-// load; halt/1 sets the exit status, an uncaught error prints SWI's "ERROR:" report and exits 2. The engine
-// runs in a worker thread whose stack is sized for deep terms, as SWI's stacks are (run.sh gives 8 GB).
-// am[implements a-pe-loader-cli]
+// Purpose: the petta command, PeTTa's run.sh: the arguments become the argv flag that PeTTa's own main.pl reads
+// (leading .metta files loaded in order, then flags such as --silent, --strict, --strict-det), and the hosted
+// engine runs main/0; halt/1 sets the exit status, an uncaught error prints SWI's "ERROR:" report and exits 2.
+// The engine runs in a worker thread whose stack is sized for deep terms, as SWI's stacks are (run.sh gives 8 GB).
+// am[implements a-hp-entry]
 
 import { writeSync } from "node:fs";
 import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
-import { Petta } from "./engine";
-import { errorMessage } from "./messages";
-import { Halt, PrologError } from "./terms";
-
-/** main.pl metta_files/2: leading .metta arguments, else the first argument. */
-function mettaFiles(args: string[]): string[] {
-  const files: string[] = [];
-  for (const a of args) {
-    if (a.endsWith(".metta")) files.push(a);
-    else break;
-  }
-  if (files.length > 0) return files;
-  return args.length > 0 && !["silent", "--silent", "-s"].includes(args[0]!) ? [args[0]!] : [];
-}
+import { HostedPetta } from "./hosted";
 
 function write(fd: number, s: string): void {
   let buf = Buffer.from(s, "utf8");
@@ -40,17 +27,9 @@ function write(fd: number, s: string): void {
 }
 
 function run(args: string[]): number {
-  const petta = new Petta({ argv: args, out: (s) => write(1, s), err: (s) => write(2, s) });
-  const files = mettaFiles(args.filter((a) => !["silent", "--silent", "-s"].includes(a)));
   try {
-    petta.runMain(files);
-    return 0;
+    return new HostedPetta({ argv: args, out: (s) => write(1, s), err: (s) => write(2, s) }).run();
   } catch (e) {
-    if (e instanceof Halt) return e.status;
-    if (e instanceof PrologError) {
-      write(2, "ERROR: " + errorMessage(e.ball, files[0] ?? "") + "\n");
-      return 2;
-    }
     if (e instanceof RangeError) {
       write(2, "ERROR: Stack limit exceeded\n");
       return 2;

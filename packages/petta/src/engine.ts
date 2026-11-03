@@ -17,6 +17,7 @@ import type { Clause } from "./db";
 import { installLibrary } from "./library";
 import { installConsult } from "./consult";
 import { Specializer } from "./specializer";
+import { Det } from "./det";
 import { Machine, copyTerm } from "./machine";
 import { METTA_RUNTIME_PL } from "./metta-runtime";
 import { sread, topForms } from "./metta-reader";
@@ -90,6 +91,8 @@ export class Petta {
   readonly translator = new Translator(this);
   readonly types = new Types(this);
   readonly specializer = new Specializer(this);
+  readonly det = new Det(this);
+  private readonly cardinalities = new Map<string, Term>();
   readonly funs = new Set<string>();
   private readonly arities = new Map<string, number[]>();
   readonly translatorRules = new Set<string>();
@@ -152,6 +155,12 @@ export class Petta {
     // seed_builtin_types: every builtin signature is a declaration from the start.
     for (const c of readClauses(BUILTIN_SIGNATURES_PL)) m.addLibraryClause(c);
     for (const d of this.builtinTypeDeclarations()) this.types.cacheDecl(d[1]!, d[2]!);
+    {
+      const [f, n, c] = [mkVar(), mkVar(), mkVar()];
+      m.solveAll(S("builtin_cardinality", f, n, c), () => {
+        this.cardinalities.set(deref(f) + "/" + deref(n), copyTerm(c));
+      });
+    }
   }
 
   // ---- registry ----
@@ -269,8 +278,14 @@ export class Petta {
     return goal;
   }
 
-  clauseCommitCut(_f: string, _n: number): boolean {
-    return false;
+  /** clause_commit_cut/2: a function declared -[det]-> or -[semidet]-> commits to its first matching clause. */
+  clauseCommitCut(f: string, n: number): boolean {
+    return this.det.committed(f, n);
+  }
+
+  /** builtin_registry.pl's cardinality column for F/N, if the builtin has one. */
+  builtinCardinality(f: string, n: number): Term | undefined {
+    return this.cardinalities.get(f + "/" + n);
   }
 
   addFunMeta(f: string, args: Term[], body: Term, headForm: string): void {

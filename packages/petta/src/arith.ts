@@ -249,6 +249,15 @@ const CONSTANTS: Record<string, () => Num> = {
   min_integer: () => -9223372036854775808n,
 };
 
+/** Every evaluable functor as [name, arity] (current_arithmetic_function/1). */
+export function evaluableFunctors(): [string, number][] {
+  return [
+    ...Object.keys(CONSTANTS).map((n): [string, number] => [n, 0]),
+    ...Object.keys(UNARY).map((n): [string, number] => [n, 1]),
+    ...Object.keys(BINARY).map((n): [string, number] => [n, 2]),
+  ];
+}
+
 /** Evaluate an arithmetic expression as is/2 does. Time: expression size. */
 export function evalArith(t: Term): Num {
   t = deref(t);

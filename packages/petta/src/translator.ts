@@ -915,8 +915,10 @@ export class Translator {
         prefix.push(...g);
       }
     }
+    const prevMetas = this.p.funMetaOf(f) ?? [];
     this.p.addFunMeta(f, args1, body, prefix.length === 0 ? "clean" : "head_goals");
     const decl = this.p.types.bindParamTypes(f, args1);
+    if (constrain) this.p.det.validate(f, args1, body, prevMetas, prefix.length === 0 ? "clean" : "head_goals");
     if (decl === undefined && this.p.types.declsArity(f, args1.length).length === 0) this.p.types.assumeParamTypes(args1);
     const [goalsBody, expOut0] = this.p.types.declaredBody(f, args1.length, body, decl);
     const expOut = deref(expOut0);

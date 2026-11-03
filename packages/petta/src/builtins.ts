@@ -8,7 +8,7 @@
 // Predicates SWI defines in Prolog libraries live in library.ts as Prolog text.
 // am[implements a-pe-swi-builtins]
 
-import { compareNum, evalArith, type Num } from "./arith";
+import { compareNum, evalArith, evaluableFunctors, type Num } from "./arith";
 import { indexKey, Slot } from "./db";
 import { Machine, atomicEq, copyTerm, resolve, type Builtin } from "./machine";
 import { readClauses, PrologReader, OpTable } from "./prolog-reader";
@@ -39,11 +39,13 @@ import {
   representationError,
   textOf,
   typeError,
-  type Term,
+  type Term, unqualify,
 } from "./terms";
 import { quoteAtom, writeTerm } from "./writer";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, extname, isAbsolute, resolve as resolvePath } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
+import { basename, dirname, extname, isAbsolute, join, resolve as resolvePath } from "node:path";
 
 // ---- standard order ----
 
@@ -371,6 +373,14 @@ function sinkText(m: Machine, sink: Term, text: string): boolean {
         return m.unify(s.args[0]!, codes(text));
       case "chars":
         return m.unify(s.args[0]!, chars(text));
+      case "$stream": {
+        const o = m.objectOf(s);
+        if (o instanceof OutStream) {
+          o.write(text);
+          return true;
+        }
+        throw new PrologError(mkStruct("error", mkStruct("permission_error", "output", "stream", s), mkVar()));
+      }
     }
   }
   if (s === "user_error") {
@@ -379,6 +389,80 @@ function sinkText(m: Machine, sink: Term, text: string): boolean {
   }
   m.out(text);
   return true;
+}
+
+/** A readable text stream: open_string/2, or open/3 of a file in read mode, read from `pos` on. */
+// am[implements a-hp-swi-gap]
+export class InStream {
+  constructor(
+    readonly text: string,
+    public pos = 0,
+  ) {}
+  rest(): string {
+    const r = this.text.slice(this.pos);
+    this.pos = this.text.length;
+    return r;
+  }
+  /** read_line_to_string/2: the next line without its newline, or null at the end. */
+  line(): string | null {
+    if (this.pos >= this.text.length) return null;
+    const nl = this.text.indexOf("\n", this.pos);
+    const end = nl < 0 ? this.text.length : nl;
+    const l = this.text.slice(this.pos, end).replace(/\r$/, "");
+    this.pos = nl < 0 ? this.text.length : nl + 1;
+    return l;
+  }
+}
+
+/** A writable file stream: open/3 in write or append mode; each write appends to the file. */
+export class OutStream {
+  constructor(
+    readonly path: string,
+    append: boolean,
+  ) {
+    if (!append) writeFileSync(path, "");
+  }
+  write(s: string): void {
+    appendFileSync(this.path, s);
+  }
+}
+
+function inStreamOf(m: Machine, t: Term): InStream | null {
+  const o = m.objectOf(t);
+  return o instanceof InStream ? o : null;
+}
+
+/** open/3,4: read, write, append and update modes on a file; the stream is a '$stream'(N) handle. */
+function openStream(m: Machine, f: Term, mode: Term, s: Term): boolean {
+  const path = textArg(f);
+  const md = atomArg(mode);
+  let o: InStream | OutStream;
+  if (md === "read") {
+    if (!existsSync(path)) throw existenceError("source_sink", f);
+    o = new InStream(readFileSync(path, "utf8"));
+  } else if (md === "write" || md === "append" || md === "update") o = new OutStream(path, md !== "write");
+  else throw new PrologError(mkStruct("error", mkStruct("domain_error", "io_mode", mode), mkVar()));
+  return m.unify(s, mkStruct("$stream", m.registerObject(o)));
+}
+
+/** expand_file_name/2: ~ and $VAR expanded, then * ? and [..] wildcards matched in the last path segment, sorted. */
+function expandFileName(pattern: string): string[] {
+  const p = pattern.replace(/^~(?=\/|$)/, homedir()).replace(/\$(\w+)/g, (_, v: string) => process.env[v] ?? "");
+  if (!/[*?[]/.test(p)) return [p];
+  const dir = dirname(p);
+  const re = new RegExp(
+    "^" +
+      basename(p)
+        .replace(/[.+^${}()|\\]/g, "\\$&")
+        .replace(/\*/g, ".*")
+        .replace(/\?/g, ".") +
+      "$",
+  );
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir)
+    .filter((n) => re.test(n) && !n.startsWith("."))
+    .sort()
+    .map((n) => (dir === "." && !p.startsWith("./") ? n : join(dir, n)));
 }
 
 // ---- the table ----
@@ -444,14 +528,23 @@ export function installBuiltins(m: Machine): void {
     return d instanceof Var && d.attrs !== null && d.attrs.size > 0;
   }));
   def("term_attvars", 2, det((m2, [t, l]) => m2.unify(l!, mkList(collectVars(t!).filter((v) => v.attrs !== null && v.attrs.size > 0)))));
+  def("del_attrs", 1, det((m2, [v]) => {
+    const d = deref(v!);
+    if (d instanceof Var && d.attrs !== null) for (const mod of [...d.attrs.keys()]) m2.delAttr(d, mod);
+    return true;
+  }));
+  def("get_attrs", 2, det((m2, [v, as]) => {
+    const d = deref(v!);
+    if (!(d instanceof Var) || d.attrs === null || d.attrs.size === 0) return false;
+    let t: Term = "[]";
+    for (const [mod, val] of [...d.attrs].reverse()) t = mkStruct("att", mod, val, t);
+    return m2.unify(as!, t);
+  }));
 
   // unification and comparison
   def("=", 2, det((m2, [a, b]) => m2.unify(a!, b!)));
   def("\\=", 2, det((m2, [a, b]) => {
-    const mark = m2.trailMark();
-    const ok = m2.unify(a!, b!);
-    m2.undoTo(mark);
-    return !ok;
+    return !m2.probeUnify(a!, b!);
   }));
   def("unify_with_occurs_check", 2, det((m2, [a, b]) => m2.unify(a!, b!)));
   def("==", 2, det((_, [a, b]) => termEq(a!, b!)));
@@ -467,10 +560,9 @@ export function installBuiltins(m: Machine): void {
     return m2.unify(o!, c < 0 ? "<" : c > 0 ? ">" : "=");
   }));
   def("subsumes_term", 2, det((m2, [g, s]) => {
-    const mark = m2.trailMark();
     const before = copyTerm(s!);
-    const ok = m2.unify(g!, s!) && variant(before, s!);
-    m2.undoTo(mark);
+    let ok = false;
+    m2.probeUnify(g!, s!, () => (ok = variant(before, s!)));
     return ok;
   }));
 
@@ -595,6 +687,25 @@ export function installBuiltins(m: Machine): void {
     return m2.unify(n!, f) && m2.unify(a!, ar);
   }));
   def("copy_term", 2, det((m2, [a, b]) => m2.unify(b!, copyTerm(a!))));
+  // copy_term(+Term, -Copy, -Gs): Copy without attributes, Gs the goals that would restore them: a module's
+  // attribute_goals//1 when it defines one, else put_attr(V, Module, Value).
+  def("copy_term", 3, det((m2, [a, b, gs]) => {
+    const goals: Term[] = [];
+    for (const v of collectVars(a!)) {
+      if (v.attrs === null) continue;
+      for (const [mod, val] of v.attrs) {
+        const out = mkVar();
+        const viaHook = m2.db.get("$attribute_goals", 4) !== undefined && m2.solveOnce(mkStruct("$attribute_goals", mod, v, out, NIL));
+        if (viaHook) goals.push(...(listToArray(out) ?? []));
+        else goals.push(mkStruct("put_attr", v, mod, val));
+      }
+    }
+    const map = new Map<Var, Var>();
+    const copy = copyTerm(mkList([a!, mkList(goals)]), map);
+    for (const v of map.values()) v.attrs = null;
+    const [c, g] = listToArray(copy)!;
+    return m2.unify(b!, c!) && m2.unify(gs!, g!);
+  }));
   def("copy_term_nat", 2, det((m2, [a, b]) => m2.unify(b!, copyTerm(a!))));
   def("duplicate_term", 2, det((m2, [a, b]) => m2.unify(b!, copyTerm(a!))));
   // copy_term(+VarsIn, +Term, -VarsOut, -TermOut): rename only VarsIn, share the rest.
@@ -611,6 +722,19 @@ export function installBuiltins(m: Machine): void {
     return m2.unify(vo!, conv(vi!)) && m2.unify(to!, conv(t!));
   }));
   def("term_variables", 2, det((m2, [t, l]) => m2.unify(l!, mkList(collectVars(t!)))));
+  // unifiable(X, Y, Unifier): the bindings unifying X and Y, as Var = Value, most recent first; X and Y unchanged.
+  def("unifiable", 3, det((m2, [x, y, u]) => {
+    let pairs: [Var, Term][] = [];
+    if (!m2.probeUnify(x!, y!, (bound) => (pairs = bound.map((v) => [v, v.ref!])))) return false;
+    return m2.unify(u!, mkList(pairs.reverse().map(([v, t]) => mkStruct("=", v, t))));
+  }));
+  // variant_sha1(Term, Hash): a SHA-1 of Term's variant class, here over its writeq with numbered variables.
+  def("variant_sha1", 2, det((m2, [t, h]) => {
+    const c = copyTerm(t!);
+    let n = 0;
+    for (const v of collectVars(c)) v.ref = mkStruct("$VAR", n++);
+    return m2.unify(h!, createHash("sha1").update(writeTerm(c, { quoted: true, numbervars: true })).digest("hex"));
+  }));
   def("term_variables", 3, det((m2, [t, l, tail]) => m2.unify(l!, mkList(collectVars(t!), tail!))));
   def("setarg", 3, det((m2, [n, t, v]) => setArg(m2, n!, t!, v!, true)));
   def("nb_setarg", 3, det((m2, [n, t, v]) => setArg(m2, n!, t!, copyTerm(v!), false)));
@@ -889,8 +1013,28 @@ export function installBuiltins(m: Machine): void {
     return ok && sinkText(m2, sink!, text);
   }));
   def("read_term", 2, det((m2, [t]) => m2.unify(t!, "end_of_file")));
+  def("read_term", 3, det((m2, [s, t]) => {
+    const st = inStreamOf(m2, s!);
+    if (st === null) return m2.unify(t!, "end_of_file");
+    const r = new PrologReader(st.text.slice(st.pos), m2.ops);
+    const c = r.readClause();
+    st.pos += c === null ? st.text.length - st.pos : r.offset();
+    return m2.unify(t!, c ?? "end_of_file");
+  }));
+  def("read_string", 3, det((m2, [s, len, out]) => {
+    const st = inStreamOf(m2, s!);
+    const text = st === null ? "" : st.rest();
+    return m2.unify(len!, [...text].length) && m2.unify(out!, new Str(text));
+  }));
+  def("open", 3, det((m2, [f, mode, s]) => openStream(m2, f!, mode!, s!)));
+  def("open", 4, det((m2, [f, mode, s]) => openStream(m2, f!, mode!, s!)));
+  def("close", 1, det(() => true));
+  def("close", 2, det(() => true));
+  def("current_output", 1, det((m2, [s]) => m2.unify(s!, "user_output")));
+  def("current_input", 1, det((m2, [s]) => m2.unify(s!, "user_input")));
   def("read_line_to_string", 2, det((m2, [_s, out]) => {
-    const line = m2.readLine();
+    const st = inStreamOf(m2, _s!);
+    const line = st !== null ? st.line() : m2.readLine();
     return m2.unify(out!, line === null ? "end_of_file" : new Str(line));
   }));
 
@@ -901,11 +1045,11 @@ export function installBuiltins(m: Machine): void {
   def("assertz", 2, det((m2, [c, r]) => m2.unify(r!, clauseRef(m2.addClause(copyTerm(c!), true)))));
   def("asserta", 2, det((m2, [c, r]) => m2.unify(r!, clauseRef(m2.addClause(copyTerm(c!), false)))));
   def("retract", 1, nondet(function* (m2, [c]) {
-    let head = deref(c!);
+    let head = unqualify(c!);
     let body: Term = "true";
     if (head instanceof Struct && head.name === ":-" && head.args.length === 2) {
       body = head.args[1]!;
-      head = deref(head.args[0]!);
+      head = unqualify(head.args[0]!);
     }
     const [name, ar] = functorOf(head);
     if (typeof name !== "string") throw typeError("callable", head);
@@ -921,7 +1065,7 @@ export function installBuiltins(m: Machine): void {
     }
   }));
   def("retractall", 1, det((m2, [h]) => {
-    const head = deref(h!);
+    const head = unqualify(h!);
     const [name, ar] = functorOf(head);
     if (typeof name !== "string") throw typeError("callable", head);
     const p = m2.db.ensure(name, ar);
@@ -935,7 +1079,7 @@ export function installBuiltins(m: Machine): void {
     return true;
   }));
   def("abolish", 1, det((m2, [pi]) => {
-    const d = deref(pi!);
+    const d = unqualify(pi!);
     if (d instanceof Struct && d.name === "/") {
       const name = atomArg(d.args[0]!);
       const ar = intArg(d.args[1]!);
@@ -949,7 +1093,7 @@ export function installBuiltins(m: Machine): void {
     return true;
   }));
   def("clause", 2, nondet(function* (m2, [h, b]) {
-    const head = deref(h!);
+    const head = unqualify(h!);
     if (head instanceof Var) throw instantiationError();
     const [name, ar] = functorOf(head);
     if (typeof name !== "string") throw typeError("callable", head);
@@ -966,10 +1110,10 @@ export function installBuiltins(m: Machine): void {
       const cl = refClause(rr);
       if (cl === undefined || cl.died !== Infinity) return;
       const [hh, bb] = m2.clauseTerms(cl);
-      if (m2.unify(h!, hh) && m2.unify(b!, bb)) yield;
+      if (m2.unify(unqualify(h!), hh) && m2.unify(b!, bb)) yield;
       return;
     }
-    const head = deref(h!);
+    const head = unqualify(h!);
     const [name, ar] = functorOf(head);
     if (typeof name !== "string") throw typeError("callable", head);
     for (const cl of m2.visibleClauses(name, ar)) {
@@ -978,6 +1122,56 @@ export function installBuiltins(m: Machine): void {
       if (m2.unify(head, hh) && m2.unify(b!, bb) && m2.unify(r!, clauseRef(cl))) yield;
       m2.undoTo(mark);
     }
+  }));
+  // nth_clause(?Head, ?N, ?Ref): the N-th (1-based) live clause of Head's predicate.
+  def("nth_clause", 3, nondet(function* (m2, [h, n, r]) {
+    const rr = deref(r!);
+    if (!(rr instanceof Var)) {
+      const cl = refClause(rr);
+      if (cl === undefined || cl.died !== Infinity) return;
+      const idx = m2.visibleClauses(cl.pred.name, cl.pred.arity).indexOf(cl);
+      const args: Term[] = [];
+      for (let i = 0; i < cl.pred.arity; i++) args.push(mkVar());
+      if (m2.unify(unqualify(h!), cl.pred.arity === 0 ? cl.pred.name : new Struct(cl.pred.name, args)) && m2.unify(n!, idx + 1)) yield;
+      return;
+    }
+    const head = unqualify(h!);
+    const [name, ar] = functorOf(head);
+    if (typeof name !== "string") throw instantiationError();
+    const cls = m2.visibleClauses(name, ar);
+    for (let i = 0; i < cls.length; i++) {
+      const mark = m2.trailMark();
+      if (m2.unify(n!, i + 1) && m2.unify(r!, clauseRef(cls[i]!))) yield;
+      m2.undoTo(mark);
+    }
+  }));
+  // clause_property(+Ref, ?Prop): file/1 and source/1 for consulted clauses, fact, erased, predicate/1.
+  def("clause_property", 2, nondet(function* (m2, [r, prop]) {
+    const cl = refClause(r!);
+    if (cl === undefined) return;
+    const props: Term[] = [mkStruct("predicate", mkStruct("/", cl.pred.name, cl.pred.arity)), mkStruct("module", "user")];
+    if (cl.file !== null) props.push(mkStruct("file", cl.file), mkStruct("source", cl.file));
+    if (cl.body === "true") props.push("fact");
+    if (cl.died !== Infinity) props.push("erased");
+    for (const p of props) {
+      const mark = m2.trailMark();
+      if (m2.unify(prop!, p)) yield;
+      m2.undoTo(mark);
+    }
+  }));
+  // listing(+Spec): a predicate's clauses as portray_clause writes them, after its dynamic declaration.
+  def("listing", 1, det((m2, [spec]) => {
+    const d = unqualify(spec!);
+    const [name, ar] = d instanceof Struct && d.name === "/" && d.args.length === 2 ? [atomArg(d.args[0]!), intArg(d.args[1]!)] : [atomArg(d), -1];
+    for (const p of [...m2.db.preds.values()].filter((q) => q.name === name && (ar < 0 || q.arity === ar)).sort((a, b) => a.arity - b.arity)) {
+      if (p.dynamic) m2.out(`:- dynamic ${writeTerm(p.name, { quoted: true })}/${p.arity}.\n\n`);
+      for (const cl of m2.visibleClauses(p.name, p.arity)) {
+        const [hh, bb] = m2.clauseTerms(cl);
+        m2.out(portrayClause(bb === "true" ? hh : mkStruct(":-", hh, bb)));
+      }
+      m2.out("\n");
+    }
+    return true;
   }));
   def("dynamic", 1, det((m2, [spec]) => {
     for (const pi of commaList(spec!)) {
@@ -1296,6 +1490,93 @@ export function installBuiltins(m: Machine): void {
     return m2.unify(a!, full);
   }));
   def("read_file_to_string", 3, det((m2, [f, s]) => m2.unify(s!, new Str(readFileSync(textArg(f!), "utf8")))));
+  def("read_file_to_codes", 3, det((m2, [f, s]) => m2.unify(s!, codes(readFileSync(textArg(f!), "utf8")))));
+  def("directory_files", 2, det((m2, [d, l]) => m2.unify(l!, mkList([".", "..", ...readdirSync(textArg(d!))]))));
+  def("rename_file", 2, det((_, [a, b]) => (renameSync(textArg(a!), textArg(b!)), true)));
+  def("make_directory_path", 1, det((_, [d]) => (mkdirSync(textArg(d!), { recursive: true }), true)));
+  def("make_directory", 1, det((_, [d]) => (mkdirSync(textArg(d!)), true)));
+  def("delete_file", 1, det((_, [f]) => (unlinkSync(textArg(f!)), true)));
+  // expand_file_name(+Pattern, -Files): ~ and $VAR expansion and * ? [..] wildcards in the last path segment.
+  def("expand_file_name", 2, det((m2, [p, l]) => m2.unify(l!, mkList(expandFileName(textArg(p!))))));
+  def("directory_member", 3, nondet(function* (m2, [d, f, opts]) {
+    const dir = textArg(d!);
+    let ext: string | null = null;
+    for (const o of listToArray(opts!) ?? []) {
+      const od = deref(o);
+      if (od instanceof Struct && od.name === "extensions" && od.args.length === 1) ext = (listToArray(od.args[0]!) ?? []).map((x) => atomArg(x))[0] ?? null;
+      if (od instanceof Struct && od.name === "file_type" && od.args.length === 1 && deref(od.args[0]!) === "prolog") ext = "pl";
+    }
+    for (const name of readdirSync(dir).sort()) {
+      if (ext !== null && extname(name) !== "." + ext) continue;
+      const mark = m2.trailMark();
+      if (m2.unify(f!, join(dir, name))) yield;
+      m2.undoTo(mark);
+    }
+  }));
+  def("assertion", 1, det((m2, [g]) => {
+    if (m2.solveOnce(g!)) return true;
+    throw new PrologError(mkStruct("assertion_failed", copyTerm(g!)));
+  }));
+  def("instantiation_error", 1, det(() => {
+    throw instantiationError();
+  }));
+
+  // SWI system internals the vendored library sources call (pl-list.c, pl-ctype.c, aggregate.pl's foreach/2).
+  // '$skip_list'(-Len, +List, -Tail): Len list cells skipped, Tail what follows them.
+  def("$skip_list", 3, det((m2, [len, l, tail]) => {
+    let n = 0;
+    let t = deref(l!);
+    while (t instanceof Cons) {
+      n++;
+      t = deref(t.tail);
+    }
+    return m2.unify(len!, n) && m2.unify(tail!, t);
+  }));
+  // '$seek_list'(+N, +List, -RestN, -RestList): skip up to N cells; RestN of N is left.
+  def("$seek_list", 4, det((m2, [n, l, restN, restL]) => {
+    let i = intArg(n!);
+    if (i < 0) return false;
+    let t = deref(l!);
+    while (i > 0 && t instanceof Cons) {
+      i--;
+      t = deref(t.tail);
+    }
+    return m2.unify(restN!, i) && m2.unify(restL!, t);
+  }));
+  def("$clausable", 1, det(() => true));
+  // current_arithmetic_function(?Head): Head's name and arity name an evaluable function.
+  def("current_arithmetic_function", 1, nondet(function* (m2, [h]) {
+    const d = deref(h!);
+    if (!(d instanceof Var)) {
+      const [name, arity] = typeof d === "string" ? [d, 0] : d instanceof Struct ? [d.name, d.args.length] : ["", -1];
+      if (evaluableFunctors().some(([n, a]) => n === name && a === arity)) yield;
+      return;
+    }
+    for (const [n, a] of evaluableFunctors()) {
+      const args: Term[] = [];
+      for (let i = 0; i < a; i++) args.push(mkVar());
+      const mark = m2.trailMark();
+      if (m2.unify(d, a === 0 ? n : new Struct(n, args))) yield;
+      m2.undoTo(mark);
+    }
+  }));
+  const isCharAtom = (t: Term): boolean => typeof t === "string" && [...t].length === 1;
+  const isCode = (t: Term): boolean => typeof t === "number" && Number.isInteger(t) && t >= 0 && t <= 0x10ffff;
+  const textList = (ok: (t: Term) => boolean) =>
+    det((m2, [l, len]) => {
+      const items = listToArray(l!);
+      return items !== null && items.every((x) => ok(deref(x))) && m2.unify(len!, items.length);
+    });
+  def("$is_char", 1, det((_, [c]) => isCharAtom(deref(c!))));
+  def("$is_char_code", 1, det((_, [c]) => isCode(deref(c!))));
+  def("$is_char_list", 2, textList(isCharAtom));
+  def("$is_code_list", 2, textList(isCode));
+  // '$unbind_template'(+Templ): undo the bindings of Templ's argument variables, destructively.
+  def("$unbind_template", 1, det((_, [t]) => {
+    const d = deref(t!);
+    if (d instanceof Struct) for (const a of d.args) if (a instanceof Var) a.ref = null;
+    return true;
+  }));
   def("format_time", 3, det((m2, [sink, fmt, stamp]) => {
     const d = deref(stamp!);
     // A date/9 term formats in its own offset; a time stamp in local time.

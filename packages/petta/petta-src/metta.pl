@@ -1,0 +1,489 @@
+%%%%%%%%%% Dependencies %%%%%%%%%%
+:- dynamic library_path/1.
+
+library(X, Path) :- resolve_library_path(library_path_candidate(X), Path).
+library(X, Y, Path) :- resolve_library_path(library_path_candidate(X, Y), Path).
+
+library_path_candidate(X, Path) :- standard_library_path(Base),
+                                   atomic_list_concat([Base, '/', X], Path).
+library_path_candidate(X, Y, Path) :- library_path(Base),
+                                      atom_concat(_, X, Base),
+                                      atomic_list_concat([Base, '/', Y], Path).
+
+resolve_library_path(Candidate, Path) :- ( once((call(Candidate, ExistingPath),
+                                                  library_source_exists(ExistingPath)))
+                                           -> Path = ExistingPath
+                                            ; once(call(Candidate, Path)) ).
+
+library_source_exists(Path) :- exists_file(Path), !.
+library_source_exists(Path) :- file_name_extension(Path, metta, MettaPath),
+                               exists_file(MettaPath).
+:- prolog_load_context(directory, Source),
+   directory_file_path(Source, '..', Parent),
+   directory_file_path(Parent, 'lib', LibPath),
+   asserta(standard_library_path(LibPath)).
+:- autoload(library(uuid)).
+:- use_module(library(random)).
+:- use_module(library(janus)).
+:- use_module(library(error)).
+:- use_module(library(listing)).
+:- use_module(library(aggregate)).
+:- use_module(library(thread)).
+:- use_module(library(lists)).
+:- use_module(library(yall), except([(/)/3])).
+:- use_module(library(apply)).
+:- use_module(library(apply_macros)).
+:- use_module(library(process)).
+:- use_module(library(filesex)).
+:- current_prolog_flag(argv, Argv),
+   ( member(mork, Argv) -> ensure_loaded([ext_points, parser, typecheck, translator, specializer, filereader, '../mork_ffi/morkspaces', spaces, load_cache])
+                         ; ensure_loaded([ext_points, parser, typecheck, translator, specializer, filereader, spaces, load_cache])).
+:- seed_builtin_types.
+
+%%%%%%%%%% Standard Library for MeTTa %%%%%%%%%%
+
+%%% Representation and parsing conversions: %%%
+id(X, X).
+repr(Term, R) :- swrite(Term, R).
+repra(Term, R) :- term_to_atom(Term, R).
+parse(Str, R) :- sread(Str, R).
+
+%%% Arithmetic & Comparison: %%%
+'+'(A,B,R)  :- R is A + B.
+'-'(A,B,R)  :- R is A - B.
+'*'(A,B,R)  :- R is A * B.
+'/'(A,B,R)  :- R is A / B.
+'%'(A,B,R)  :- R is A mod B.
+'<'(A,B,R)  :- (A<B -> R=true ; R=false).
+'>'(A,B,R)  :- (A>B -> R=true ; R=false).
+'@<'(A,B,R) :- (A@<B -> R=true ; R=false).
+'@>'(A,B,R) :- (A@>B -> R=true ; R=false).
+'=='(A,B,R) :- (A==B -> R=true ; R=false).
+'!='(A,B,R) :- (A==B -> R=false ; R=true).
+'='(A,B,R) :-  (A=B -> R=true ; R=false).
+'=?'(A,B,R) :- (\+ \+ A=B -> R=true ; R=false).
+%Raw =@= success already implies attribute-free variance - identical
+%attributes still correspond after stripping - so it accepts at C speed
+%without copying. A raw failure is final unless checker attributes are
+%present on either side; only that rare case pays for the stripping copies.
+attribute_free_variant(A, B) :-
+    ( A =@= B -> true
+    ; ( term_attvars(A, [_|_]) -> true ; term_attvars(B, [_|_]) )
+      -> copy_term_nat(A, AC), copy_term_nat(B, BC), AC =@= BC
+    ; fail ).
+
+'=alpha'(A,B,R) :- (attribute_free_variant(A, B) -> R=true ; R=false).
+'=@='(A,B,R) :- (attribute_free_variant(A, B) -> R=true ; R=false).
+'<='(A,B,R) :- (A =< B -> R=true ; R=false).
+'>='(A,B,R) :- (A >= B -> R=true ; R=false).
+'@<='(A,B,R) :- (A @=< B -> R=true ; R=false).
+'@>='(A,B,R) :- (A @>= B -> R=true ; R=false).
+min(A,B,R)  :- R is min(A,B).
+max(A,B,R)  :- R is max(A,B).
+exp(Arg,R) :- R is exp(Arg).
+:- use_module(library(clpfd)).
+'#+'(A, B, R) :- R #= A + B.
+'#-'(A, B, R) :- R #= A - B.
+'#*'(A, B, R) :- R #= A * B.
+'#div'(A, B, R) :- R #= A div B.
+'#//'(A, B, R) :- R #= A // B.
+'#mod'(A, B, R) :- R #= A mod B.
+'#min'(A, B, R) :- R #= min(A,B).
+'#max'(A, B, R) :- R #= max(A,B).
+'#<'(A, B, true)  :- A #< B, !.
+'#<'(_, _, false).
+'#>'(A, B, true)  :- A #> B, !.
+'#>'(_, _, false).
+'#='(A, B, true)  :- A #= B, !.
+'#='(_, _, false).
+'#\\='(A, B, true)  :- A #\= B, !.
+'#\\='(_, _, false).
+'pow-math'(A, B, Out) :- Out is A ** B.
+'sqrt-math'(A, Out)   :- Out is sqrt(A).
+'abs-math'(A, Out)    :- Out is abs(A).
+'log-math'(Base, X, Out) :- Out is log(X) / log(Base).
+'trunc-math'(A, Out)  :- Out is truncate(A).
+'ceil-math'(A, Out)   :- Out is ceil(A).
+'floor-math'(A, Out)  :- Out is floor(A).
+'round-math'(A, Out)  :- Out is round(A).
+'sin-math'(A, Out)  :- Out is sin(A).
+'cos-math'(A, Out)  :- Out is cos(A).
+'tan-math'(A, Out)  :- Out is tan(A).
+'asin-math'(A, Out) :- Out is asin(A).
+'acos-math'(A, Out) :- Out is acos(A).
+'atan-math'(A, Out) :- Out is atan(A).
+'isnan-math'(A, Out) :- ( A =:= A -> Out = false ; Out = true ).
+'isinf-math'(A, Out) :- ( ( A =:= 1.0Inf ; A =:= -1.0Inf ) -> Out = true ; Out = false ).
+'min-atom'(List, Out) :- non_list(List), !, Out = [].
+'min-atom'(List, Out) :- min_list(List, Out).
+'max-atom'(List, Out) :- non_list(List), !, Out = [].
+'max-atom'(List, Out) :- max_list(List, Out).
+
+%%% Random Generators: %%%
+'random-int'(Min, Max, Result) :- random_between(Min, Max, Result).
+'random-int'('&rng', Min, Max, Result) :- random_between(Min, Max, Result).
+'random-float'(Min, Max, Result) :- random(R), Result is Min + R * (Max - Min).
+'random-float'('&rng', Min, Max, Result) :- random(R), Result is Min + R * (Max - Min).
+
+%%% Boolean Logic: %%%
+bool(true).
+bool(false).
+and(A,B,C) :- bool(A), bool(B), ( A == true -> C = B ; A == false -> C = false ).
+or(A,B,C) :- bool(A), bool(B), ( A == true -> C = true ; A == false -> C = B ).
+not(A,B) :- bool(A), ( A == true -> B = false ; A == false -> B = true ).
+xor(A,B,C) :- bool(A), bool(B), ( A == B -> C = false ; C = true ).
+implies(A,B,C) :- bool(A), bool(B), ( A == true -> ( B == true  -> C = true ; B == false -> C = false )
+                                                 ; A == false -> C = true ).
+
+%%% Nondeterminism: %%%
+superpose(L,X) :- member(X,L).
+empty(_) :- fail.
+
+%%% Lists / Tuples: %%%
+'cons-atom'(H, T, [H|T]).
+'decons-atom'([H|T], [H|[T]]).
+'first-from-pair'([A, _], A).
+first([A, _], A).
+'second-from-pair'([_, A], A).
+'unique-atom'(A, B) :- non_list(A), !, B = [].
+'unique-atom'(A, B) :- list_to_set(A, B).
+
+%%% Alpha-equivalence unique atom %%%
+'alpha-unique-atom'(A, B) :- non_list(A), !, B = [].
+'alpha-unique-atom'(A, B) :- alpha_list_to_set(A, B).
+
+alpha_list_to_set(List, Set) :-
+    empty_assoc(Seen0),
+    alpha_list_to_set_assoc(List, Seen0, Set).
+
+alpha_list_to_set_assoc([], _, []).
+alpha_list_to_set_assoc([H|T], SeenIn, R) :-
+    variant_hash(H, Key),
+    ( get_assoc(Key, SeenIn, Bucket) ->
+        ( member(B, Bucket), attribute_free_variant(H, B) ->
+            alpha_list_to_set_assoc(T, SeenIn, R)
+        ;
+            put_assoc(Key, SeenIn, [H|Bucket], SeenOut),
+            R = [H|RT],
+            alpha_list_to_set_assoc(T, SeenOut, RT)
+        )
+    ;
+        put_assoc(Key, SeenIn, [H], SeenOut),
+        R = [H|RT],
+        alpha_list_to_set_assoc(T, SeenOut, RT)
+    ).
+
+%A term that can never become a list, no matter how it gets instantiated:
+non_list(X) :- atomic(X), X \== [].
+non_list(X) :- compound(X), X \= [_|_].
+
+'sort-atom'(List, Sorted) :- non_list(List), !, Sorted = [].
+'sort-atom'(List, Sorted) :- msort(List, Sorted).
+'size-atom'(List, Size) :- non_list(List), !, Size = [].
+'size-atom'(List, Size) :- length(List, Size).
+'car-atom'([H|_], H) :- !.
+%An empty expression has no head, and answering () here instead of raising
+%would be a WRONG answer, not a failure: the typechecker certifies this
+%result as the argument's element type (list_elem_out_type/2), so a quiet ()
+%would arrive where a Number was proven. Raising keeps the certification
+%sound and the det verdict too - an exception is not a solution:
+'car-atom'([], _) :- !, throw(error(car_atom_empty, 'car-atom')).
+'car-atom'(_, []).
+'cdr-atom'([_|T], T) :- !.
+'cdr-atom'(_, []).
+decons([H|T], [H|[T]]).
+cons(H, T, [H|T]).
+'index-atom'(_, Index, _) :- nonvar(Index), \+ integer(Index), !, fail.
+'index-atom'(List, Index, Elem) :- nth0(Index, List, Elem).
+member(X, L, true) :- member(X, L).
+'is-member'(X, List, true) :- member(X, List).
+'is-member'(X, List, false) :- \+ member(X, List).
+
+member_alpha(X, [H|_]) :- (var(X) -> var(H) ; true), X = H, !.
+member_alpha(X, [_|T]) :- member_alpha(X, T).
+
+'is-alpha-member'(X, List, true) :- member_alpha(X, List), !.
+'is-alpha-member'(_, _, false).
+
+'exclude-item'(A, L, R) :- exclude(==(A), L, R).
+
+%Multisets:
+'subtraction-atom'([], _, []).
+'subtraction-atom'([H|T], B, Out) :- ( select(H, B, BRest) -> 'subtraction-atom'(T, BRest, Out)
+                                                            ; Out = [H|Rest],
+                                                              'subtraction-atom'(T, B, Rest) ).
+'union-atom'(A, B, Out) :- append(A, B, Out).
+'intersection-atom'(A, B, Out) :- ( non_list(A) ; non_list(B) ), !, Out = [].
+'intersection-atom'([], _, []).
+'intersection-atom'([H|T], B, Out) :- ( select(H, B, BRest) -> Out = [H|Rest],
+                                                              'intersection-atom'(T, BRest, Rest)
+                                                            ; 'intersection-atom'(T, B, Out) ).
+
+%%% Type system: %%%
+get_function_type([F|Args], T) :- nonvar(F), match('&self', [':',F,[->|Ts]], _, _),
+                                  append(As,[T0],Ts),
+                                  checked_args(As, Args, As1, Args1),
+                                  T = T0,
+                                  maplist('get-type',Args1,As1).
+%As in typed calls, an argument declared %Undefined% is not checked. These parameters are found
+%before the requested type or another argument can bind a type variable to %Undefined%:
+checked_args([], [], [], []).
+checked_args([A|As], [X|Xs], Bs, Ys) :- ( A == '%Undefined%' -> Bs = Bs1, Ys = Ys1 ; Bs = [A|Bs1], Ys = [X|Ys1] ),
+                                        checked_args(As, Xs, Bs1, Ys1).
+
+:- dynamic 'get-type'/2.
+%An unbound request takes each type of the value, or %Undefined% if it has none. %Undefined% is
+%confirmed only for a value without types or with %Undefined% among them:
+'get-type'(X, T) :- ( var(T) -> ( get_type_candidate(X, T0) *-> T = T0 ; T = '%Undefined%' )
+                    ; T == '%Undefined%' -> ( \+ get_type_candidate(X, _) -> true ; get_type_candidate(X, T) )
+                    ; get_type_candidate(X, T) ).
+%An intrinsic kind is chosen before the requested type is compared:
+get_type_candidate(X, T) :- number(X), !, T = 'Number'.
+get_type_candidate(X, _) :- var(X), !.
+get_type_candidate(X, T) :- string(X), !, T = 'String'.
+get_type_candidate(true, T) :- !, T = 'Bool'.
+get_type_candidate(false, T) :- !, T = 'Bool'.
+get_type_candidate(X, T) :- get_function_type(X,T).
+get_type_candidate(X, T) :- \+ get_function_type(X, _),
+                            is_list(X),
+                            maplist('get-type', X, T).
+get_type_candidate(X, T) :- match('&self', [':',X,T], T, _).
+'get-metatype'(X, 'Variable') :- var(X), !.
+'get-metatype'(X, 'Grounded') :- number(X), !.
+'get-metatype'(X, 'Grounded') :- string(X), !.
+'get-metatype'(true,  'Grounded') :- !.
+'get-metatype'(false, 'Grounded') :- !.
+'get-metatype'(X, 'Grounded') :- atom(X), fun(X), !.  % e.g., '+' is a registered fun/1
+'get-metatype'(X, 'Expression') :- is_list(X), !.     % e.g., (+ 1 2), (a b)
+'get-metatype'(X, 'Symbol') :- atom(X), !.            % e.g., a
+
+'is-var'(A,R) :- var(A) -> R=true ; R=false.
+'is-ground'(A,R) :- ground(A) -> R=true ; R=false.
+'is-expr'(A,R) :- is_list(A) -> R=true ; R=false.
+'is-space'(A,R) :- atom(A), atom_concat('&', _, A) -> R=true ; R=false.
+
+%%% Diagnostics / Testing: %%%
+'println!'(Arg, true) :- swrite(Arg, RArg),
+                         format('~w~n', [RArg]).
+
+'readln!'(Out) :- read_line_to_string(user_input, Str),
+                  sread(Str, Out).
+
+test(A,B,true) :- (attribute_free_variant(A, B) -> E = '✅' ; E = '❌'),
+                  swrite(A, RA),
+                  swrite(B, RB),
+                  format("is ~w, should ~w. ~w ~n", [RA, RB, E]),
+                  (attribute_free_variant(A, B) -> true ; halt(1)).
+
+assert(Goal, true) :- ( call(Goal) -> true
+                                    ; swrite(Goal, RG),
+                                      format("Assertion failed: ~w~n", [RG]),
+                                      halt(1) ).
+
+%%% Time Retrieval: %%%
+'current-time'(Time) :- get_time(Time).
+'format-time'(Format, TimeString) :- get_time(Time), format_time(atom(TimeString), Format, Time).
+
+%%% Python bindings: %%%
+% janus converts Python booleans to @(true)/@(false); normalize them to the
+% language booleans so py-call results compose with if, and, or, ==.
+py_bool_norm('@'(true), true) :- !.
+py_bool_norm('@'(false), false) :- !.
+py_bool_norm(R, R).
+'py-call'(SpecList, Result) :- 'py-call'(SpecList, Result, []).
+'py-call'([Spec|Args], Result, Opts) :-
+    ( py_is_object(Spec)
+      -> ( Args == []
+           -> compound_name_arguments(Call, '__call__', [])
+            ; Call =.. ['__call__'|Args] ),
+         py_call(Spec:Call, R0, Opts), py_bool_norm(R0, Result)
+      ; ( string(Spec) -> atom_string(A, Spec) ; A = Spec ),
+        must_be(atom, A),
+        ( sub_atom(A, 0, 1, _, '.')         % ".method"
+                                          -> sub_atom(A, 1, _, 0, Fun),
+                                             Args = [Obj|Rest],
+                                             ( py_is_object(Obj)            % on a Python object reference
+                                               -> ( Rest == []
+                                                    -> compound_name_arguments(Meth, Fun, [])
+                                                     ; Meth =.. [Fun|Rest] ),
+                                                  py_call(Obj:Meth, R0, Opts), py_bool_norm(R0, Result)
+                                                ; py_call(builtins:type(Obj), Ty), % on a converted value (str, int, ...)
+                                                  Call =.. [Fun, Obj|Rest],
+                                                  py_call(Ty:Call, R0, Opts), py_bool_norm(R0, Result) )
+                                           ; atomic_list_concat([M,F], '.', A) % "mod.fun"
+                                             -> ( Args == []
+                                                  -> compound_name_arguments(Call0, F, [])
+                                                   ; Call0 =.. [F|Args] ),
+                                                py_call(M:Call0, R0, Opts), py_bool_norm(R0, Result)
+                                              ; ( Args == []                      % bare "fun"
+                                                  -> compound_name_arguments(Call0, A, [])
+                                                   ; Call0 =.. [A|Args] ),
+                                                py_call(builtins:Call0, R0, Opts), py_bool_norm(R0, Result) ) ).
+
+%%% States: %%%
+'bind!'(A, ['new-state', B], C) :- 'change-state!'(A, B, C).
+'change-state!'(Var, Value, true) :- nb_setval(Var, Value).
+'get-state'(Var, Value) :- nb_getval(Var, Value).
+
+%%% Eval: %%%
+eval(C, Out) :- translate_expr(C, Goals, Out),
+                call_goals(Goals).
+
+call_goals([]).
+call_goals([G|Gs]) :- call(G), 
+                      call_goals(Gs).
+
+%%% Higher-Order Functions: %%%
+'foldl-atom'([], Acc, _Func, Acc).
+'foldl-atom'([H|T], Acc0, Func, Out) :- reduce([Func,Acc0,H], Acc1),
+                                        'foldl-atom'(T, Acc1, Func, Out).
+
+'map-atom'([], _Func, []).
+'map-atom'([H|T], Func, [R|RT]) :- reduce([Func,H], R),
+                                   'map-atom'(T, Func, RT).
+
+'filter-atom'([], _Func, []).
+'filter-atom'([H|T], Func, Out) :- ( reduce([Func,H], true) -> Out = [H|RT]
+                                                             ; Out = RT ),
+                                   'filter-atom'(T, Func, RT).
+
+%%% Prolog interop: %%%
+argv(K, Arg) :- current_prolog_flag(argv, Argv), nth0(K, Argv, A), ( atom_number(A, N) -> Arg = N ; Arg = A ).
+import_prolog_function(N, true) :-
+    ( fun(N) -> WasCallable = true ; WasCallable = false ),
+    register_fun(N),
+    ( WasCallable == false
+      -> notify_mutation(callable_changed(N))
+    ; true ).
+'Predicate'([F|Args], Term) :- Term =.. [F|Args].
+callPredicate(G, true) :- call(G).
+assertzPredicate(G, true) :- assertz(G).
+assertaPredicate(G, true) :- asserta(G).
+retractPredicate(G, true) :- retract(G), !.
+retractPredicate(_, false).
+
+%%% Library / Import: %%%
+ensure_metta_ext(Path, Path) :- file_name_extension(_, metta, Path), !.
+ensure_metta_ext(Path, PathWithExt) :- file_name_extension(Path, metta, PathWithExt).
+
+%The translator preserves the source-level distinction between
+%(import! ... (library Name)) and a plain pathname by rewriting only the
+%former to this helper.
+'library-import!'(Space, Name, true) :-
+    with_library_origin(Name,
+                        ( library(Name, File),
+                          importer_helper(Space, File) )).
+
+current_working_dir(Base) :- working_dir(Base), !.
+current_working_dir(Base) :- absolute_file_name('.', Base, [file_type(directory)]).
+
+import_file_string(File, SFile) :- string(File), !, SFile = File.
+import_file_string(File, SFile) :- atom_string(File, SFile).
+
+python_import_file(File) :- import_file_string(File, SFile),
+                            file_name_extension(_, py, SFile).
+
+resolve_existing_import_path(Base, RequestedPath, CanonPath) :-
+    absolute_file_name(RequestedPath, CanonPath,
+                       [relative_to(Base), access(read), file_errors(fail)]), !.
+
+throw_missing_import(File) :-
+    throw(error(existence_error(source_sink, File), context('import!', File))).
+
+resolve_metta_import_path(File, CanonPath) :-
+    import_file_string(File, SFile),
+    \+ python_import_file(SFile),
+    current_working_dir(Base),
+    ensure_metta_ext(SFile, RequestedPath),
+    ( resolve_existing_import_path(Base, RequestedPath, CanonPath)
+      -> true
+       ; throw_missing_import(File) ).
+
+resolve_python_import_path(File, CanonPath) :-
+    import_file_string(File, SFile),
+    python_import_file(SFile),
+    current_working_dir(Base),
+    ( resolve_existing_import_path(Base, SFile, CanonPath)
+      -> true
+       ; throw_missing_import(File) ).
+
+:- dynamic metta_import_state/3.
+
+% A loading or active entry breaks cycles; a loaded entry makes later imports no-ops.
+% Failed loads remove their loading entry, but may leave partial state; retrying a
+% failed import in the same runtime is unsupported.
+claim_import(Space, CanonPath, skip) :- metta_import_state(Space, CanonPath, loaded), !.
+claim_import(Space, CanonPath, skip) :- metta_import_state(Space, CanonPath, loading), !.
+claim_import(Space, CanonPath, skip) :- active_metta_load(Space, CanonPath), !.
+claim_import(Space, CanonPath, load) :- assertz(metta_import_state(Space, CanonPath, loading)).
+
+clear_import_state(Space, CanonPath) :- retractall(metta_import_state(Space, CanonPath, _)).
+
+mark_import_loaded(Space, CanonPath) :- clear_import_state(Space, CanonPath),
+                                        assertz(metta_import_state(Space, CanonPath, loaded)).
+
+run_new_import(Space, CanonPath, Goal) :-
+    catch(( once(Goal)
+            -> mark_import_loaded(Space, CanonPath)
+             ; clear_import_state(Space, CanonPath), fail ),
+          Error,
+          ( clear_import_state(Space, CanonPath), throw(Error) )).
+
+import_once(Space, CanonPath, Goal) :- claim_import(Space, CanonPath, Action),
+                                       ( Action = skip -> true
+                                                       ; run_new_import(Space, CanonPath, Goal) ).
+
+'import!'(Space, File, true) :- importer_helper(Space, File).
+importer_helper(Space, File) :-
+    ( python_import_file(File)
+      -> resolve_python_import_path(File, CanonPath),
+         file_directory_name(CanonPath, Dir),
+         file_base_name(CanonPath, BaseName),
+         file_name_extension(ModuleName, _, BaseName),
+         import_once(Space, CanonPath,
+                     ( py_call(sys:path:append(Dir), _),
+                       py_call(builtins:'__import__'(ModuleName), _) ))
+       ; resolve_metta_import_path(File, CanonPath),
+         import_once(Space, CanonPath, load_metta_file(CanonPath, _, Space)) ).
+
+%Like import! of a MeTTa file, replaying a stored snapshot of the load when one
+%matches (see load_cache.pl). Output printed while loading is not replayed.
+'cached-import!'(Space, File, true) :-
+    resolve_metta_import_path(File, CanonPath),
+    import_once(Space, CanonPath, load_metta_file_cached(CanonPath, _, Space)).
+
+:- dynamic translator_rule/1.
+'add-translator-rule!'(HV, true) :- ( translator_rule(HV)
+                                      -> true ; assertz(translator_rule(HV)) ).
+
+'remove-translator-rule!'(HV, true) :- retractall(translator_rule(HV)).
+
+%%% Registration: %%%
+:- dynamic fun/1, arity/2.
+register_fun(N) :- fun(N), !.
+%Arities are registered in ascending order: the order current_predicate/1
+%enumerates them in depends on how many atoms the process created before.
+register_fun(N) :- assertz(fun(N)),
+                   findall(Arity, (current_predicate(N/Arity), \+ (current_op(_, _, N), Arity =< 2)), Arities0),
+                   sort(Arities0, Arities),
+                   forall(member(Arity, Arities),
+                          (arity(N, Arity) -> true ; assertz(arity(N, Arity)))).
+:- maplist(register_fun, [superpose, empty, let, 'let*', '+','-','*','/', '%', min, max, 'change-state!', 'get-state', 'bind!',
+                          '<','>','@<', '@>', '==', '!=', '=', '=?', '<=', '>=', '@<=', '@>=', and, or, xor, implies, not, sqrt, exp, log, cos, sin,
+                          'first-from-pair', 'second-from-pair', 'car-atom', 'cdr-atom', 'unique-atom', 'alpha-unique-atom',
+                          repr, repra, parse, 'println!', 'readln!', test, assert, 'mm2-exec', atom_concat, atom_chars, copy_term, term_hash,
+                          foldl, first, last, append, length, 'size-atom', sort, msort, member, 'is-member', 'is-alpha-member', 'exclude-item', list_to_set, maplist, eval, reduce, 'import!', 'cached-import!',
+                          'add-atom', 'remove-atom', 'get-atoms', match, 'is-var', 'is-ground', 'is-expr', 'is-space', 'get-mettatype',
+                          decons, 'decons-atom', 'py-call', 'get-type', 'get-metatype', '=alpha', concat, sread, cons, reverse,
+                          '#+','#-','#*','#div','#//','#mod','#min','#max','#<','#>','#=','#\\=','set_hook',
+                          'union-atom', 'cons-atom', 'intersection-atom', 'subtraction-atom', 'index-atom', id,
+                          'pow-math', 'sqrt-math', 'sort-atom','abs-math', 'log-math', 'trunc-math', 'ceil-math',
+                          'floor-math', 'round-math', 'sin-math', 'cos-math', 'tan-math', 'asin-math','random-int','random-float',
+                          'acos-math', 'atan-math', 'isnan-math', 'isinf-math', 'min-atom', 'max-atom',
+                          'foldl-atom', 'map-atom', 'filter-atom','current-time','format-time', library, exists_file, 'library-import!',
+                          import_prolog_function, 'Predicate', callPredicate, assertaPredicate, assertzPredicate, retractPredicate,
+                          'add-translator-rule!', 'remove-translator-rule!', argv]).
+
+%Fail startup immediately when any of the independently implemented builtin
+%views drifts from the declarative registry.
+:- validate_builtin_registry.

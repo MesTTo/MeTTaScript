@@ -28,7 +28,7 @@ import {
   mkVar,
   typeError,
   varCount,
-  type Term,
+  type Term, unqualify,
 } from "./terms";
 
 /** A goal with its continuation, the choicepoint height its cut returns to, and its innermost catch. */
@@ -103,6 +103,36 @@ class Ground {
   constructor(public readonly t: Term) {}
 }
 
+/**
+ * A fresh copy of a stored ground literal, made where the literal enters an activation: SWI builds a clause's
+ * terms anew for each call, so nb_setarg/setarg on them never reach the stored clause (ai-tmp/probe/lit.pl:
+ * t1 printed f(a) twice). Atoms, numbers and strings are immutable and stay shared.
+ * Time: one allocation per compound node of the literal.
+ */
+// am[implements a-hp-swi-gap]
+function copyLiteral(t: Term): Term {
+  if (t instanceof Struct) {
+    const n = t.args.length;
+    const args = new Array<Term>(n);
+    for (let i = 0; i < n; i++) args[i] = copyLiteral(t.args[i]!);
+    return new Struct(t.name, args);
+  }
+  if (t instanceof Cons) {
+    const first = new Cons(copyLiteral(t.head), NIL);
+    let last = first;
+    let rest: Term = t.tail;
+    while (rest instanceof Cons) {
+      const cell = new Cons(copyLiteral(rest.head), NIL);
+      last.tail = cell;
+      last = cell;
+      rest = rest.tail;
+    }
+    last.tail = copyLiteral(rest);
+    return first;
+  }
+  return t;
+}
+
 /** Rewrite a compiled clause so its ground compound subterms are Ground holders. */
 function shareGround(t: Term): Term {
   const isGround = (x: Term): boolean => {
@@ -152,6 +182,10 @@ function shareHead(h: Term): Term {
 export class Machine {
   readonly db = new Database();
   readonly builtins = new Map<string, Builtin>();
+  /** The file whose clauses a consult is adding now; clauses added meanwhile are static and record it. */
+  sourceFile: string | null = null;
+  /** Loads the library exporting Name/Arity when an undefined predicate is called; true if it did. */
+  autoload: ((name: string, arity: number) => boolean) | null = null;
   /** Predicates the engine's own library defines: assert/retract on them is a permission error. */
   readonly libraryPreds = new Set<string>();
   readonly globals = new Map<string, Term>();
@@ -225,6 +259,27 @@ export class Machine {
 
   trailMark(): number {
     return this.trail.length;
+  }
+
+  /**
+   * Whether a and b unify, leaving no binding behind: every binding is trailed while it runs, so a partial
+   * unification of variables newer than the last choicepoint (which bind() leaves untrailed) is undone too.
+   * `seen` receives the variables the unification bound, most recent last. For \=/2 and unifiable/3.
+   */
+  probeUnify(a: Term, b: Term, seen?: (bound: Var[]) => void): boolean {
+    const saved = this.trailBoundary;
+    const mark = this.trail.length;
+    const wl = this.wakeups.length;
+    this.trailBoundary = Infinity;
+    try {
+      const ok = this.unify(a, b);
+      if (ok && seen !== undefined) seen(this.trail.slice(mark).filter((e): e is Var => e instanceof Var));
+      return ok;
+    } finally {
+      this.undoTo(mark);
+      this.wakeups.length = wl;
+      this.trailBoundary = saved;
+    }
   }
 
   undoTo(mark: number): void {
@@ -345,7 +400,7 @@ export class Machine {
       vars[t.i] = nv;
       return nv;
     }
-    if (t instanceof Ground) return t.t;
+    if (t instanceof Ground) return copyLiteral(t.t);
     if (t instanceof Cons) {
       const first = new Cons(this.inst(t.head, vars), NIL);
       let last = first;
@@ -378,7 +433,7 @@ export class Machine {
       }
       return this.unify(v, act);
     }
-    if (tpl instanceof Ground) return this.unify(tpl.t, act);
+    if (tpl instanceof Ground) return this.unifyLiteral(tpl.t, act);
     act = deref(act);
     if (act instanceof Var) {
       this.bind(act, this.inst(tpl, vars));
@@ -396,15 +451,34 @@ export class Machine {
     return atomicEq(tpl, act);
   }
 
+  /** Unify a stored ground literal with a call argument; a call variable is bound to a copy of the literal's part. */
+  private unifyLiteral(lit: Term, act: Term): boolean {
+    act = deref(act);
+    if (act instanceof Var) {
+      this.bindAttr(act, copyLiteral(lit));
+      return true;
+    }
+    if (lit instanceof Cons) {
+      if (!(act instanceof Cons)) return false;
+      return this.unifyLiteral(lit.head, act.head) && this.unifyLiteral(lit.tail, act.tail);
+    }
+    if (lit instanceof Struct) {
+      if (!(act instanceof Struct) || act.name !== lit.name || act.args.length !== lit.args.length) return false;
+      for (let i = 0; i < lit.args.length; i++) if (!this.unifyLiteral(lit.args[i]!, act.args[i]!)) return false;
+      return true;
+    }
+    return atomicEq(lit, act);
+  }
+
   // ---- database interface ----
 
   /** assertz/asserta of a clause term `Head :- Body` or a fact. */
   addClause(clause: Term, atEnd: boolean): Clause {
-    let head = deref(clause);
+    let head = unqualify(clause);
     let body: Term = "true";
     if (head instanceof Struct && head.name === ":-" && head.args.length === 2) {
       body = head.args[1]!;
-      head = deref(head.args[0]!);
+      head = unqualify(head.args[0]!);
     }
     if (head instanceof Var) throw instantiationError();
     let name: string;
@@ -421,9 +495,13 @@ export class Machine {
         mkStruct("error", mkStruct("permission_error", "modify", "static_procedure", mkStruct("/", name, arity)), mkVar()),
       );
     const pred = this.db.ensure(name, arity);
-    pred.dynamic = true;
+    // A clause a consult loads is static, as in SWI; assert makes the predicate dynamic.
+    if (this.sourceFile === null) pred.dynamic = true;
+    else pred.file ??= this.sourceFile;
     const c = compileClause(head, body);
-    return this.db.addClause(pred, shareHead(c.head), shareGround(c.body), c.nvars, atEnd);
+    const cl = this.db.addClause(pred, shareHead(c.head), shareGround(c.body), c.nvars, atEnd);
+    cl.file = this.sourceFile;
+    return cl;
   }
 
   /** Define a library predicate from clause terms; such predicates are static to user asserts. */
@@ -702,7 +780,7 @@ export class Machine {
         g = deref(vars[g.i] ?? (vars[g.i] = mkVar()));
         vars = null;
       } else if (g instanceof Ground) {
-        g = g.t;
+        g = copyLiteral(g.t);
         vars = null;
       }
     } else g = deref(g);
@@ -854,7 +932,8 @@ export class Machine {
     }
     if (vars !== null) args = args.map((a) => this.inst(a, vars));
     if (name === "call" && args.length > 1) {
-      const goal = addArgs(args[0]!, args.slice(1));
+      // call(M:G, A...) adds A... to G: one module, so the qualification names nothing.
+      const goal = addArgs(unqualify(args[0]!), args.slice(1));
       this.goals = new Frame(goal, f.next, this.cps.length, f.cc);
       return true;
     }
@@ -881,6 +960,14 @@ export class Machine {
     if (p !== undefined) {
       const cands = p.candidates(args);
       return this.tryClauses(cands, 0, cands.length, this.db.generation, args, f.next, f.cc);
+    }
+    // An undefined predicate a library exports loads that library and is called (SWI's autoloader).
+    if (this.autoload !== null && this.autoload(name, args.length)) {
+      const p2 = this.db.preds.get(key);
+      if (p2 !== undefined) {
+        const cands = p2.candidates(args);
+        return this.tryClauses(cands, 0, cands.length, this.db.generation, args, f.next, f.cc);
+      }
     }
     if (this.flags.get("unknown") === "fail") return false;
     throw existenceError("procedure", mkStruct("/", name, args.length));
@@ -950,7 +1037,7 @@ export class Machine {
         l = deref(lv[l.i]!);
         lv = null;
       } else if (l instanceof Ground) {
-        l = l.t;
+        l = copyLiteral(l.t);
         lv = null;
       }
     } else l = deref(l);

@@ -44,6 +44,10 @@ function formalText(f: Term): string {
     }
     case "determinism_conflict/2":
       return `Determinism check failed for ${p(a[0]!)}: ${p(a[1]!)}`;
+    case "overlapping_deterministic_clauses/3":
+      return `Deterministic function ${p(a[0]!)} has overlapping clauses with heads ${p(a[1]!)} and ${p(a[2]!)}`;
+    case "det_functional_head_commitment/2":
+      return `Determinism check failed for ${p(a[0]!)}: functional head ${p(a[1]!)} generates fallible head goals; explicit det/semidet validation cannot certify it`;
     case "no_matching_overload/1":
       return `No matching typed overload for ${p(a[0]!)}`;
     case "non_parametric_output/1":

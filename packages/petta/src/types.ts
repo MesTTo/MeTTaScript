@@ -610,12 +610,6 @@ export class Types {
       },
     });
     m.defBuiltin("user_extended_get_type", 0, { det: () => (m.db.get("get-type", 2)?.live ?? 0) > 1 });
-    m.defBuiltin("current_arithmetic_function", 1, {
-      det: (_m, [t]) => {
-        const d = deref(t!);
-        return typeof d === "string" && ["pi", "e", "inf", "infinite", "nan", "epsilon", "random", "random_float", "cputime", "realtime", "max_tagged_integer", "min_tagged_integer"].includes(d);
-      },
-    });
     for (const s of ["declared_value_type", "declared_newtype", "declared_type_alias", "declared_foreign_type", "declared_space_type"]) m.db.ensure(s, 2).dynamic = true;
   }
 }

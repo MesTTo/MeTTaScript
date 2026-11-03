@@ -16,6 +16,8 @@ export class Slot {
 export class Clause {
   /** Generation in which the clause was retracted; Infinity while it lives. */
   died = Infinity;
+  /** The file a consult loaded the clause from (clause_property/2 file(F)); null for asserted clauses. */
+  file: string | null = null;
   constructor(
     public readonly pred: Pred,
     public readonly head: Term,
@@ -122,6 +124,10 @@ export class Pred {
   /** A MeTTa space's rows (PeTTa names a space &name), where ground membership tests dominate. */
   readonly isSpace: boolean;
   dynamic = false;
+  /** Declared multifile: several files may add clauses. */
+  multifile = false;
+  /** The file that first defined the predicate by consulting (source_file/2); null when only asserted. */
+  file: string | null = null;
   private indexes: (ArgIndex | null)[] | null = null;
   /** Clauses by the key of their whole ground argument tuple, and the clauses whose head is not ground. */
   private groundIndex: Map<string, Clause[]> | null = null;
