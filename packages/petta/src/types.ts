@@ -100,7 +100,15 @@ export class Types {
         if (prior === kw) return;
         if (kw === "SpaceOf") this.validateExistingRows(n, value);
         this.kindOf.set(n, kw);
-        if (kw === "Alias") this.aliases.set(n, value);
+        if (kw === "Alias") {
+          this.aliases.set(n, value);
+          // renormalize_late_alias/2: declarations written before the alias now read through it.
+          for (const [f, list] of this.fnDecls)
+            this.fnDecls.set(
+              f,
+              list.map((d) => ({ args: d.args.map((x) => this.normalize(x)), out: this.normalize(d.out), det: d.det })),
+            );
+        }
         m.addClause(S(KINDS[kw]!, n, value), true);
         return;
       }
@@ -329,6 +337,12 @@ export class Types {
     const ai = listToArray(a);
     if (ti !== null && ti.length === 2 && deref(ti[0]!) === "List" && a instanceof Cons) {
       this.bindParamType(a.head, ti[1]!);
+      return;
+    }
+    // structural_pattern_fields/4: a tagged pattern (Tag Fields...) against the tuple type (Tag FieldTs...)
+    // types the fields; the tag is structure, not a value to check.
+    if (ai !== null && ti !== null && ai.length === ti.length && ai.length > 0 && typeof deref(ai[0]!) === "string" && deref(ai[0]!) === deref(ti[0]!)) {
+      ai.slice(1).forEach((x, i) => this.bindParamType(x, ti[i + 1]!));
       return;
     }
     if (ai !== null && ti !== null && ai.length === ti.length && fnTypeShape(T) === null && deref(ti[0]!) !== "|") {
@@ -616,6 +630,7 @@ constructed_definite_mismatch(V) :- is_list(V), V = [H|Args], atom(H), length(Ar
 atom_value_status(V, T, St) :- value_candidate_types(V, Cs), ( Cs == [] -> St = unknown ; member(C, Cs), type_unify(C, T) -> St = ok ; St = mismatch ).
 tuple_fields_status([], [], ok).
 tuple_fields_status([F|Fs], [T|Ts], St) :- elem_status(F, T, S1), ( S1 == mismatch -> St = mismatch ; tuple_fields_status(Fs, Ts, S2), ( S2 == mismatch -> St = mismatch ; S1 == unknown -> St = unknown ; St = S2 ) ).
+list_elems_status(Es, ET, St) :- var(ET), !, St = ok, ( maplist(value_single_type, Es, Ts), Ts = [T1|Rest], forall(member(T2, Rest), T2 =@= T1) -> ET = T1 ; true ).
 list_elems_status([], _, ok).
 list_elems_status([E|Es], ET, St) :- elem_status(E, ET, S1), ( S1 == mismatch -> St = mismatch ; list_elems_status(Es, ET, S2), ( S2 == mismatch -> St = mismatch ; S1 == unknown -> St = unknown ; St = S2 ) ).
 elem_status(E, ET, St) :- ( var(E) -> ( known_singleton(E, K) -> ( type_unify(K, ET) -> St = ok ; St = mismatch ) ; St = unknown ) ; check_value(E, ET, St) ).
