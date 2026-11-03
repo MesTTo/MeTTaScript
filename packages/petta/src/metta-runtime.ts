@@ -189,9 +189,9 @@ foldall(Folder, Goal, V0, V) :- State = state(V0), ( call(Goal), arg(1, State, S
 hyperpose_runtime(Exprs, Out) :- is_list(Exprs), concurrent_and(member(Expr, Exprs), eval(Expr, Out)).
 goal_or_throw(Goal, Error) :- ( call(Goal) *-> true ; throw(Error) ).
 match(_, LComma, OutPattern, Result) :- LComma == [','], !, Result = OutPattern.
-match(Space, [Comma|[Head|Tail]], OutPattern, Result) :- Comma == ',', !, ( var(Head) -> 'get-atoms'(Space, Head) ; is_list(Head), Head = [_|_] -> append([Space], Head, List), Term =.. List, space_call(Term) ; must_be(atom, Space), space_primitive(Space, Head) ), match(Space, [','|Tail], OutPattern, Result).
-match(Space, PatternVar, OutPattern, Result) :- var(PatternVar), !, 'get-atoms'(Space, PatternVar), Result = OutPattern.
-match(Space, Pattern, OutPattern, Result) :- ( is_list(Pattern), Pattern = [Rel|PatArgs] -> Term =.. [Space, Rel | PatArgs], space_call(Term) ; must_be(atom, Space), space_primitive(Space, Pattern) ), Result = OutPattern.
+match(Space, [Comma|[Head|Tail]], OutPattern, Result) :- Comma == ',', !, ( var(Head) -> 'get-atoms'(Space, Head) ; is_list(Head), Head = [_|_] -> append([Space], Head, List), Term =.. List, space_call(Term) ; must_be(atom, Space), space_primitive(Space, Head) ), \+ cyclic_term(OutPattern), match(Space, [','|Tail], OutPattern, Result).
+match(Space, PatternVar, OutPattern, Result) :- var(PatternVar), !, 'get-atoms'(Space, PatternVar), \+ cyclic_term(OutPattern), Result = OutPattern.
+match(Space, Pattern, OutPattern, Result) :- ( is_list(Pattern), Pattern = [Rel|PatArgs] -> Term =.. [Space, Rel | PatArgs], space_call(Term) ; must_be(atom, Space), space_primitive(Space, Pattern) ), \+ cyclic_term(OutPattern), Result = OutPattern.
 space_call(Term) :- catch(Term, E, space_missing(E, Term)).
 space_missing(error(existence_error(procedure, Space/Arity), _), Term) :- functor(Term, Space, Arity), !, dynamic(Space/Arity), fail.
 space_missing(E, _) :- throw(E).

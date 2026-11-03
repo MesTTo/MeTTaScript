@@ -5,10 +5,12 @@
 
 // Purpose: the petta command, PeTTa's run.sh and main.pl over the TypeScript engine: leading .metta arguments
 // are files loaded in order, the rest flags (--silent, --strict, --strict-det); results print after the whole
-// load; halt/1 sets the exit status, an uncaught error prints SWI's "ERROR:" report and exits 2.
+// load; halt/1 sets the exit status, an uncaught error prints SWI's "ERROR:" report and exits 2. The engine
+// runs in a worker thread whose stack is sized for deep terms, as SWI's stacks are (run.sh gives 8 GB).
 // am[implements a-pe-loader-cli]
 
 import { writeSync } from "node:fs";
+import { Worker, isMainThread, parentPort, workerData } from "node:worker_threads";
 import { Petta } from "./engine";
 import { errorMessage } from "./messages";
 import { Halt, PrologError } from "./terms";
@@ -37,8 +39,7 @@ function write(fd: number, s: string): void {
   }
 }
 
-function main(): number {
-  const args = process.argv.slice(2);
+function run(args: string[]): number {
   const petta = new Petta({ argv: args, out: (s) => write(1, s), err: (s) => write(2, s) });
   const files = mettaFiles(args.filter((a) => !["silent", "--silent", "-s"].includes(a)));
   try {
@@ -58,4 +59,19 @@ function main(): number {
   }
 }
 
-process.exitCode = main();
+if (isMainThread) {
+  // Stack and heap limits for the engine thread: deep MeTTa terms recurse in printing, copying and comparing.
+  const worker = new Worker(new URL(import.meta.url), {
+    workerData: process.argv.slice(2),
+    resourceLimits: { stackSizeMb: 1024, maxOldGenerationSizeMb: 16384 },
+  });
+  worker.on("message", (status: number) => {
+    process.exitCode = status;
+  });
+  worker.on("error", (e) => {
+    write(2, "ERROR: " + (e instanceof Error ? e.message : String(e)) + "\n");
+    process.exitCode = 2;
+  });
+} else {
+  parentPort!.postMessage(run(workerData as string[]));
+}

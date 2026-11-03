@@ -418,8 +418,8 @@ export function installBuiltins(m: Machine): void {
     return false;
   }));
   def("ground", 1, det((_, [a]) => isGround(a!)));
-  def("cyclic_term", 1, det(() => false));
-  def("acyclic_term", 1, det(() => true));
+  def("cyclic_term", 1, det((_, [t]) => isCyclic(t!)));
+  def("acyclic_term", 1, det((_, [t]) => !isCyclic(t!)));
 
   // attributed variables
   def("put_attr", 3, det((m2, [v, mod, val]) => {
@@ -1358,6 +1358,30 @@ export function installBuiltins(m: Machine): void {
 }
 
 // ---- helpers used by the table ----
+
+/** Whether a term is a rational tree: some compound contains itself. Time: term size, iterative DFS. */
+export function isCyclic(t: Term): boolean {
+  const onPath = new Set<object>();
+  const done = new Set<object>();
+  const stack: [Term, boolean][] = [[t, false]];
+  while (stack.length > 0) {
+    const [x0, exit] = stack.pop()!;
+    const x = deref(x0);
+    if (!(x instanceof Cons || x instanceof Struct)) continue;
+    if (exit) {
+      onPath.delete(x);
+      done.add(x);
+      continue;
+    }
+    if (onPath.has(x)) return true;
+    if (done.has(x)) continue;
+    onPath.add(x);
+    stack.push([x, true]);
+    if (x instanceof Cons) stack.push([x.tail, false], [x.head, false]);
+    else for (let i = x.args.length - 1; i >= 0; i--) stack.push([x.args[i]!, false]);
+  }
+  return false;
+}
 
 export function isGround(t: Term): boolean {
   t = deref(t);

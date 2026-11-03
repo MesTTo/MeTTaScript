@@ -54,7 +54,7 @@ function run(name, mode) {
   const argv = [cli, `./examples/${name}.metta`, "--silent", ...(mode ? [mode] : [])];
   return new Promise((done) => {
     const t0 = performance.now();
-    const child = spawn(process.execPath, ["--stack-size=16000", ...argv], { cwd: corpus, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, argv, { cwd: corpus, stdio: ["ignore", "pipe", "pipe"] });
     let out = Buffer.alloc(0);
     let err = Buffer.alloc(0);
     child.stdout.on("data", (d) => {

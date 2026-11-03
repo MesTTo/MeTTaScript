@@ -12,7 +12,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, resolve as resolvePath, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { evalArith } from "./arith";
-import { clauseRef, collectVars, installBuiltins, compareTerms, variant } from "./builtins";
+import { clauseRef, collectVars, installBuiltins, compareTerms, isCyclic, variant } from "./builtins";
 import type { Clause } from "./db";
 import { installLibrary } from "./library";
 import { installConsult } from "./consult";
@@ -554,7 +554,8 @@ export class Petta {
           m2.pushGoal(S("reduce", mkList([f.args[0]!, ...bound, ...args]), out!));
           return true;
         }
-        return m2.unify(out!, e!);
+        // reduce/2 case 3: the expression stays as data unless it became a rational tree.
+        return m2.unify(out!, e!) && !isCyclic(out!);
       },
     });
     det("throw_function_overapplication", 2, ([f, n]) => {
