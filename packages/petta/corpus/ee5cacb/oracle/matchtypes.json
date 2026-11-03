@@ -1,0 +1,6 @@
+{
+ "name": "matchtypes",
+ "mode": "",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \nis true, should true. ✅ \nis true, should true. ✅ \nis false, should false. ✅ \n\"Matched!\"\n\"Didn't match\"\ntrue\ntrue\ntrue\ntrue\n"
+}

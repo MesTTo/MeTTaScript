@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_closures",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is 7, should 7. ✅ \nis 7, should 7. ✅ \ntrue\ntrue\n"
+}

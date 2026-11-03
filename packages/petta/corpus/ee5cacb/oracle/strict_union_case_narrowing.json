@@ -1,0 +1,6 @@
+{
+ "name": "strict_union_case_narrowing",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is 2, should 2. ✅ \nis 0, should 0. ✅ \ntrue\ntrue\n"
+}

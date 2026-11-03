@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_typed_space",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_typed_space.metta:5 in:\n  (add-atom &jobs (job-row \"wrong\" \"compile\"))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_typed_space.metta'/0: Type mismatch: got ['job-row',\"wrong\",\"compile\"] but expected ['job-row','Number','String'] (while loading MeTTa file)\n"
+}

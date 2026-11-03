@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_nested_constructed_tuple_case_newtype_field",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is premise-kb, should premise-kb. ✅ \ntrue\ntrue\n"
+}

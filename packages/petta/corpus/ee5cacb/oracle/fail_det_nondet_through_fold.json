@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_nondet_through_fold",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_nondet_through_fold.metta:8 in:\n  (= (sum-nd $items)\n   (fold-flat nd-step 0 $items))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_nondet_through_fold.metta'/0: Determinism check failed for 'sum-nd': call('fold-flat') (while loading MeTTa file)\n"
+}

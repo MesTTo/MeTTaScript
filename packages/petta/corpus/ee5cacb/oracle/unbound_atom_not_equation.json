@@ -1,0 +1,6 @@
+{
+ "name": "unbound_atom_not_equation",
+ "mode": "",
+ "status": 0,
+ "stdout": "is raised, should raised. ✅ \nis raised, should raised. ✅ \nis 1, should 1. ✅ \nis 2, should 2. ✅ \nis (1), should (1). ✅ \nis (2), should (2). ✅ \nis raised, should raised. ✅ \nis true, should true. ✅ \nis ($_0), should ($_0). ✅ \nis true, should true. ✅ \nis true, should true. ✅ \nis (3), should (3). ✅ \nis (4), should (4). ✅ \nis true, should true. ✅ \nis (), should (). ✅ \nis 1, should 1. ✅ \nis raised, should raised. ✅ \nis (), should (). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

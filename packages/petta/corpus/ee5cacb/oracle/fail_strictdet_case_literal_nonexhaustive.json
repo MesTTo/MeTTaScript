@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_case_literal_nonexhaustive",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_case_literal_nonexhaustive.metta:2 in:\n  (= (impossible) (case True ((False 1))))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_case_literal_nonexhaustive.metta'/0: Determinism check failed for impossible: nonexhaustive_case(key(true,0)) (while loading MeTTa file)\n"
+}

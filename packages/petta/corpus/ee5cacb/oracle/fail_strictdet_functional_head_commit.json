@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_functional_head_commit",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_functional_head_commit.metta:4 in:\n  (= (guarded (head-choice)) 0)\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_functional_head_commit.metta'/0: Determinism check failed for guarded: functional head [guarded,_91166] generates fallible head goals; explicit det/semidet validation cannot certify it (while loading MeTTa file)\n"
+}

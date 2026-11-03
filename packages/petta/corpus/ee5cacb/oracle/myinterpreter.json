@@ -1,0 +1,6 @@
+{
+ "name": "myinterpreter",
+ "mode": "",
+ "status": 0,
+ "stdout": "(\"Runtime-interpreting code\" (if (== 1 1) (w) (v)))\nis 42, should 42. ✅ \n(\"Runtime-interpreting code\" (if (== 1 2) (w) (v)))\nis 43, should 43. ✅ \ntrue\ntrue\n"
+}

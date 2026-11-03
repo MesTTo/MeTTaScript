@@ -64,3 +64,11 @@ path = ["packages/py/corpus/**", "website/public/**"]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 MesTTo"
 SPDX-License-Identifier = "MIT"
+
+# PeTTa's own sources vendored by @mettascript/petta: its MeTTa libraries, which the engine loads, and the ee5cacb
+# example corpus with the oracle records of PeTTa's runs, which the alignment harness compares against.
+[[annotations]]
+path = ["packages/petta/lib/**", "packages/petta/corpus/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2025 Patrick Hammer and the PeTTa contributors — PeTTa (https://github.com/trueagi-io/PeTTa)"
+SPDX-License-Identifier = "MIT"

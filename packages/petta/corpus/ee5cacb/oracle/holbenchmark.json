@@ -1,0 +1,6 @@
+{
+ "name": "holbenchmark",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 1000000, should 1000000. ✅ \nis 25500000, should 25500000. ✅ \nis 100000, should 100000. ✅ \nis 500001500000, should 500001500000. ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

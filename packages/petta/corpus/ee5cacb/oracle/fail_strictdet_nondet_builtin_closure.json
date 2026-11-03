@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_nondet_builtin_closure",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_nondet_builtin_closure.metta:3 in:\n  (= (any-true $bs) (foldl-atom $bs False or))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_nondet_builtin_closure.metta'/0: Determinism check failed for 'any-true': unknown(['foldl-atom',_86994,false,or]) (while loading MeTTa file)\n"
+}

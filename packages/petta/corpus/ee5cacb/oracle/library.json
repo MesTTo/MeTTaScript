@@ -1,0 +1,6 @@
+{
+ "name": "library",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (2 3 4), should (2 3 4). ✅ \ntrue\ntrue\n"
+}

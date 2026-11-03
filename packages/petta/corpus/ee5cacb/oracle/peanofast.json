@@ -1,0 +1,6 @@
+{
+ "name": "peanofast",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 2500, should 2500. ✅ \ndone\ntrue\n"
+}

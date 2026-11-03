@@ -1,0 +1,6 @@
+{
+ "name": "determinism_lco",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 0, should 0. ✅ \ntrue\n"
+}

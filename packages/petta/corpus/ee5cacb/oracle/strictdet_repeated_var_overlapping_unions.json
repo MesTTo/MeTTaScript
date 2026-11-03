@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_repeated_var_overlapping_unions",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \ntrue\n"
+}

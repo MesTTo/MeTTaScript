@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_lib_he",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is yes, should yes. ✅ \nis (2 3), should (2 3). ✅ \nis ((1 2) (1 12) (11 2) (11 12)), should ((1 2) (1 12) (11 2) (11 12)). ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

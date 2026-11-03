@@ -1,0 +1,6 @@
+{
+ "name": "holfunctions",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 10, should 10. ✅ \nis (2 3 4), should (2 3 4). ✅ \nis (4 5), should (4 5). ✅ \nis 10, should 10. ✅ \nis (2 3 4), should (2 3 4). ✅ \nis (4 5), should (4 5). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n(1 2 3 4 5 6)\n"
+}

@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_effect_poly_open_list",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_effect_poly_open_list.metta:13 in:\n  (= (map-an-open-list) (effect-map plus-one $open))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_effect_poly_open_list.metta'/0: Determinism check failed for 'map-an-open-list': call('effect-map') (while loading MeTTa file)\n"
+}

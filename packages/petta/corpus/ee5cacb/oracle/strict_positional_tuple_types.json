@@ -1,0 +1,6 @@
+{
+ "name": "strict_positional_tuple_types",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is 0.9, should 0.9. ✅ \nis 0.25, should 0.25. ✅ \nis 0.5, should 0.5. ✅ \ntrue\ntrue\ntrue\n"
+}

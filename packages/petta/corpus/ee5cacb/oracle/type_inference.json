@@ -1,0 +1,6 @@
+{
+ "name": "type_inference",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 42, should 42. ✅ \nis Error, should Error. ✅ \nis (2 3 4), should (2 3 4). ✅ \nis Error, should Error. ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "letlet",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (1 2 3), should (1 2 3). ✅ \ntrue\n"
+}

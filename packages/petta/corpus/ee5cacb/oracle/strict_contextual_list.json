@@ -1,0 +1,6 @@
+{
+ "name": "strict_contextual_list",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (1 2 3), should (1 2 3). ✅ \nis ((1 \"a\") (2 \"b\")), should ((1 \"a\") (2 \"b\")). ✅ \nis ((3 \"c\") (4 \"d\")), should ((3 \"c\") (4 \"d\")). ✅ \nis ((7) \"wrapped\"), should ((7) \"wrapped\"). ✅ \nis ((1 2 3) \"triple\"), should ((1 2 3) \"triple\"). ✅ \nis ((+ 1 2) foo ($_0 bar)), should ((+ 1 2) foo ($_0 bar)). ✅ \nis (5 6), should (5 6). ✅ \nis (7), should (7). ✅ \nis 17, should 17. ✅ \nis (10 11), should (10 11). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

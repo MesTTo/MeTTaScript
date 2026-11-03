@@ -28,3 +28,7 @@ isolate-*.log
 /billboard-25d.png
 /browser-ide-mobile.png
 /readme-full.png
+
+# Agent worktrees and gate trees
+/worktrees/
+/ai-battery-*/

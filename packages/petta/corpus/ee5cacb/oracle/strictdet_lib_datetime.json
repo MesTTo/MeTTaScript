@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_lib_datetime",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is Saturday, should Saturday. ✅ \nis January, should January. ✅ \ntrue\ntrue\ntrue\n"
+}

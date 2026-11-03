@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_closure_output_promise",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_closure_output_promise.metta:2 in:\n  (= (g $f) ($f 1))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_closure_output_promise.metta'/0: Strict mode rejected residual runtime type goal in g: typecheck_or_error(_109560,'Number') (while loading MeTTa file)\n"
+}

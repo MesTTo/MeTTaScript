@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_case_fallthrough_incomplete",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_case_fallthrough_incomplete.metta:11 in:\n  (= (dispatch $v)\n   (case $v\n      (((mk-ref $n) $n)\n       ($rest (use-wrapped $rest)))))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_case_fallthrough_incomplete.metta'/0: Strict mode rejected residual runtime type goal in 'use-wrapped': typecheck_or_error(_126096,'Wrapped') (while loading MeTTa file)\n"
+}

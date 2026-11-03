@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_alias_late",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_alias_late.metta:6 in:\n  (= (bad-late-row) (data 1 2))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_alias_late.metta'/0: Type mismatch: got 2 but expected 'String' (while loading MeTTa file)\n"
+}

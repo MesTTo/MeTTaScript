@@ -1,0 +1,6 @@
+{
+ "name": "strict_symmetric_var_conflict",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \ntrue\ntrue\n"
+}

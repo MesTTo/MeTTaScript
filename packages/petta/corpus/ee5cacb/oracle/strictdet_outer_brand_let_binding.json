@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_outer_brand_let_binding",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \nis true, should true. ✅ \ntrue\ntrue\ntrue\n"
+}

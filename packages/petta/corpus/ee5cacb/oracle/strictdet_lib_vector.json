@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_lib_vector",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is 11.0, should 11.0. ✅ \nis 5.0, should 5.0. ✅ \ntrue\ntrue\ntrue\n"
+}

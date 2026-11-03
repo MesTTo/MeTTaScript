@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_decons_semidet",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is (head (tail)), should (head (tail)). ✅ \nis (), should (). ✅ \ntrue\ntrue\n"
+}

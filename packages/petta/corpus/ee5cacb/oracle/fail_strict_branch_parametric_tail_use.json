@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_branch_parametric_tail_use",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_branch_parametric_tail_use.metta:8 in:\n  (= (parametric-after-branch $value)\n   (progn\n      (if (= $value (TailWrap $_number)) true false)\n      (accepts-tail-wrapped? $value)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_branch_parametric_tail_use.metta'/0: Declared parametric parameter of 'parametric-after-branch' is used as 'TailWrapped' by its implementation; declare the concrete type instead (while loading MeTTa file)\n"
+}

@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_match_contextual_result",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_match_contextual_result.metta:7 in:\n  (= (bad-matched-row $wanted)\n   (match &labels (label-row $wanted $_label)\n          (data $wanted \"not-a-number\")))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_match_contextual_result.metta'/0: Type mismatch: got \"not-a-number\" but expected 'Number' (while loading MeTTa file)\n"
+}

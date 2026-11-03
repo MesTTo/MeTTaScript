@@ -1,0 +1,6 @@
+{
+ "name": "strict_branch_output_ascription",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (StoredSTVValue 0.5 0.75), should (StoredSTVValue 0.5 0.75). ✅ \ntrue\n"
+}

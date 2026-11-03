@@ -1,0 +1,7 @@
+{
+ "name": "fail_nonexhaustive_det",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_nonexhaustive_det.metta:2 in:\n  (= (lookup 1) 10)\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_nonexhaustive_det.metta'/0: Deterministic function lookup is not exhaustive: argument 1 matches no clause for a Number outside the matched literals - cover the remaining cases, or declare it -[semidet]-> (zero or one result, committed exactly like -[det]->) (while loading MeTTa file)\n"
+}

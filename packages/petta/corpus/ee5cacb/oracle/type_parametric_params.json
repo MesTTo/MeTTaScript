@@ -1,0 +1,6 @@
+{
+ "name": "type_parametric_params",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 7, should 7. ✅ \nis \"s\", should \"s\". ✅ \nis 1, should 1. ✅ \nis 2, should 2. ✅ \nis 42, should 42. ✅ \nis \"t\", should \"t\". ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

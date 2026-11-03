@@ -1,0 +1,6 @@
+{
+ "name": "invertpeanoplus",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (S (S (S Z))), should (S (S (S Z))). ✅ \nis (S (S (S Z))), should (S (S (S Z))). ✅ \nis (S (S (S Z))), should (S (S (S Z))). ✅ \nis ((Z (S (S (S (S Z))))) ((S Z) (S (S (S Z)))) ((S (S Z)) (S (S Z))) ((S (S (S Z))) (S Z)) ((S (S (S (S Z)))) Z)), should ((Z (S (S (S (S Z))))) ((S Z) (S (S (S Z)))) ((S (S Z)) (S (S Z))) ((S (S (S Z))) (S Z)) ((S (S (S (S Z)))) Z)). ✅ \nis (Z (S (S (S (S Z))))), should (Z (S (S (S (S Z))))). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

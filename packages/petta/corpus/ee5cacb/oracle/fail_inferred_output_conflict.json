@@ -1,0 +1,7 @@
+{
+ "name": "fail_inferred_output_conflict",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_inferred_output_conflict.metta:10 in:\n  (= (f2 $a) (f $a))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_inferred_output_conflict.metta'/0: Type conflict: value is constrained as 'B' but also required as 'A' (while loading MeTTa file)\n"
+}

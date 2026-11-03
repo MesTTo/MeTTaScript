@@ -1,0 +1,6 @@
+{
+ "name": "lib_roman_pair_helpers",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (2 9), should (2 9). ✅ \nis (1 10), should (1 10). ✅ \nis (right left), should (right left). ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

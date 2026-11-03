@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_effect_poly_bad_position",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_effect_poly_bad_position.metta:1 in:\n  (: nested-effect-position\n   (-[$e]-> (-[$e]-> Number (-[$e]-> Number Number)) Number))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_effect_poly_bad_position.metta'/0: Effect variable $e in the declaration for 'nested-effect-position' may appear only on the top-level arrow or a direct closure parameter arrow (while loading MeTTa file)\n"
+}

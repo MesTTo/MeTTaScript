@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_inferred_call_selection",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is 1, should 1. ✅ \nis 0, should 0. ✅ \ntrue\ntrue\n"
+}

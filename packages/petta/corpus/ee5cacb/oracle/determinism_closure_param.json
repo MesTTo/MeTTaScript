@@ -1,0 +1,6 @@
+{
+ "name": "determinism_closure_param",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 2, should 2. ✅ \nis 11, should 11. ✅ \ntrue\ntrue\n"
+}

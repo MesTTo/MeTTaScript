@@ -1,0 +1,6 @@
+{
+ "name": "curry",
+ "mode": "",
+ "status": 0,
+ "stdout": "is \"(partial f (1))\", should \"(partial f (1))\". ✅ \nis 3, should 3. ✅ \nis \"(partial g (1 2))\", should \"(partial g (1 2))\". ✅ \nis (42 1 2 3), should (42 1 2 3). ✅ \nis \"(partial h (42))\", should \"(partial h (42))\". ✅ \nis (2 3 4), should (2 3 4). ✅ \nis \"(Error (domain_error (function_input_arities + (2)) 3) none)\", should \"(Error (domain_error (function_input_arities + (2)) 3) none)\". ✅ \nis \"(Error (domain_error (function_input_arities + (2)) 3) none)\", should \"(Error (domain_error (function_input_arities + (2)) 3) none)\". ✅ \nis \"(partial overloaded-curry (1 2))\", should \"(partial overloaded-curry (1 2))\". ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

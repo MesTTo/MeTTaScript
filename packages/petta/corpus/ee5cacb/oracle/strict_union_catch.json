@@ -1,0 +1,6 @@
+{
+ "name": "strict_union_catch",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is 9, should 9. ✅ \nis 1.0e+06, should 1.0e+06. ✅ \ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "types",
+ "mode": "",
+ "status": 0,
+ "stdout": "is $_0, should $_0. ✅ \nis A, should A. ✅ \nis B, should B. ✅ \nis %Undefined%, should %Undefined%. ✅ \nis Type, should Type. ✅ \nis %Undefined%, should %Undefined%. ✅ \nis (A B), should (A B). ✅ \nis Number, should Number. ✅ \nis String, should String. ✅ \nis (Letter Buchstabe), should (Letter Buchstabe). ✅ \nis (a b), should (a b). ✅ \nis Number, should Number. ✅ \nis t, should t. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

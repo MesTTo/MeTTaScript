@@ -1,0 +1,6 @@
+{
+ "name": "swrite_variable_identity",
+ "mode": "",
+ "status": 0,
+ "stdout": "is distinct-preserved, should distinct-preserved. ✅ \nis sharing-preserved, should sharing-preserved. ✅ \ntrue\ntrue\n"
+}

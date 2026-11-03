@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_unified_cross_file_cache",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \ntrue\ntrue\n"
+}

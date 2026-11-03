@@ -1,0 +1,6 @@
+{
+ "name": "type_decl_kind_conflicts",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 7, should 7. ✅ \nis 8, should 8. ✅ \nis 9, should 9. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

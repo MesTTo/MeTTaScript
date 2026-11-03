@@ -1,0 +1,6 @@
+{
+ "name": "matespacefast",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 1572862, should 1572862. ✅ \ntrue\n"
+}

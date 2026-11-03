@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_nested_nominal_arg",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \ntrue\n"
+}

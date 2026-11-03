@@ -1,0 +1,6 @@
+{
+ "name": "invertfunction",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (1 (2 3 4 5 6)), should (1 (2 3 4 5 6)). ✅ \nis (1 (2 3 4 5 6)), should (1 (2 3 4 5 6)). ✅ \nis (7 (2 3) 40), should (7 (2 3) 40). ✅ \ntrue\ntrue\ntrue\n"
+}

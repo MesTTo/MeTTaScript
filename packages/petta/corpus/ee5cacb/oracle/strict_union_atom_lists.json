@@ -1,0 +1,6 @@
+{
+ "name": "strict_union_atom_lists",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is ((item 1) (item 2)), should ((item 1) (item 2)). ✅ \nis ((item 0)), should ((item 0)). ✅ \nis ((item 0) (item 1)), should ((item 0) (item 1)). ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

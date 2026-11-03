@@ -1,0 +1,6 @@
+{
+ "name": "scale",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (all: 1000000 first: 1 second: 100000 rel: 1 both: 1), should (all: 1000000 first: 1 second: 100000 rel: 1 both: 1). ✅ \ntrue\n"
+}

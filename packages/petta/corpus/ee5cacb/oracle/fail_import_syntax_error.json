@@ -1,0 +1,7 @@
+{
+ "name": "fail_import_syntax_error",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "ERROR: [Thread main] src/main.pl:123: user:main 'examples/soundness/import_syntax_broken.metta'/0: Syntax error: missing ')', starting at line 2:\n= (imported-value) 7 (while loading MeTTa file)\n"
+}

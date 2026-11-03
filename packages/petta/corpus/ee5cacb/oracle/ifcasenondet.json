@@ -1,0 +1,6 @@
+{
+ "name": "ifcasenondet",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (a b a), should (a b a). ✅ \nis (a b a), should (a b a). ✅ \ntrue\ntrue\n"
+}

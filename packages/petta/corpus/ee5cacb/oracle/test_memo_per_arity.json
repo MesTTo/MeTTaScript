@@ -1,0 +1,6 @@
+{
+ "name": "test_memo_per_arity",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 7, should 7. ✅ \nis 7, should 7. ✅ \nis 6, should 6. ✅ \nis 11, should 11. ✅ \nis 11, should 11. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

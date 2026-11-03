@@ -1,0 +1,6 @@
+{
+ "name": "type_decl_removal_kinds",
+ "mode": "",
+ "status": 0,
+ "stdout": "is token, should token. ✅ \nis 3, should 3. ✅ \nis 4, should 4. ✅ \nis \"open\", should \"open\". ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

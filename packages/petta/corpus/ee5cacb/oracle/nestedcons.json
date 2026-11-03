@@ -1,0 +1,6 @@
+{
+ "name": "nestedcons",
+ "mode": "",
+ "status": 0,
+ "stdout": "is b, should b. ✅ \ntrue\n"
+}

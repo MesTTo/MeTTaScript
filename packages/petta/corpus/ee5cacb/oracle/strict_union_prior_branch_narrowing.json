@@ -1,0 +1,6 @@
+{
+ "name": "strict_union_prior_branch_narrowing",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is 0.2, should 0.2. ✅ \nis 0.1, should 0.1. ✅ \nis 0.5, should 0.5. ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

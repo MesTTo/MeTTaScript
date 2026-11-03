@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_inferred_call_many",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_inferred_call_many.metta:5 in:\n  (= (inferred-many-consumer) (choose-head $which))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_inferred_call_many.metta'/0: Determinism check failed for 'inferred-many-consumer': call('choose-head') (while loading MeTTa file)\n"
+}

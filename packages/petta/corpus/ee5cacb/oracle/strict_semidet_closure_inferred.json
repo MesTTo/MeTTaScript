@@ -1,0 +1,6 @@
+{
+ "name": "strict_semidet_closure_inferred",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is 2, should 2. ✅ \nis (), should (). ✅ \nis 21, should 21. ✅ \nis (), should (). ✅ \nis 5, should 5. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

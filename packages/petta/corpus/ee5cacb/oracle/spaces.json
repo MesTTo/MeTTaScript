@@ -1,0 +1,6 @@
+{
+ "name": "spaces",
+ "mode": "",
+ "status": 0,
+ "stdout": "is ((bar a) (bar b)), should ((bar a) (bar b)). ✅ \ntrue\n"
+}

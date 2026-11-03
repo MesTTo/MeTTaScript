@@ -1,0 +1,7 @@
+{
+ "name": "fail_spaceof_existing_primitive",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_spaceof_existing_primitive.metta:2 in:\n  (: &nums (SpaceOf Number))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_spaceof_existing_primitive.metta'/0: SpaceOf declaration for '&nums' rejects existing row \"oops\": it definitely contradicts schema 'Number' (while loading MeTTa file)\n"
+}

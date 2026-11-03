@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_remove_atom_nominal",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \nis true, should true. ✅ \ntrue\ntrue\n"
+}

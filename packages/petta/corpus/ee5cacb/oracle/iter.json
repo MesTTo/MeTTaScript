@@ -1,0 +1,6 @@
+{
+ "name": "iter",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (0 1 2), should (0 1 2). ✅ \ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "strict_the_ascription",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is \"bob\", should \"bob\". ✅ \nis Error, should Error. ✅ \ntrue\ntrue\ntrue\n"
+}

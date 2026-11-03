@@ -1,0 +1,7 @@
+{
+ "name": "fail_lib_trust_unverified_effect",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_lib_trust_unverified_effect.metta:10 in:\n  (= (trusted-effect-launder) (untyped-trusted-bridge))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_lib_trust_unverified_effect.metta'/0: Determinism check failed for 'trusted-effect-launder': call('untyped-trusted-bridge') (while loading MeTTa file)\n"
+}

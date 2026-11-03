@@ -1,0 +1,6 @@
+{
+ "name": "strict_dynamic_list_recursion",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (1 \"two\" three), should (1 \"two\" three). ✅ \nis (), should (). ✅ \ntrue\ntrue\ntrue\n"
+}

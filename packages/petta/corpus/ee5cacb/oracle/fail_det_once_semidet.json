@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_once_semidet",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_once_semidet.metta:5 in:\n  (= (h $x) (once (lookup $x)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_once_semidet.metta'/0: Determinism check failed for h: call(lookup) (while loading MeTTa file)\n"
+}

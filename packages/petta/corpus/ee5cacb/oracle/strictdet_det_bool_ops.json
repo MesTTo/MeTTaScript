@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_det_bool_ops",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \nis true, should true. ✅ \nis true, should true. ✅ \nis true, should true. ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

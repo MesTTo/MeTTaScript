@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_selection_single_possible",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_selection_single_possible.metta:4 in:\n  (= (bad $value) (only-true $value))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_selection_single_possible.metta'/0: Determinism check failed for bad: call('only-true') (while loading MeTTa file)\n"
+}

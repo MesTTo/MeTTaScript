@@ -1,0 +1,6 @@
+{
+ "name": "mutex_and_transaction",
+ "mode": "",
+ "status": 0,
+ "stdout": "is ((cnt 42)), should ((cnt 42)). ✅ \nis ((cnt 42)), should ((cnt 42)). ✅ \ntrue\n(true true)\n(true true)\n(true true)\n(true true)\n(true true)\ntrue\ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "strict_type_flow",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (2 3 4), should (2 3 4). ✅ \nis true, should true. ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

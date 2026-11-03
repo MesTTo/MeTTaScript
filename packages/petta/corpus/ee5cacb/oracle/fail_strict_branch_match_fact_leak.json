@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_branch_match_fact_leak",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_branch_match_fact_leak.metta:11 in:\n  (= (match-fact-must-not-leak? $annotated)\n   (if (= $annotated (: $_proof $statement $_tv))\n       true\n       (accepts-statement? $statement)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_branch_match_fact_leak.metta'/0: Strict mode rejected residual runtime type goal in 'accepts-statement?': typecheck_or_error(_292,'Statement') (while loading MeTTa file)\n"
+}

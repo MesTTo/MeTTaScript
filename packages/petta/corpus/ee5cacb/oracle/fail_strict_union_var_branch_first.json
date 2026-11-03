@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_union_var_branch_first",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_union_var_branch_first.metta:22 in:\n  (= (term-confidence $proof-term)\n   (case $proof-term\n      ((($_type ($_kbid $_ctx $_vars) $prf $tv)\n          (proof-score $prf $tv))\n       ((CPU $_fun $_args $res)\n          (cpu-result-confidence $res)))))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_union_var_branch_first.metta'/0: Strict mode rejected residual runtime type goal in 'proof-score': typecheck_or_error(_7470,'Proof') (while loading MeTTa file)\n"
+}

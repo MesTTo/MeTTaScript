@@ -1,0 +1,6 @@
+{
+ "name": "he_error",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 42, should 42. ✅ \nis Error, should Error. ✅ \nis \"Error!\", should \"Error!\". ✅ \nis (Error 5 BadType), should (Error 5 BadType). ✅ \nis 6, should 6. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

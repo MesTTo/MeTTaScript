@@ -1,0 +1,6 @@
+{
+ "name": "functionhead3",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (4), should (4). ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis (4 5), should (4 5). ✅ \nis (3 4 4 5 5), should (3 4 4 5 5). ✅ \nis (2 3), should (2 3). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

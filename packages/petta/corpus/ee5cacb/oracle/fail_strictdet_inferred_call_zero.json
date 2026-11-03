@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_inferred_call_zero",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_inferred_call_zero.metta:4 in:\n  (= (inferred-zero-consumer) (only-one 2))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_inferred_call_zero.metta'/0: Determinism check failed for 'inferred-zero-consumer': call('only-one') (while loading MeTTa file)\n"
+}

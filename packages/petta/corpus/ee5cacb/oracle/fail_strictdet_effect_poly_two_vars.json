@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_effect_poly_two_vars",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_effect_poly_two_vars.metta:1 in:\n  (: two-effect-variables\n   (-[$outer]-> (-[$inner]-> Number Number) Number Number))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_effect_poly_two_vars.metta'/0: Effect-polymorphic declaration for 'two-effect-variables' uses more than one effect variable [inner,outer]; v1 permits one (while loading MeTTa file)\n"
+}

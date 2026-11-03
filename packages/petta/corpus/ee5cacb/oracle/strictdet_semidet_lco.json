@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_semidet_lco",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is 0, should 0. ✅ \nis (), should (). ✅ \ntrue\ntrue\n"
+}

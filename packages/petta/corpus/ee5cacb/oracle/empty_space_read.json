@@ -1,0 +1,6 @@
+{
+ "name": "empty_space_read",
+ "mode": "",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis true, should true. ✅ \nis (1), should (1). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

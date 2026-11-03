@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_if_union_subtraction_variable_head",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is cpu, should cpu. ✅ \nis row-kb, should row-kb. ✅ \ntrue\ntrue\ntrue\n"
+}

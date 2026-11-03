@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_two_arg_if",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_two_arg_if.metta:2 in:\n  (= (g $b) (if $b 1))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_two_arg_if.metta'/0: Determinism check failed for g: if_without_else (while loading MeTTa file)\n"
+}

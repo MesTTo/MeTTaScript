@@ -1,0 +1,6 @@
+{
+ "name": "foldallspacecount",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 3, should 3. ✅ \ntrue\n"
+}

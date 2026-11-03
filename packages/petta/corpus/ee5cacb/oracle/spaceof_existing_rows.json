@@ -1,0 +1,6 @@
+{
+ "name": "spaceof_existing_rows",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (7 7), should (7 7). ✅ \ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_isvar_unenforced_bool",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_isvar_unenforced_bool.metta:2 in:\n  (= (tricky $b) (if (is-var $b) True (and $b True)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_isvar_unenforced_bool.metta'/0: Determinism check failed for tricky: call(and) (while loading MeTTa file)\n"
+}

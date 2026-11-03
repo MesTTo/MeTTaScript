@@ -1,0 +1,6 @@
+{
+ "name": "he_atomspace",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (+ 1 3), should (+ 1 3). ✅ \nis (4), should (4). ✅ \nis A, should A. ✅ \nis Yes, should Yes. ✅ \nis No, should No. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\nNumber\ntrue\ntrue\ntrue\n"
+}

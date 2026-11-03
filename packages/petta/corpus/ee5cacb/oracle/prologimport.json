@@ -1,0 +1,6 @@
+{
+ "name": "prologimport",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 55, should 55. ✅ \nis 42, should 42. ✅ \nis world, should world. ✅ \nis world, should world. ✅ \nis 142, should 142. ✅ \nis 142, should 142. ✅ \nis 242, should 242. ✅ \nis 242, should 242. ✅ \ntrue\ntrue\n()\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

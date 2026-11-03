@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_if_equal_incomplete_narrowing",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_if_equal_incomplete_narrowing.metta:15 in:\n  (= (classify $value)\n   (if (= $value (CPU $function $_arguments $_result))\n       (use-symbol $function)\n       (use-statement $value)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_if_equal_incomplete_narrowing.metta'/0: Strict mode rejected residual runtime type goal in 'use-statement': typecheck_or_error(_6690,'Statement') (while loading MeTTa file)\n"
+}

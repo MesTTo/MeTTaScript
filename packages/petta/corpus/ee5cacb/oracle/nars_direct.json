@@ -1,0 +1,6 @@
+{
+ "name": "nars_direct",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (((grandfather a c) (stv 1.0 0.7290000000000001))), should (((grandfather a c) (stv 1.0 0.7290000000000001))). ✅ \nis (((grandfather a c) (stv 1.0 0.7290000000000001))), should (((grandfather a c) (stv 1.0 0.7290000000000001))). ✅ \nis (((old a) (stv 1.0 0.6561000000000001))), should (((old a) (stv 1.0 0.6561000000000001))). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

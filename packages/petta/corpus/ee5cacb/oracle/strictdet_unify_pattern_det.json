@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_unify_pattern_det",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \ntrue\n"
+}

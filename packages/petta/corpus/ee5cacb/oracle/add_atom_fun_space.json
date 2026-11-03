@@ -1,0 +1,6 @@
+{
+ "name": "add_atom_fun_space",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (my test atom), should (my test atom). ✅ \ntrue\ntrue\n"
+}

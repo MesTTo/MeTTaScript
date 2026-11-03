@@ -1,0 +1,6 @@
+{
+ "name": "callquoteevalreduce",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (before-call-errors-ofc (quote-before (fib 5)) (eval-before (fib 5)) (reduce-before (fib 5))), should (before-call-errors-ofc (quote-before (fib 5)) (eval-before (fib 5)) (reduce-before (fib 5))). ✅ \nis ((within (fib 5)) (call-within 5) (quote-within (fib 5)) (eval-within 5) (reduce-within 5)), should ((within (fib 5)) (call-within 5) (quote-within (fib 5)) (eval-within 5) (reduce-within 5)). ✅ \nis ((call-before 5) (quote-before (fib 5)) (eval-before 5) (reduce-before 5)), should ((call-before 5) (quote-before (fib 5)) (eval-before 5) (reduce-before 5)). ✅ \nis ((call-after 5) (quote-after (fib 5)) (eval-after 5) (reduce-after 5)), should ((call-after 5) (quote-after (fib 5)) (eval-after 5) (reduce-after 5)). ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

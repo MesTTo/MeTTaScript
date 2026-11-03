@@ -1,0 +1,6 @@
+{
+ "name": "import_space_identity",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (present), should (present). ✅ \nis (present), should (present). ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

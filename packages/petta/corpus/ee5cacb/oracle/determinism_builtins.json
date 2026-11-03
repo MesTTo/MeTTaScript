@@ -1,0 +1,6 @@
+{
+ "name": "determinism_builtins",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 12, should 12. ✅ \nis true, should true. ✅ \nis (a b), should (a b). ✅ \nis 2, should 2. ✅ \nis (1 2 3), should (1 2 3). ✅ \nis true, should true. ✅ \nis \"Expression\", should \"Expression\". ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

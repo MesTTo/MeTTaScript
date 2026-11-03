@@ -1,0 +1,6 @@
+{
+ "name": "translatorrule",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (42 43), should (42 43). ✅ \nis (42 43), should (42 43). ✅ \nis (42 43), should (42 43). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

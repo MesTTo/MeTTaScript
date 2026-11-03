@@ -1,0 +1,6 @@
+{
+ "name": "late_decl_user",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (late-defined-probe 41), should (late-defined-probe 41). ✅ \ntrue\n"
+}

@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_selection_pinned_cons",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_selection_pinned_cons.metta:5 in:\n  (= (bad-list-code $values) (list-code $values))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_selection_pinned_cons.metta'/0: Determinism check failed for 'bad-list-code': call('list-code') (while loading MeTTa file)\n"
+}

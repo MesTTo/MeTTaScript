@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_branch_unknown_arg",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_branch_unknown_arg.metta:5 in:\n  (= (f $x $c) (need (if $c 0.1 $x)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_branch_unknown_arg.metta'/0: Strict mode rejected residual runtime type goal in need: typecheck_or_error(_107816,'Number') (while loading MeTTa file)\n"
+}

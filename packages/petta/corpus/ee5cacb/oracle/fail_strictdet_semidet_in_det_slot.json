@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_semidet_in_det_slot",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_semidet_in_det_slot.metta:5 in:\n  (= (wrap $n) (+ 1 (lookup $n)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_semidet_in_det_slot.metta'/0: Determinism check failed for wrap: call(lookup) (while loading MeTTa file)\n"
+}

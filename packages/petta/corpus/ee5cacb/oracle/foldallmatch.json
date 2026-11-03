@@ -1,0 +1,6 @@
+{
+ "name": "foldallmatch",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 5, should 5. ✅ \nis 5, should 5. ✅ \ntrue\ntrue\n"
+}

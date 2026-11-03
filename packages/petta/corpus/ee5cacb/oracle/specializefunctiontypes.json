@@ -1,0 +1,6 @@
+{
+ "name": "specializefunctiontypes",
+ "mode": "",
+ "status": 0,
+ "stdout": "is ok, should ok. ✅ \nis ok, should ok. ✅ \n42\ntrue\ntrue\n"
+}

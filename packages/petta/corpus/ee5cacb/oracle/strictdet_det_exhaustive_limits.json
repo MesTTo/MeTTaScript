@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_det_exhaustive_limits",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is -1, should -1. ✅ \nis 0, should 0. ✅ \nis 2, should 2. ✅ \nis false, should false. ✅ \nis true, should true. ✅ \nis 4, should 4. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

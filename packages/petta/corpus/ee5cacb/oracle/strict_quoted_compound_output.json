@@ -1,0 +1,6 @@
+{
+ "name": "strict_quoted_compound_output",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (+ 1 2), should (+ 1 2). ✅ \ntrue\n"
+}

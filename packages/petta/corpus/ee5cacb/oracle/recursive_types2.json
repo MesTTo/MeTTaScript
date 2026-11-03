@@ -1,0 +1,6 @@
+{
+ "name": "recursive_types2",
+ "mode": "",
+ "status": 0,
+ "stdout": "is false, should false. ✅ \nis true, should true. ✅ \ntrue\ntrue\n"
+}

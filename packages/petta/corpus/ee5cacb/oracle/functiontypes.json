@@ -1,0 +1,6 @@
+{
+ "name": "functiontypes",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (42 6 (+ 4 2)), should (42 6 (+ 4 2)). ✅ \nis 12, should 12. ✅ \nis (a list not a number), should (a list not a number). ✅ \nis 2, should 2. ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

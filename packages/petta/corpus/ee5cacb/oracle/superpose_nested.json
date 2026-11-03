@@ -1,0 +1,6 @@
+{
+ "name": "superpose_nested",
+ "mode": "",
+ "status": 0,
+ "stdout": "is ((a b c x y z) (a b c) (a b c) (a b c x y z)), should ((a b c x y z) (a b c) (a b c) (a b c x y z)). ✅ \ntrue\n"
+}

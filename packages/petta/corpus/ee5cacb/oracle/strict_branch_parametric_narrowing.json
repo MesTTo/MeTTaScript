@@ -1,0 +1,6 @@
+{
+ "name": "strict_branch_parametric_narrowing",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \nis false, should false. ✅ \ntrue\ntrue\n"
+}

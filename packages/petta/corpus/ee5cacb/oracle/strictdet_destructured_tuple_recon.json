@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_destructured_tuple_recon",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is (1 1), should (1 1). ✅ \nis (), should (). ✅ \ntrue\ntrue\n"
+}

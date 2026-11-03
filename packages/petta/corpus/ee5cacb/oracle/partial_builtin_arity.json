@@ -1,0 +1,6 @@
+{
+ "name": "partial_builtin_arity",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 5, should 5. ✅ \nis 3, should 3. ✅ \ntrue\ntrue\n"
+}

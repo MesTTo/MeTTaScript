@@ -1,0 +1,6 @@
+{
+ "name": "permutations",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 362880, should 362880. ✅ \ntrue\n"
+}

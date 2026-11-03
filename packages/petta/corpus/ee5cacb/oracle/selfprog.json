@@ -1,0 +1,6 @@
+{
+ "name": "selfprog",
+ "mode": "",
+ "status": 0,
+ "stdout": "is \"(function1)\", should \"(function1)\". ✅ \nis \"(OK)\", should \"(OK)\". ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

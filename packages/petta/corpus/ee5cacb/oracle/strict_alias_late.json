@@ -1,0 +1,6 @@
+{
+ "name": "strict_alias_late",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (7 \"seven\"), should (7 \"seven\"). ✅ \nis 6, should 6. ✅ \nis (9 \"nine\"), should (9 \"nine\"). ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

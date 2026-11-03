@@ -1,0 +1,6 @@
+{
+ "name": "strict_brand_expectation",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (0 6), should (0 6). ✅ \nis (1 7), should (1 7). ✅ \nis (\"three\" 8), should (\"three\" 8). ✅ \nis (5 9), should (5 9). ✅ \nis (\"seven\" 10), should (\"seven\" 10). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

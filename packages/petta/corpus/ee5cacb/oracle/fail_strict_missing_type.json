@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_missing_type",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_missing_type.metta:1 in:\n  (= (idish $x) $x)\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_missing_type.metta'/0: Strict mode requires a declared or inferable type for idish/1 (while loading MeTTa file)\n"
+}

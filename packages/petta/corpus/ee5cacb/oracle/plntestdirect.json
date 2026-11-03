@@ -1,0 +1,6 @@
+{
+ "name": "plntestdirect",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (stv 0.8166666666666668 0.9), should (stv 0.8166666666666668 0.9). ✅ \ntrue\n"
+}

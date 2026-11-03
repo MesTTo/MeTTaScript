@@ -1,0 +1,6 @@
+{
+ "name": "lib_trust_user_redeclaration",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 7, should 7. ✅ \ntrue\ntrue\n"
+}

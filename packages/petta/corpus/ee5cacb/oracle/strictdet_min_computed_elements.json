@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_min_computed_elements",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is 1, should 1. ✅ \ntrue\n"
+}

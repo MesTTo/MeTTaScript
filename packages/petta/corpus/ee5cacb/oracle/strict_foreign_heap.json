@@ -1,0 +1,6 @@
+{
+ "name": "strict_foreign_heap",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is \"one\", should \"one\". ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

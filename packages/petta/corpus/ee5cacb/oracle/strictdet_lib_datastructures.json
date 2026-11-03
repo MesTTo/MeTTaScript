@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_lib_datastructures",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is (queue () () 0), should (queue () () 0). ✅ \nis (queue (1) () 1), should (queue (1) () 1). ✅ \nis (2 (queue () () 0)), should (2 (queue () () 0)). ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

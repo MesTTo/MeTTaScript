@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_basics",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is 0, should 0. ✅ \nis (1 2 9), should (1 2 9). ✅ \nis 6, should 6. ✅ \nis (2 3 4), should (2 3 4). ✅ \nis (1 2 7), should (1 2 7). ✅ \nis ((1 2)), should ((1 2)). ✅ \nis b, should b. ✅ \nis x, should x. ✅ \nis 2, should 2. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "spaces3",
+ "mode": "",
+ "status": 0,
+ "stdout": "is ((wu)), should ((wu)). ✅ \nis ((hu wu)), should ((hu wu)). ✅ \nis (wu), should (wu). ✅ \nis ((wu) (wu 42)), should ((wu) (wu 42)). ✅ \nis ((wu (wu)) (wu (wu 42))), should ((wu (wu)) (wu (wu 42))). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

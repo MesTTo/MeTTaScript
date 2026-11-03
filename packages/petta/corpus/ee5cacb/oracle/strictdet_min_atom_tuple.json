@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_min_atom_tuple",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is 2, should 2. ✅ \nis 9, should 9. ✅ \ntrue\ntrue\n"
+}

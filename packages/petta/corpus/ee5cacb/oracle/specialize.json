@@ -1,0 +1,6 @@
+{
+ "name": "specialize",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (2 3 4), should (2 3 4). ✅ \nis (2 3 4), should (2 3 4). ✅ \nis (2 3), should (2 3). ✅ \nis (2 3), should (2 3). ✅ \nis (2 3 4), should (2 3 4). ✅ \nis (partial + (1)), should (partial + (1)). ✅ \nis 5, should 5. ✅ \nis 3, should 3. ✅ \nis 6, should 6. ✅ \nis (2 1), should (2 1). ✅ \nis (1 2), should (1 2). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

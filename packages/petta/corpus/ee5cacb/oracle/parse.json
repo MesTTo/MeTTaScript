@@ -1,0 +1,6 @@
+{
+ "name": "parse",
+ "mode": "",
+ "status": 0,
+ "stdout": "is A, should A. ✅ \nis (R A B), should (R A B). ✅ \nis (R A (S B C)), should (R A (S B C)). ✅ \nis (* 2 21), should (* 2 21). ✅ \nis \"42\", should \"42\". ✅ \nis \"C:\\\\Users\\\\bob\", should \"C:\\\\Users\\\\bob\". ✅ \nis \"say \\\"hi\\\"\", should \"say \\\"hi\\\"\". ✅ \nis \"a\\\\nb\", should \"a\\\\nb\". ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

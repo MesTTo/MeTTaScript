@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_lambda_branch_fact_leak",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_lambda_branch_fact_leak.metta:7 in:\n  (= (bad-lambda-result $value)\n   (apply-leak-number\n      (|-> ($argument)\n         (if (is-var $argument)\n            (the Number $argument)\n            $argument))\n      $value))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_lambda_branch_fact_leak.metta'/0: Strict mode rejected residual runtime type goal in 'apply-leak-number': typecheck_or_error(lambda_1,['-[nondet]->','Atom','Number']) (while loading MeTTa file)\n"
+}

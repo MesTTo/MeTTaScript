@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_higher_order_builtins",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is (2 4 6), should (2 4 6). ✅ \nis 6, should 6. ✅ \nis (1 3), should (1 3). ✅ \nis (3 6), should (3 6). ✅ \nis (2 4), should (2 4). ✅ \nis (4 9), should (4 9). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

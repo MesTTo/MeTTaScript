@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_plain_arrow",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_plain_arrow.metta:1 in:\n  (: unannotated (-> Number Number))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_plain_arrow.metta'/0: --strict-det requires -[det]->, -[semidet]->, -[nondet]->, or -[$v]-> in every arrow position of the declaration for unannotated; plain -> is not allowed (while loading MeTTa file)\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "spaces_find",
+ "mode": "",
+ "status": 0,
+ "stdout": "is ((FoundChain a b c) (MissedSecondPiece)), should ((FoundChain a b c) (MissedSecondPiece)). ✅ \ntrue\ntrue\n"
+}

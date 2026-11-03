@@ -1,0 +1,6 @@
+{
+ "name": "test_add_primitive",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (\"Hello\" 42 (A B)), should (\"Hello\" 42 (A B)). ✅ \nis (42), should (42). ✅ \nis ((A B) (#primitive 42)), should ((A B) (#primitive 42)). ✅ \nis (B), should (B). ✅ \nis (\"Hello\" 42 (A B) (#primitive 42)), should (\"Hello\" 42 (A B) (#primitive 42)). ✅ \nis (), should (). ✅ \nis (42), should (42). ✅ \nis ((A B)), should ((A B)). ✅ \nis (() symbol true), should (() symbol true). ✅ \nis (found), should (found). ✅ \nis (found), should (found). ✅ \nis (found), should (found). ✅ \nis (), should (). ✅ \nis raised, should raised. ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis raised, should raised. ✅ \nis raised, should raised. ✅ \nis raised, should raised. ✅ \nis raised, should raised. ✅ \nis raised, should raised. ✅ \nis (found), should (found). ✅ \nis (found), should (found). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "streamops",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (a b c d), should (a b c d). ✅ \nis (a b b c b c c d), should (a b b c b c c d). ✅ \nis (b c c), should (b c c). ✅ \nis (a b), should (a b). ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

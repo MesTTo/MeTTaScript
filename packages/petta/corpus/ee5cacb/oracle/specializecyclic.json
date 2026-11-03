@@ -1,0 +1,6 @@
+{
+ "name": "specializecyclic",
+ "mode": "",
+ "status": 0,
+ "stdout": "is finish, should finish. ✅ \nis finish, should finish. ✅ \ntrue\ntrue\n"
+}

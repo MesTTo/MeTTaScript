@@ -1,0 +1,6 @@
+{
+ "name": "fib",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 832040, should 832040. ✅ \ntrue\n"
+}

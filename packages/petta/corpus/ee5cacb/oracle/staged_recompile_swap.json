@@ -1,0 +1,6 @@
+{
+ "name": "staged_recompile_swap",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (1 \"old\"), should (1 \"old\"). ✅ \ntrue\n"
+}

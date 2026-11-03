@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_union_undefined_second_ctor",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_union_undefined_second_ctor.metta:24 in:\n  (= (term-confidence $proof-term)\n   (case $proof-term\n      (((CPU $_fun $_args $_res) 0.1)\n       (($_statement $_context $proof $tv)\n          (proof-score $proof $tv)))))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_union_undefined_second_ctor.metta'/0: Strict mode rejected residual runtime type goal in 'proof-score': typecheck_or_error(_6234,'TV') (while loading MeTTa file)\n"
+}

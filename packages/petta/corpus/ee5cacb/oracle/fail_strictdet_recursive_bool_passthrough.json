@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_recursive_bool_passthrough",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_recursive_bool_passthrough.metta:8 in:\n  (= (recursive-pass-gate $value $flag)\n   (and (recursive-pass-bool $value $flag) true))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_recursive_bool_passthrough.metta'/0: Determinism check failed for 'recursive-pass-gate': call(and) (while loading MeTTa file)\n"
+}

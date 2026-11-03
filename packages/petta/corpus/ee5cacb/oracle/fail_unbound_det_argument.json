@@ -1,0 +1,7 @@
+{
+ "name": "fail_unbound_det_argument",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "ERROR: [Thread main] src/main.pl:123: user:main './examples/fail_unbound_det_argument.metta'/0: Argument of 'use-it' is unbound: a -[det]-> function requires bound arguments (while loading MeTTa file)\n"
+}

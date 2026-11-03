@@ -1,0 +1,6 @@
+{
+ "name": "get_type_confirms",
+ "mode": "",
+ "status": 0,
+ "stdout": "is Number, should Number. ✅ \nis %Undefined%, should %Undefined%. ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis (A B), should (A B). ✅ \nis (found), should (found). ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis B, should B. ✅ \nis B, should B. ✅ \nis B, should B. ✅ \nis (), should (). ✅ \nis (a b), should (a b). ✅ \nis (A), should (A). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

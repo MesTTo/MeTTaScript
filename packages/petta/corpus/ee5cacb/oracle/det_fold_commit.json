@@ -1,0 +1,6 @@
+{
+ "name": "det_fold_commit",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 6, should 6. ✅ \nis (2 3 4), should (2 3 4). ✅ \nis (6 9 5 6), should (6 9 5 6). ✅ \nis (6), should (6). ✅ \nis (6 9 5 6), should (6 9 5 6). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

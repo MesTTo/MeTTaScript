@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_quoted_structural_unknown",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_quoted_structural_unknown.metta:2 in:\n  (= (unknown-quoted)\n   (quote ($unknown 1)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_quoted_structural_unknown.metta'/0: Strict mode rejected residual runtime type goal in 'unknown-quoted': typecheck_or_error([_82822,1],['Atom','Number']) (while loading MeTTa file)\n"
+}

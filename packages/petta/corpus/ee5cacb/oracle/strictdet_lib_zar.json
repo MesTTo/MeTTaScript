@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_lib_zar",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \ntrue\ntrue\n"
+}

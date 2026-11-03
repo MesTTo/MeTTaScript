@@ -1,0 +1,6 @@
+{
+ "name": "booleansolver",
+ "mode": "",
+ "status": 0,
+ "stdout": "is ((true true) (false true)), should ((true true) (false true)). ✅ \ntrue\n"
+}

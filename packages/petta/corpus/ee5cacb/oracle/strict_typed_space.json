@@ -1,0 +1,6 @@
+{
+ "name": "strict_typed_space",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is 5, should 5. ✅ \nis (4 8), should (4 8). ✅ \nis raw, should raw. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

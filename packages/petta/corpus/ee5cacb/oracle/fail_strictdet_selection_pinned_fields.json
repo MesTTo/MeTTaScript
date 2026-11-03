@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_selection_pinned_fields",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_selection_pinned_fields.metta:8 in:\n  (= (bad-decode $value) (decode $value))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_selection_pinned_fields.metta'/0: Determinism check failed for 'bad-decode': call(decode) (while loading MeTTa file)\n"
+}

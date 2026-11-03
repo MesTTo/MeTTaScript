@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_collapse_proper_list",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is (1 2), should (1 2). ✅ \nis (3 4), should (3 4). ✅ \ntrue\ntrue\n"
+}

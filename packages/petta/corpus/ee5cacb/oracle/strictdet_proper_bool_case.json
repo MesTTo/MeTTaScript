@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_proper_bool_case",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \nis false, should false. ✅ \ntrue\ntrue\n"
+}

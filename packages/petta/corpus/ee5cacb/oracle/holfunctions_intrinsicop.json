@@ -1,0 +1,6 @@
+{
+ "name": "holfunctions_intrinsicop",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (true false false), should (true false false). ✅ \ntrue\n"
+}

@@ -1,0 +1,7 @@
+{
+ "name": "fail_nested_parametric_param",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_nested_parametric_param.metta:2 in:\n  (= (sumh (cons $h $t)) (+ $h 1))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_nested_parametric_param.metta'/0: Declared parametric parameter of sumh is used as 'Number' by its implementation; declare the concrete type instead (while loading MeTTa file)\n"
+}

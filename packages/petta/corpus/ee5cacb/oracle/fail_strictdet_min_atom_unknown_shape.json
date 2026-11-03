@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_min_atom_unknown_shape",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_min_atom_unknown_shape.metta:3 in:\n  (= (min-of $xs) (min-atom $xs))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_min_atom_unknown_shape.metta'/0: Determinism check failed for 'min-of': call('min-atom') (while loading MeTTa file)\n"
+}

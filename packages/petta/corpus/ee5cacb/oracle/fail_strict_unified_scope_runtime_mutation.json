@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_unified_scope_runtime_mutation",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_unified_scope_runtime_mutation.metta:10 in:\n  (= (consume-mutated-producer $value)\n   (and (scope-producer $value) true))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_unified_scope_runtime_mutation.metta'/0: Determinism check failed for 'consume-mutated-producer': call(and) (while loading MeTTa file)\n"
+}

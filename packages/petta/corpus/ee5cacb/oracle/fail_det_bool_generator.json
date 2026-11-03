@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_bool_generator",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_bool_generator.metta:8 in:\n  (= (unbox (B $b)) (and $b true))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_bool_generator.metta'/0: Determinism check failed for unbox: call(and) (while loading MeTTa file)\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "test_memo_variant_nonground",
+ "mode": "",
+ "status": 0,
+ "stdout": "is pair, should pair. ✅ \nis pair, should pair. ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

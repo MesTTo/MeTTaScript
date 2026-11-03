@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_effect_poly_uninstantiable",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_effect_poly_uninstantiable.metta:1 in:\n  (: uninstantiable-effect (-[$e]-> Number Number))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_effect_poly_uninstantiable.metta'/0: Effect variable $e on the top-level arrow of 'uninstantiable-effect' is never instantiated by a closure argument (while loading MeTTa file)\n"
+}

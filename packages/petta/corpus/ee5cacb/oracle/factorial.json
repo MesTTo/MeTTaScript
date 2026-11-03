@@ -1,0 +1,6 @@
+{
+ "name": "factorial",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 3628800, should 3628800. ✅ \ntrue\n"
+}

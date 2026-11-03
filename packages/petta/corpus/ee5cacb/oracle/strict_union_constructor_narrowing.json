@@ -1,0 +1,6 @@
+{
+ "name": "strict_union_constructor_narrowing",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is 0, should 0. ✅ \nis 0, should 0. ✅ \ntrue\ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "spacefunction",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (f 3 4), should (f 3 4). ✅ \nis 7, should 7. ✅ \nis (), should (). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "determinism_closure_through_fold",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 6, should 6. ✅ \ntrue\ntrue\n"
+}

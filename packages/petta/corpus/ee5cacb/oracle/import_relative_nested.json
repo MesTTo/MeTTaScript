@@ -1,0 +1,6 @@
+{
+ "name": "import_relative_nested",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 42, should 42. ✅ \nis 7, should 7. ✅ \ntrue\ntrue\ntrue\n"
+}

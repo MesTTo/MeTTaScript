@@ -1,0 +1,6 @@
+{
+ "name": "logicprog",
+ "mode": "",
+ "status": 0,
+ "stdout": "is ((true c) (true b) (true a)), should ((true c) (true b) (true a)). ✅ \ntrue\n"
+}

@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_unify_nondet_operand",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_unify_nondet_operand.metta:6 in:\n  (= (check-shape)\n   (if (= (gen) 1) true false))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_unify_nondet_operand.metta'/0: Determinism check failed for 'check-shape': call(gen) (while loading MeTTa file)\n"
+}

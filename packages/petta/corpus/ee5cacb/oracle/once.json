@@ -1,0 +1,6 @@
+{
+ "name": "once",
+ "mode": "",
+ "status": 0,
+ "stdout": "is ((bar 1)), should ((bar 1)). ✅ \ntrue\ntrue\n"
+}

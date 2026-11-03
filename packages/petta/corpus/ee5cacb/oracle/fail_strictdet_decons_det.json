@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_decons_det",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_decons_det.metta:2 in:\n  (= (split-expression-det $value) (decons $value))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_decons_det.metta'/0: Determinism check failed for 'split-expression-det': call(decons) (while loading MeTTa file)\n"
+}

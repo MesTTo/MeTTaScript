@@ -1,0 +1,6 @@
+{
+ "name": "test_memo_aggregate",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 18, should 18. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

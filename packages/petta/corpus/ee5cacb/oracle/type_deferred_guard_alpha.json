@@ -1,0 +1,6 @@
+{
+ "name": "type_deferred_guard_alpha",
+ "mode": "",
+ "status": 0,
+ "stdout": "is Error, should Error. ✅ \nis (7), should (7). ✅ \nis true, should true. ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

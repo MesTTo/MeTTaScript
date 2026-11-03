@@ -1,0 +1,6 @@
+{
+ "name": "callquoteevalreduce2",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (fib-call 5), should (fib-call 5). ✅ \nis (fib-quote (fib (myfunc))), should (fib-quote (fib (myfunc))). ✅ \nis (fib-eval 5), should (fib-eval 5). ✅ \nis (fib-reduce 5), should (fib-reduce 5). ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

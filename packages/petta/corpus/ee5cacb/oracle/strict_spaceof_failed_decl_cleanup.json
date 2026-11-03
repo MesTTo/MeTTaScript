@@ -1,0 +1,6 @@
+{
+ "name": "strict_spaceof_failed_decl_cleanup",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is ((job 7)), should ((job 7)). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_unwrappable_list_builtin",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "ERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_unwrappable_list_builtin.metta'/0: Argument of rev is not a proper list: its -[det]-> proof requires a bound proper list (while loading MeTTa file)\n"
+}

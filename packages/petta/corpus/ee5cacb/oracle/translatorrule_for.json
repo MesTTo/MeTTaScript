@@ -1,0 +1,6 @@
+{
+ "name": "translatorrule_for",
+ "mode": "",
+ "status": 0,
+ "stdout": "is ((odd 3) (even 4)), should ((odd 3) (even 4)). ✅ \ntrue\ntrue\n"
+}

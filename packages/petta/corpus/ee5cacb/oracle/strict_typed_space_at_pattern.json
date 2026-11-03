@@ -1,0 +1,6 @@
+{
+ "name": "strict_typed_space_at_pattern",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (job 1 \"one\"), should (job 1 \"one\"). ✅ \nis (\"one\" \"one\"), should (\"one\" \"one\"). ✅ \nis (job 1 \"one\"), should (job 1 \"one\"). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,7 @@
+{
+ "name": "fail_determinism_overlap",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_determinism_overlap.metta:3 in:\n  (= (f $x) b)\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_determinism_overlap.metta'/0: Deterministic function f has overlapping clauses with heads [_85070] and [_85076] (while loading MeTTa file)\n"
+}

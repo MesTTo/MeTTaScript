@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_nondet_body",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_nondet_body.metta:2 in:\n  (= (sneaky $n) (superpose (1 $n)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_nondet_body.metta'/0: Determinism check failed for sneaky: superpose (while loading MeTTa file)\n"
+}

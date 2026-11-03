@@ -1,0 +1,6 @@
+{
+ "name": "he_quoting",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (+ 1 2), should (+ 1 2). ✅ \nis 3, should 3. ✅ \nis 3, should 3. ✅ \nis \"(unquote 42)\", should \"(unquote 42)\". ✅ \nis true, should true. ✅ \nis false, should false. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

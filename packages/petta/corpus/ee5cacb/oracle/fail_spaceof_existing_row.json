@@ -1,0 +1,7 @@
+{
+ "name": "fail_spaceof_existing_row",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_spaceof_existing_row.metta:2 in:\n  (: &jobs (SpaceOf (job Number)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_spaceof_existing_row.metta'/0: SpaceOf declaration for '&jobs' rejects existing row [job,\"oops\"]: it definitely contradicts schema [job,'Number'] (while loading MeTTa file)\n"
+}

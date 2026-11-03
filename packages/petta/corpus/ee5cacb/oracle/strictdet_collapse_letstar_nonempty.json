@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_collapse_letstar_nonempty",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is (7), should (7). ✅ \ntrue\n"
+}

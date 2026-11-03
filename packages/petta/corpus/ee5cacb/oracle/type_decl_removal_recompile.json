@@ -1,0 +1,6 @@
+{
+ "name": "type_decl_removal_recompile",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (1 2), should (1 2). ✅ \ntrue\ntrue\ntrue\n"
+}

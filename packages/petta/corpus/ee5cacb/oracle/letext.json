@@ -1,0 +1,6 @@
+{
+ "name": "letext",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 47, should 47. ✅ \ntrue\n"
+}

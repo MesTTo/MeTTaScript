@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_chain_pattern_failure",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_chain_pattern_failure.metta:2 in:\n  (= (bad-chain) (chain False True 1))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_chain_pattern_failure.metta'/0: Determinism check failed for 'bad-chain': let_pattern(false) (while loading MeTTa file)\n"
+}

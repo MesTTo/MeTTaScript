@@ -1,0 +1,6 @@
+{
+ "name": "strict_destructured_param",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is 6, should 6. ✅ \nis 6, should 6. ✅ \nis 6, should 6. ✅ \nis 6, should 6. ✅ \nis 6, should 6. ✅ \nis 6, should 6. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

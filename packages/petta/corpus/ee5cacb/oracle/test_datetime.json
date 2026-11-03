@@ -1,0 +1,6 @@
+{
+ "name": "test_datetime",
+ "mode": "",
+ "status": 0,
+ "stdout": "is Saturday, should Saturday. ✅ \nis 604800, should 604800. ✅ \nis January, should January. ✅ \ntrue\n(1793719156.2431304)\n(2026-11-03 15:19:16)\n(2026-11-03 16:19:16)\n(Saturday)\ntrue\n(604800)\ntrue\n(09:50:45)\ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "strict_pass_declared",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is 3, should 3. ✅ \ntrue\ntrue\n"
+}

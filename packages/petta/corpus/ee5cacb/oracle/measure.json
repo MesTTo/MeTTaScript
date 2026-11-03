@@ -1,0 +1,6 @@
+{
+ "name": "measure",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 1.0, should 1.0. ✅ \nis ((0.25 a) (0.75 b)), should ((0.25 a) (0.75 b)). ✅ \nis (), should (). ✅ \nis (Error ((0.0 a)) \"ws-normalize requires nonzero total mass\"), should (Error ((0.0 a)) \"ws-normalize requires nonzero total mass\"). ✅ \nis ((0.5 a) (0.5 b)), should ((0.5 a) (0.5 b)). ✅ \nis (Error ((1.0 a) (1.0 b)) \"ws-softmax requires a nonzero temperature\"), should (Error ((1.0 a) (1.0 b)) \"ws-softmax requires a nonzero temperature\"). ✅ \nis c, should c. ✅ \nis ((0.5 c) (0.3 b) (0.2 a)), should ((0.5 c) (0.3 b) (0.2 a)). ✅ \nis ((0.5 c) (0.3 b)), should ((0.5 c) (0.3 b)). ✅ \nis ((0.2 a)), should ((0.2 a)). ✅ \nis (), should (). ✅ \nis ((0.7 a) (0.3 b)), should ((0.7 a) (0.3 b)). ✅ \nis 3.0, should 3.0. ✅ \nis ((0.6 b)), should ((0.6 b)). ✅ \nis ((0.2 a) (0.6 b)), should ((0.2 a) (0.6 b)). ✅ \nis ((0.2 a) (0.6 b)), should ((0.2 a) (0.6 b)). ✅ \nis only, should only. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_late_case_fallthrough_constructor",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Warning: a constructor declared after dispatch was compiled changes a type it matched on; recompiling dispatch\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_late_case_fallthrough_constructor.metta'/0: Strict mode rejected residual runtime type goal in 'use-wrapped': typecheck_or_error(_8910,'Wrapped') (while loading MeTTa file)\n"
+}

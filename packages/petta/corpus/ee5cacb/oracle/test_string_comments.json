@@ -1,0 +1,6 @@
+{
+ "name": "test_string_comments",
+ "mode": "",
+ "status": 0,
+ "stdout": "is \")\", should \")\". ✅ \nis \"(\", should \"(\". ✅ \nis \";\", should \";\". ✅ \nis \";\", should \";\". ✅ \nis \"foo;bar\", should \"foo;bar\". ✅ \nis \";;;\", should \";;;\". ✅ \nis \";start\", should \";start\". ✅ \nis \"end;\", should \"end;\". ✅ \nis \"quote: \\\"\", should \"quote: \\\"\". ✅ \nis \"path\\\\file\", should \"path\\\\file\". ✅ \nis result, should result. ✅ \nis \"\\\")\", should \"\\\")\". ✅ \nis \"\\\";\", should \"\\\";\". ✅ \nis \"\\\\\", should \"\\\\\". ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

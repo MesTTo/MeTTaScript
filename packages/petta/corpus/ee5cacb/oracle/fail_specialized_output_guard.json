@@ -1,0 +1,7 @@
+{
+ "name": "fail_specialized_output_guard",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "ERROR: [Thread main] src/main.pl:123: user:main './examples/fail_specialized_output_guard.metta'/0: Type mismatch: got \"str\" but expected 'Number' (while loading MeTTa file)\n"
+}

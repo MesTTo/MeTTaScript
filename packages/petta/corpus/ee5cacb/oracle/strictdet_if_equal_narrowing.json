@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_if_equal_narrowing",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is 1, should 1. ✅ \nis 2, should 2. ✅ \nis 20, should 20. ✅ \nis 30, should 30. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

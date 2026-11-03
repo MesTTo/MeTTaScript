@@ -1,0 +1,6 @@
+{
+ "name": "type_edge_cases",
+ "mode": "",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \nis 4, should 4. ✅ \nis (true), should (true). ✅ \nis Error, should Error. ✅ \nis \"(literal_type_mismatch \\\"oops\\\" Number)\", should \"(literal_type_mismatch \\\"oops\\\" Number)\". ✅ \nis typecheck, should typecheck. ✅ \nis Error, should Error. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "metta4_prog",
+ "mode": "",
+ "status": 0,
+ "stdout": "is tim, should tim. ✅ \nis 1, should 1. ✅ \nis 3, should 3. ✅ \ntrue\ntrue\ntrue\n"
+}

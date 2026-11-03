@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_deferred_guard_bad_binding",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_deferred_guard_bad_binding.metta:4 in:\n  (let $result (guarded-list-id ($x))\n      (let \"not-a-number\" $x $result))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_deferred_guard_bad_binding.metta'/0: Strict mode rejected residual runtime type goal in 'guarded-list-id': typecheck_or_error(_88962,['List','Number']) (while loading MeTTa file)\n"
+}

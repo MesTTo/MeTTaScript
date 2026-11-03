@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_size_atom_open_list",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_size_atom_open_list.metta:2 in:\n  (= (sz) (size-atom $u))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_size_atom_open_list.metta'/0: Determinism check failed for sz: call('size-atom') (while loading MeTTa file)\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "test_unify_eval_branches",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (Error (Constant wff) \"already declared\"), should (Error (Constant wff) \"already declared\"). ✅ \nis (), should (). ✅ \nis (Error (Var x) \"active variable conflict\"), should (Error (Var x) \"active variable conflict\"). ✅ \nis 3, should 3. ✅ \nis 30, should 30. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

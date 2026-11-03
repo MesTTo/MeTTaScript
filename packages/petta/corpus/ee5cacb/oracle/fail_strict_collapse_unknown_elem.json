@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_collapse_unknown_elem",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_collapse_unknown_elem.metta:2 in:\n  (= (f $x) (collapse (superpose ($x 0.1))))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_collapse_unknown_elem.metta'/0: Strict mode rejected residual runtime type goal in f: typecheck_or_error(_87102,['List','Number']) (while loading MeTTa file)\n"
+}

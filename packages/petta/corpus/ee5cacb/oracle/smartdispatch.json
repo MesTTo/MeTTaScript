@@ -1,0 +1,6 @@
+{
+ "name": "smartdispatch",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (42 (justdata f 2) 4 42 ((lol 84))), should (42 (justdata f 2) 4 42 ((lol 84))). ✅ \ntrue\n"
+}

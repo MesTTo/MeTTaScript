@@ -1,0 +1,6 @@
+{
+ "name": "functionhead2",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (cat42 garfield), should (cat42 garfield). ✅ \ntrue\n"
+}

@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_recursion_arity",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_recursion_arity.metta:5 in:\n  (= (arity-hop-consumer) (arity-hop 0))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_recursion_arity.metta'/0: Determinism check failed for 'arity-hop-consumer': call('arity-hop') (while loading MeTTa file)\n"
+}

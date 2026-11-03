@@ -1,0 +1,7 @@
+{
+ "name": "fail_conditional_cut_overlap",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_conditional_cut_overlap.metta:2 in:\n  (= (choose $x) (if (== $x z) (cut)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_conditional_cut_overlap.metta'/0: Determinism check failed for choose: if_without_else (while loading MeTTa file)\n"
+}

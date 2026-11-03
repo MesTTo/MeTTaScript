@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_builtin_arg_shapes",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is 3, should 3. ✅ \nis 9, should 9. ✅ \nis 3, should 3. ✅ \nis (2 1), should (2 1). ✅ \nis 3, should 3. ✅ \nis 2, should 2. ✅ \nis (1 2), should (1 2). ✅ \nis true, should true. ✅ \nis false, should false. ✅ \nis true, should true. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

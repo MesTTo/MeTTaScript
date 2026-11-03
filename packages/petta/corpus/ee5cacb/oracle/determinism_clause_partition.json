@@ -1,0 +1,6 @@
+{
+ "name": "determinism_clause_partition",
+ "mode": "",
+ "status": 0,
+ "stdout": "is a, should a. ✅ \nis b, should b. ✅ \ntrue\ntrue\n"
+}

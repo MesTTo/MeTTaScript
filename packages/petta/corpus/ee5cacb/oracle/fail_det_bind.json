@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_bind",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_bind.metta:2 in:\n  (= (bb) (bind! &counter 5))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_bind.metta'/0: Determinism check failed for bb: call('bind!') (while loading MeTTa file)\n"
+}

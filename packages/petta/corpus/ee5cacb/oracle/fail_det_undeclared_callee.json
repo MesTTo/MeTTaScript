@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_undeclared_callee",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_undeclared_callee.metta:3 in:\n  (= (wrap $x) (pick $x))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_undeclared_callee.metta'/0: Determinism check failed for wrap: call(pick) (while loading MeTTa file)\n"
+}

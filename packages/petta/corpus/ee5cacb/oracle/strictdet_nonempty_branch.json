@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_nonempty_branch",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is 4, should 4. ✅ \nis 0, should 0. ✅ \nis 7, should 7. ✅ \nis 0, should 0. ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

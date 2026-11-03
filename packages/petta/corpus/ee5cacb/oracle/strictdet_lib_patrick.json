@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_lib_patrick",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is (2 3), should (2 3). ✅ \nis 1, should 1. ✅ \nis (0 1), should (0 1). ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

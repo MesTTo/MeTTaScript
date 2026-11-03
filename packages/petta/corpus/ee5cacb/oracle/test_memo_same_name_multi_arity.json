@@ -1,0 +1,6 @@
+{
+ "name": "test_memo_same_name_multi_arity",
+ "mode": "",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \nis false, should false. ✅ \nis 6, should 6. ✅ \nis 6, should 6. ✅ \nis 7, should 7. ✅ \nis 7, should 7. ✅ \nis true, should true. ✅ \nis 17, should 17. ✅ \nis 17, should 17. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

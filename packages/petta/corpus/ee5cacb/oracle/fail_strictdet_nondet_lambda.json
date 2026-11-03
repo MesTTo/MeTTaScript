@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_nondet_lambda",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_nondet_lambda.metta:2 in:\n  (= (pick-sum $items)\n   (foldl-atom $items 0\n      (|-> ($acc $item) (superpose ($acc (+ $acc $item))))))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_nondet_lambda.metta'/0: Determinism check failed for 'pick-sum': unknown(['foldl-atom',_91142,0,['|->',[_91198,_91204],[superpose,[_91198,[+,_91198,_91204]]]]]) (while loading MeTTa file)\n"
+}

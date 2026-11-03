@@ -1,0 +1,6 @@
+{
+ "name": "test_memo_dependency_invalidation",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 10, should 10. ✅ \nis 10, should 10. ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "let_superpose_if_case",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (answertoeverything 42 (42 42) (42 42 42)), should (answertoeverything 42 (42 42) (42 42 42)). ✅ \ntrue\n"
+}

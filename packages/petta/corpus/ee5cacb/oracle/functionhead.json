@@ -1,0 +1,6 @@
+{
+ "name": "functionhead",
+ "mode": "",
+ "status": 0,
+ "stdout": "is ((40) 42000), should ((40) 42000). ✅ \nis ((40) 42000), should ((40) 42000). ✅ \ntrue\ntrue\n"
+}

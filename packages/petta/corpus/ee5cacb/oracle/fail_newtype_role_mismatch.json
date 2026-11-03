@@ -1,0 +1,7 @@
+{
+ "name": "fail_newtype_role_mismatch",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_newtype_role_mismatch.metta:6 in:\n  (= (swapped $kb $proof) (rule-ev $proof $kb))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_newtype_role_mismatch.metta'/0: Type mismatch: got ['rule-ev',_101210,_101236] but expected 'Evidence' (while loading MeTTa file)\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "meta_types",
+ "mode": "",
+ "status": 0,
+ "stdout": "is Expression, should Expression. ✅ \nis Expression, should Expression. ✅ \nis Grounded, should Grounded. ✅ \nis Grounded, should Grounded. ✅ \nis Variable, should Variable. ✅ \nis Symbol, should Symbol. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

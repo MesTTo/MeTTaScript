@@ -1,0 +1,7 @@
+{
+ "name": "fail_foldall_output_mismatch",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_foldall_output_mismatch.metta:7 in:\n  (= (bad-foldall $x) (foldall + (superpose (1 2)) 0))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_foldall_output_mismatch.metta'/0: Type conflict: value is constrained as 'Number' but also required as 'B' (while loading MeTTa file)\n"
+}

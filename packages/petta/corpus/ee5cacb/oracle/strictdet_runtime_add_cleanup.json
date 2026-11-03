@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_runtime_add_cleanup",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is (ghost a), should (ghost a). ✅ \ntrue\n"
+}

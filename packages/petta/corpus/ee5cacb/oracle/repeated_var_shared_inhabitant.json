@@ -1,0 +1,6 @@
+{
+ "name": "repeated_var_shared_inhabitant",
+ "mode": "",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "lambda_fresh_names",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (200), should (200). ✅ \nis (3), should (3). ✅ \nis (200), should (200). ✅ \nis (12), should (12). ✅ \nis (7), should (7). ✅ \nis (6), should (6). ✅ \nis done, should done. ✅ \nis (20), should (20). ✅ \nis (-95), should (-95). ✅ \nis (200), should (200). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

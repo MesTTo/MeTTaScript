@@ -1,0 +1,6 @@
+{
+ "name": "lib_trust_origin_recompile",
+ "mode": "",
+ "status": 0,
+ "stdout": "is Error, should Error. ✅ \ntrue\ntrue\ntrue\n"
+}

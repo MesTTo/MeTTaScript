@@ -1,0 +1,6 @@
+{
+ "name": "types_dependent",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 6, should 6. ✅ \nis true, should true. ✅ \ntrue\ntrue\n"
+}

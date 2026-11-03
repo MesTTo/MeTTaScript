@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_let_resolved_fold_product",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is 3, should 3. ✅ \ntrue\ntrue\ntrue\n"
+}

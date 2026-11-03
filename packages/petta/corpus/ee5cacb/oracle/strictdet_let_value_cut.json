@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_let_value_cut",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is (true), should (true). ✅ \ntrue\n"
+}

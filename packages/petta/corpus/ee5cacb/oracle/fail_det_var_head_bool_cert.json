@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_var_head_bool_cert",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_var_head_bool_cert.metta:12 in:\n  (= (run) (and (g u) True))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_var_head_bool_cert.metta'/0: Determinism check failed for run: call(and) (while loading MeTTa file)\n"
+}

@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_nonempty_branch_failing_body",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_nonempty_branch_failing_body.metta:9 in:\n  (= (risky-or-zero $values)\n   (if (== $values ())\n      0\n      (risky-first $values)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_nonempty_branch_failing_body.metta'/0: Determinism check failed for 'risky-or-zero': call('risky-first') (while loading MeTTa file)\n"
+}

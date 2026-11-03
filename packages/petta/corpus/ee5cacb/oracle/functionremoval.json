@@ -1,0 +1,6 @@
+{
+ "name": "functionremoval",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (2 42), should (2 42). ✅ \nis (2), should (2). ✅ \nis (42), should (42). ✅ \nis ((f g)), should ((f g)). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

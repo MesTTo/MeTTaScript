@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_foreign_mismatch",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_foreign_mismatch.metta:9 in:\n  (= (wrong-heap-call)\n   (heap-size-placeholder 42))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_foreign_mismatch.metta'/0: Strict mode rejected residual runtime type goal in 'heap-size-placeholder': typecheck_or_error(42,['Heap','Number']) (while loading MeTTa file)\n"
+}

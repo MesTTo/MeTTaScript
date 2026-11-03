@@ -1,0 +1,6 @@
+{
+ "name": "caseempty_key_once",
+ "mode": "",
+ "status": 0,
+ "stdout": "is one, should one. ✅ \nis 1, should 1. ✅ \nis none, should none. ✅ \nis 1, should 1. ✅ \nis (got-five), should (got-five). ✅ \nis two, should two. ✅ \nis 2, should 2. ✅ \nis ((other 1) two (other 3)), should ((other 1) two (other 3)). ✅ \nis (), should (). ✅ \nis (five none five), should (five none five). ✅ \nis (A), should (A). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

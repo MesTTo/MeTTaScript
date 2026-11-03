@@ -1,0 +1,6 @@
+{
+ "name": "strict_lib_he",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is yes, should yes. ✅ \nis \"hetero\", should \"hetero\". ✅ \nis true, should true. ✅ \nis true, should true. ✅ \nis true, should true. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

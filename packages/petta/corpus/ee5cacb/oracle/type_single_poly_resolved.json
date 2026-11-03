@@ -1,0 +1,6 @@
+{
+ "name": "type_single_poly_resolved",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (2 3), should (2 3). ✅ \ntrue\ntrue\n"
+}

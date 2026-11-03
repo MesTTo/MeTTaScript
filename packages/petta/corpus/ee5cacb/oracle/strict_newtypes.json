@@ -1,0 +1,6 @@
+{
+ "name": "strict_newtypes",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (rule-ev mykb r1), should (rule-ev mykb r1). ✅ \nis (rule-ev somekb r0), should (rule-ev somekb r0). ✅ \nis (payload value), should (payload value). ✅ \nis (rule-ev kb1 p1), should (rule-ev kb1 p1). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

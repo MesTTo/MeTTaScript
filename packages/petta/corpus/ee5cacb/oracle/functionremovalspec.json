@@ -1,0 +1,6 @@
+{
+ "name": "functionremovalspec",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (2 3), should (2 3). ✅ \nis 3, should 3. ✅ \nis (3 2), should (3 2). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

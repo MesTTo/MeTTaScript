@@ -1,0 +1,6 @@
+{
+ "name": "case2",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (what what2), should (what what2). ✅ \ntrue\n"
+}

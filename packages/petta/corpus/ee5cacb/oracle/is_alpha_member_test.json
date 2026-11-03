@@ -1,0 +1,6 @@
+{
+ "name": "is_alpha_member_test",
+ "mode": "",
+ "status": 0,
+ "stdout": "is false, should false. ✅ \nis false, should false. ✅ \nis true, should true. ✅ \nis false, should false. ✅ \nis true, should true. ✅ \nis true, should true. ✅ \nis true, should true. ✅ \nis true, should true. ✅ \nis false, should false. ✅ \nis true, should true. ✅ \nis false, should false. ✅ \nis true, should true. ✅ \nis false, should false. ✅ \nis true, should true. ✅ \nis true, should true. ✅ \nis true, should true. ✅ \nis false, should false. ✅ \nis true, should true. ✅ \nis true, should true. ✅ \nis false, should false. ✅ \nis true, should true. ✅ \nis false, should false. ✅ \n(pattern:- (hi name boss))\n(is member:- false in pattern:- (hi name boss))\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n()\n"
+}

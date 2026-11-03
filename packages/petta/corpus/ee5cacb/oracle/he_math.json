@@ -1,0 +1,6 @@
+{
+ "name": "he_math",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 8, should 8. ✅ \nis 3.0, should 3.0. ✅ \nis 5, should 5. ✅ \nis 2.0, should 2.0. ✅ \nis 5, should 5. ✅ \nis 6, should 6. ✅ \nis 5, should 5. ✅ \nis 5, should 5. ✅ \nis 6, should 6. ✅ \nis 0.0, should 0.0. ✅ \nis 0.0, should 0.0. ✅ \nis 1.0, should 1.0. ✅ \nis 0.0, should 0.0. ✅ \nis 0.0, should 0.0. ✅ \nis 0.0, should 0.0. ✅ \nis false, should false. ✅ \nis false, should false. ✅ \nis 2, should 2. ✅ \nis 9, should 9. ✅ \nis true, should true. ✅ \nis true, should true. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

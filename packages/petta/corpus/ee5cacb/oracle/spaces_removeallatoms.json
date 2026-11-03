@@ -1,0 +1,6 @@
+{
+ "name": "spaces_removeallatoms",
+ "mode": "",
+ "status": 0,
+ "stdout": "is \"(remove-all-atoms &self)\", should \"(remove-all-atoms &self)\". ✅ \nis \"(f 42)\", should \"(f 42)\". ✅ \nis (), should (). ✅ \ntrue\n(true true true true true true true true true true true)\ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "empty",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (), should (). ✅ \ntrue\n"
+}

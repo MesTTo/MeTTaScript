@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_opaque_child_fact_leak",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_opaque_child_fact_leak.metta:2 in:\n  (= (opaque-bool-leak $x)\n   (progn\n      (|-> () (let $x true true))\n      $x))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_opaque_child_fact_leak.metta'/0: Strict mode rejected residual runtime type goal in 'opaque-bool-leak': typecheck_or_error(_89510,'Bool') (while loading MeTTa file)\n"
+}

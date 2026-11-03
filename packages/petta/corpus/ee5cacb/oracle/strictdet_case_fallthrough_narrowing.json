@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_case_fallthrough_narrowing",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is 5, should 5. ✅ \nis 7, should 7. ✅ \nis consumed, should consumed. ✅ \nis remaining, should remaining. ✅ \nis remaining, should remaining. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

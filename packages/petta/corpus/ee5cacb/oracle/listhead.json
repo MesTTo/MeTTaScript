@@ -1,0 +1,6 @@
+{
+ "name": "listhead",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (1 (2 3 4 5 6)), should (1 (2 3 4 5 6)). ✅ \nis 3, should 3. ✅ \nis (42), should (42). ✅ \ntrue\ntrue\ntrue\n"
+}

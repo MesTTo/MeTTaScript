@@ -1,0 +1,7 @@
+{
+ "name": "fail_semidet_index_atom",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_semidet_index_atom.metta:2 in:\n  (= (ia) (index-atom (1 2 3) $i))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_semidet_index_atom.metta'/0: Determinism check failed for ia: call('index-atom') (while loading MeTTa file)\n"
+}

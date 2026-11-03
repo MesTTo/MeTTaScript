@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_let_typed_list_selection",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is (1), should (1). ✅ \ntrue\n"
+}

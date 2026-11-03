@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_car_atom_empty",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "ERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_car_atom_empty.metta'/0: car-atom expects a non-empty expression (while loading MeTTa file)\n"
+}

@@ -1,0 +1,7 @@
+{
+ "name": "torch",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "ERROR: [Thread main] src/main.pl:123: user:main './examples/torch.metta'/0: Python 'ModuleNotFoundError':\nERROR: [Thread main]   No module named 'torch' (while loading MeTTa file)\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "type_pipeline",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 6, should 6. ✅ \nis true, should true. ✅ \nis Error, should Error. ✅ \nis (2 3 4), should (2 3 4). ✅ \nis 9, should 9. ✅ \nis Error, should Error. ✅ \nis true, should true. ✅ \nis true, should true. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

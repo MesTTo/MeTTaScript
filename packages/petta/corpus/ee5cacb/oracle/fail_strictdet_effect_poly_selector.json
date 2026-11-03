@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_effect_poly_selector",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_effect_poly_selector.metta:10 in:\n  (= (unbound-effect-selection) (select-effect increment $selector))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_effect_poly_selector.metta'/0: Determinism check failed for 'unbound-effect-selection': call('select-effect') (while loading MeTTa file)\n"
+}

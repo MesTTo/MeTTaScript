@@ -1,0 +1,6 @@
+{
+ "name": "spaces_succeedspredicate",
+ "mode": "",
+ "status": 0,
+ "stdout": "is false, should false. ✅ \nis (a b), should (a b). ✅ \ntrue\ntrue\ntrue\n"
+}

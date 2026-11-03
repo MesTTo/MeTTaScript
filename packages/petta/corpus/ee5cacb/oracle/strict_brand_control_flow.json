@@ -1,0 +1,6 @@
+{
+ "name": "strict_brand_control_flow",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (left), should (left). ✅ \nis (right), should (right). ✅ \ntrue\ntrue\n"
+}

@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_closure_param",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_closure_param.metta:8 in:\n  (apply-det pick 1)\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_closure_param.metta'/0: Type mismatch: got pick but expected ['-[det]->','Number','Number'] (while loading MeTTa file)\n"
+}

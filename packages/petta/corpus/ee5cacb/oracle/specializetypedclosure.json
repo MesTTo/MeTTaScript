@@ -1,0 +1,6 @@
+{
+ "name": "specializetypedclosure",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 11, should 11. ✅ \ntrue\ntrue\n"
+}

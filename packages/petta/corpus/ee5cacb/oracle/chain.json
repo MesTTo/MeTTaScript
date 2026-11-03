@@ -1,0 +1,6 @@
+{
+ "name": "chain",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 18, should 18. ✅ \nis 12, should 12. ✅ \ntrue\ntrue\n"
+}

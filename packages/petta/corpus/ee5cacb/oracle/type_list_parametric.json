@@ -1,0 +1,6 @@
+{
+ "name": "type_list_parametric",
+ "mode": "",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \nis (2 3 4), should (2 3 4). ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

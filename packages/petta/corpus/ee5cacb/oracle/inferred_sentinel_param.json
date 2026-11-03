@@ -1,0 +1,6 @@
+{
+ "name": "inferred_sentinel_param",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 0.42, should 0.42. ✅ \nis 0.42, should 0.42. ✅ \nis 0.9, should 0.9. ✅ \nis 0.5, should 0.5. ✅ \nis 0.7, should 0.7. ✅ \nis 2.5, should 2.5. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

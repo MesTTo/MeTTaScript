@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_compiler_form_selection",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_compiler_form_selection.metta:5 in:\n  (= (compiler-form-selector $tag)\n   (decode-form (data $tag 0)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_compiler_form_selection.metta'/0: Determinism check failed for 'compiler-form-selector': unknown(['decode-form',[data,_102180,0]]) (while loading MeTTa file)\n"
+}

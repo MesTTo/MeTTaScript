@@ -1,0 +1,6 @@
+{
+ "name": "test_memo_multi_answer",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (7 (Pair 7 7)), should (7 (Pair 7 7)). ✅ \nis (7 (Pair 7 7)), should (7 (Pair 7 7)). ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

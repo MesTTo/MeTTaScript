@@ -1,0 +1,6 @@
+{
+ "name": "isvar_det_param",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 5, should 5. ✅ \nis 0, should 0. ✅ \ntrue\ntrue\n"
+}

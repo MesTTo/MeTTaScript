@@ -1,0 +1,7 @@
+{
+ "name": "fail_collapse_mixed_list",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_collapse_mixed_list.metta:2 in:\n  (= (mixed) (collapse (superpose (1 \"x\"))))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_collapse_mixed_list.metta'/0: Type conflict: value is constrained as ['List',['|','String','Number']] but also required as ['List','Number'] (while loading MeTTa file)\n"
+}

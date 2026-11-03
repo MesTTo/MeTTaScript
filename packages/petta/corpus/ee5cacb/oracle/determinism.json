@@ -1,0 +1,6 @@
+{
+ "name": "determinism",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (10 11), should (10 11). ✅ \nis 10, should 10. ✅ \nis 11, should 11. ✅ \ntrue\ntrue\ntrue\n"
+}

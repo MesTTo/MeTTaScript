@@ -1,0 +1,7 @@
+{
+ "name": "fail_nonparametric_param",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_nonparametric_param.metta:2 in:\n  (= (fun $x) (+ $x 1))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_nonparametric_param.metta'/0: Declared parametric parameter of fun is used as 'Number' by its implementation; declare the concrete type instead (while loading MeTTa file)\n"
+}

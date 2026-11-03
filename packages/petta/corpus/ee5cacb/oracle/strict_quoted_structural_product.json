@@ -1,0 +1,6 @@
+{
+ "name": "strict_quoted_structural_product",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (sample 0.75), should (sample 0.75). ✅ \ntrue\n"
+}

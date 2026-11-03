@@ -1,0 +1,6 @@
+{
+ "name": "matchnested",
+ "mode": "",
+ "status": 0,
+ "stdout": "is ((transitive sim som sam) (transitive tim tom tam)), should ((transitive sim som sam) (transitive tim tom tam)). ✅ \ntrue\n"
+}

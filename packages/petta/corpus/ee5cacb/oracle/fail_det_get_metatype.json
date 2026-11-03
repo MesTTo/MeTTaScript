@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_get_metatype",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_get_metatype.metta:5 in:\n  (= (mt) (get-metatype (add3 1)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_get_metatype.metta'/0: Determinism check failed for mt: call('get-metatype') (while loading MeTTa file)\n"
+}

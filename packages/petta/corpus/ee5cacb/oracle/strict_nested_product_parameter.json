@@ -1,0 +1,6 @@
+{
+ "name": "strict_nested_product_parameter",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is ((1 2) \"kept\"), should ((1 2) \"kept\"). ✅ \nis (zero zero), should (zero zero). ✅ \nis (a b c d e), should (a b c d e). ✅ \nis (five-result (a b c d e)), should (five-result (a b c d e)). ✅ \nis (count-a count-b), should (count-a count-b). ✅ \nis (count-c count-d), should (count-c count-d). ✅ \nis 8, should 8. ✅ \nis 7, should 7. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

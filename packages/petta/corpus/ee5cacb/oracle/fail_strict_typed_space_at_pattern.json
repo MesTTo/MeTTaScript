@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_typed_space_at_pattern",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_typed_space_at_pattern.metta:7 in:\n  (= (bad-functional-pattern)\n   (match &functional-pattern-bad-jobs\n      (@ $whole (job \"wrong\" $label))\n      $whole))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_typed_space_at_pattern.metta'/0: Type mismatch: got [@,_33546,[job,\"wrong\",_33570]] but expected [job,'Number','String'] (while loading MeTTa file)\n"
+}

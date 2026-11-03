@@ -1,0 +1,6 @@
+{
+ "name": "atom_data_open_specialization",
+ "mode": "",
+ "status": 0,
+ "stdout": "is false, should false. ✅ \ntrue\n"
+}

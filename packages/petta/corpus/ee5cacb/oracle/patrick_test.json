@@ -1,0 +1,6 @@
+{
+ "name": "patrick_test",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (s e n n a h a n n e s), should (s e n n a h a n n e s). ✅ \nis (4 5 6), should (4 5 6). ✅ \nis 46, should 46. ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

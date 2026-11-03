@@ -1,0 +1,6 @@
+{
+ "name": "repr",
+ "mode": "",
+ "status": 0,
+ "stdout": "is \"42\", should \"42\". ✅ \nis \"\\\"42\\\"\", should \"\\\"42\\\"\". ✅ \nis \"(A (B C))\", should \"(A (B C))\". ✅ \nis \"(A (, B , C ,))\", should \"(A (, B , C ,))\". ✅ \nis \"2025_12_12\", should \"2025_12_12\". ✅ \nis \"()\", should \"()\". ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

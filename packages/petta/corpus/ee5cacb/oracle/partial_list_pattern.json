@@ -1,0 +1,6 @@
+{
+ "name": "partial_list_pattern",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (a b), should (a b). ✅ \nis (x y), should (x y). ✅ \nis true, should true. ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

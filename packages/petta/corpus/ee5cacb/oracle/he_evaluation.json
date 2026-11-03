@@ -1,0 +1,6 @@
+{
+ "name": "he_evaluation",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 10, should 10. ✅ \nis 10, should 10. ✅ \nis 10, should 10. ✅ \n1\n3\n5\n62\n2\n5\nis (true true true true true true), should (true true true true true true). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

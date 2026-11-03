@@ -1,0 +1,6 @@
+{
+ "name": "strict_alias_product",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (2 \"first\"), should (2 \"first\"). ✅ \nis (3 \"second\"), should (3 \"second\"). ✅ \nis 7, should 7. ✅ \nis ((8 \"eight\")), should ((8 \"eight\")). ✅ \nis (9 \"nine\"), should (9 \"nine\"). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

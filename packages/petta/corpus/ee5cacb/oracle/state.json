@@ -1,0 +1,6 @@
+{
+ "name": "state",
+ "mode": "",
+ "status": 0,
+ "stdout": "is rest, should rest. ✅ \nis active, should active. ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

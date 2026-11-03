@@ -1,0 +1,6 @@
+{
+ "name": "strict_newtype_pattern_binding",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is 7, should 7. ✅ \ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "spaces2",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (space ((foo 1) (foo 2) (foo 42 42) (foo (42 42))) 42), should (space ((foo 1) (foo 2) (foo 42 42) (foo (42 42))) 42). ✅ \n(bar 42)\n(bar 43)\ntrue\n"
+}

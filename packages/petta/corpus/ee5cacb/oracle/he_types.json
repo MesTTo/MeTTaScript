@@ -1,0 +1,6 @@
+{
+ "name": "he_types",
+ "mode": "",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \nis false, should false. ✅ \nis \"Matched!\", should \"Matched!\". ✅ \nis \"Didn't match\", should \"Didn't match\". ✅ \nis A, should A. ✅ \nis B, should B. ✅ \nis true, should true. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

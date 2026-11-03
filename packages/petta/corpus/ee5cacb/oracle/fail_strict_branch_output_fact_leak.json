@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_branch_output_fact_leak",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_branch_output_fact_leak.metta:16 in:\n  (= (branch-output-fact-must-not-leak $tv)\n   (if (is-var $tv)\n      (the LeakTV $tv)\n      (case $tv\n         (((LeakSTVValue $s $c) (LeakSTVValue $s $c))\n          ((LeakCTVValue $pos $neg)\n             (LeakCTVValue\n                (checked-leak-stv $pos)\n                (checked-leak-stv $neg)))\n          (leak-no-evidence leak-no-evidence)\n          ($other $other)))))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_branch_output_fact_leak.metta'/0: Strict mode rejected residual runtime type goal in 'branch-output-fact-must-not-leak': typecheck_or_error(_8632,['|','LeakSTV','LeakCTV','LeakNone']) (while loading MeTTa file)\n"
+}

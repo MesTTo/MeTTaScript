@@ -1,0 +1,6 @@
+{
+ "name": "lib_trust_datastructures_call",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (queue (2 1) () 2), should (queue (2 1) () 2). ✅ \ntrue\ntrue\n"
+}

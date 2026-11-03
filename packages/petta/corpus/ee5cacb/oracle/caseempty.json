@@ -1,0 +1,6 @@
+{
+ "name": "caseempty",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 42, should 42. ✅ \nis ok, should ok. ✅ \ntrue\ntrue\n"
+}

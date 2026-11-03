@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_lib_combinatorics",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is ((a b) (a c) (b c)), should ((a b) (a c) (b c)). ✅ \nis (a b), should (a b). ✅ \ntrue\ntrue\ntrue\n"
+}

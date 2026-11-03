@@ -1,0 +1,6 @@
+{
+ "name": "test_memo_partial_body",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 6, should 6. ✅ \nis 6, should 6. ✅ \nis 6, should 6. ✅ \nis 1, should 1. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

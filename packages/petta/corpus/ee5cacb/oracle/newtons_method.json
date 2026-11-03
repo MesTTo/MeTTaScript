@@ -1,0 +1,6 @@
+{
+ "name": "newtons_method",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 4.0, should 4.0. ✅ \nis 3.9199999999999995, should 3.9199999999999995. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

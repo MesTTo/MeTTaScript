@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_effect_poly_nonexhaustive",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_effect_poly_nonexhaustive.metta:3 in:\n  (= (incomplete-effect-dispatch $f True) ($f 1))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_effect_poly_nonexhaustive.metta'/0: Deterministic function 'incomplete-effect-dispatch' is not exhaustive: argument 2 matches no clause for false - cover the remaining cases, or declare it -[semidet]-> (zero or one result, committed exactly like -[det]->) (while loading MeTTa file)\n"
+}

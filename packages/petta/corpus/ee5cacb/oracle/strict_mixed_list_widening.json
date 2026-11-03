@@ -1,0 +1,6 @@
+{
+ "name": "strict_mixed_list_widening",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (() (item 1)), should (() (item 1)). ✅ \nis ((item 2) 7 8), should ((item 2) 7 8). ✅ \ntrue\ntrue\n"
+}

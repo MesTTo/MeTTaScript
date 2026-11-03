@@ -1,0 +1,6 @@
+{
+ "name": "strict_forward_decl",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is 42, should 42. ✅ \nis 6, should 6. ✅ \ntrue\ntrue\ntrue\n"
+}

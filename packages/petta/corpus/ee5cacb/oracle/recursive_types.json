@@ -1,0 +1,6 @@
+{
+ "name": "recursive_types",
+ "mode": "",
+ "status": 0,
+ "stdout": "is Metal, should Metal. ✅ \nis ((-> Metal Sword) (-> Metal Paperclip)), should ((-> Metal Sword) (-> Metal Paperclip)). ✅ \nis (Sword Paperclip), should (Sword Paperclip). ✅ \nis ((Metal (-> Metal Sword)) (Metal (-> Metal Paperclip))), should ((Metal (-> Metal Sword)) (Metal (-> Metal Paperclip))). ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

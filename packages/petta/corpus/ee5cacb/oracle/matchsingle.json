@@ -1,0 +1,6 @@
+{
+ "name": "matchsingle",
+ "mode": "",
+ "status": 0,
+ "stdout": "is ((a b)), should ((a b)). ✅ \nis ((a b)), should ((a b)). ✅ \ntrue\ntrue\n"
+}

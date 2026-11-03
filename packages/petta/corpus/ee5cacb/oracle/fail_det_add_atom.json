@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_add_atom",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_add_atom.metta:2 in:\n  (= (remember $a) (add-atom &self $a))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_add_atom.metta'/0: Determinism check failed for remember: call('add-atom') (while loading MeTTa file)\n"
+}

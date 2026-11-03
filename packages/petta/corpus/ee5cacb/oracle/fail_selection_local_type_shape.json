@@ -1,0 +1,7 @@
+{
+ "name": "fail_selection_local_type_shape",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_selection_local_type_shape.metta:8 in:\n  (= (bad-list $raw)\n   (let $values (pass-through $raw) (list-code $values)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_selection_local_type_shape.metta'/0: Determinism check failed for 'bad-list': call('list-code') (while loading MeTTa file)\n"
+}

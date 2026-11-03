@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_outer_brand_case_open_fallthrough",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is cpu, should cpu. ✅ \nis (fact context proof tv), should (fact context proof tv). ✅ \ntrue\ntrue\ntrue\n"
+}

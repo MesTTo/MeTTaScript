@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_plain_arrow_param",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_plain_arrow_param.metta:1 in:\n  (: apply-unannotated (-[det]-> (-> Number Number) Number Number))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_plain_arrow_param.metta'/0: --strict-det requires -[det]->, -[semidet]->, -[nondet]->, or -[$v]-> in every arrow position of the declaration for 'apply-unannotated'; plain -> is not allowed (while loading MeTTa file)\n"
+}

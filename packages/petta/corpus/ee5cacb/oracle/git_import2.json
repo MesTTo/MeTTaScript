@@ -1,0 +1,7 @@
+{
+ "name": "git_import2",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "ERROR: [Thread main] src/main.pl:123: user:main 'import!'/0: source_sink `'src/../lib/lib_faiss'' does not exist (src/../lib/lib_faiss)\n"
+}

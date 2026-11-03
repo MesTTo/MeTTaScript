@@ -1,0 +1,6 @@
+{
+ "name": "partialdef",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 2, should 2. ✅ \nis 4, should 4. ✅ \ntrue\ntrue\n"
+}

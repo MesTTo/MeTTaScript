@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_newtype_pattern_literal",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_newtype_pattern_literal.metta:9 in:\n  (= (bad-bundle $wanted)\n   (match &bundles (row $wanted (\"not-a-number\" $_label)) 0))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_newtype_pattern_literal.metta'/0: Type mismatch: got [row,_113434,[\"not-a-number\",_113466]] but expected [row,'Number','Bundle'] (while loading MeTTa file)\n"
+}

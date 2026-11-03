@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_forward_mutual_bool",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \ntrue\n"
+}

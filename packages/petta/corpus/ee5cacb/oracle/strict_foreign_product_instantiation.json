@@ -1,0 +1,6 @@
+{
+ "name": "strict_foreign_product_instantiation",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (CPU op), should (CPU op). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

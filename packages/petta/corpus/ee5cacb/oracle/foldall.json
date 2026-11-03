@@ -1,0 +1,6 @@
+{
+ "name": "foldall",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 5, should 5. ✅ \nis 5, should 5. ✅ \nis 5, should 5. ✅ \nis 5, should 5. ✅ \nis 5, should 5. ✅ \nis 5, should 5. ✅ \nis 5, should 5. ✅ \nis 5, should 5. ✅ \nis 5, should 5. ✅ \nis 10, should 10. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

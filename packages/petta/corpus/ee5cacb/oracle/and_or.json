@@ -1,0 +1,6 @@
+{
+ "name": "and_or",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 1, should 1. ✅ \ntrue\n"
+}

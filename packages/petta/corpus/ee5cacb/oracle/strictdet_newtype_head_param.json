@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_newtype_head_param",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is main-kb, should main-kb. ✅ \ntrue\ntrue\n"
+}

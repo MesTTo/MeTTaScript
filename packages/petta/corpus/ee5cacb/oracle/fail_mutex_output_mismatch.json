@@ -1,0 +1,7 @@
+{
+ "name": "fail_mutex_output_mismatch",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_mutex_output_mismatch.metta:8 in:\n  (= (bad-mutex $x) (with_mutex m (aa $x)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_mutex_output_mismatch.metta'/0: Type conflict: value is constrained as 'A' but also required as 'B' (while loading MeTTa file)\n"
+}

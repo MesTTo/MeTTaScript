@@ -1,0 +1,6 @@
+{
+ "name": "string",
+ "mode": "",
+ "status": 0,
+ "stdout": "is \"a test (with newlines and parentheses)\", should \"a test (with newlines and parentheses)\". ✅ \ntrue\n"
+}

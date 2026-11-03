@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_space_update_payload",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is ((1 true)), should ((1 true)). ✅ \nis ((key 3)), should ((key 3)). ✅ \ntrue\nfalse\nfalse\ntrue\n()\ntrue\n"
+}

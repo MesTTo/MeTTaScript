@@ -1,0 +1,6 @@
+{
+ "name": "type_previous_try_coverage",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 14, should 14. ✅ \nis 12, should 12. ✅ \nis 14, should 14. ✅ \nis 15, should 15. ✅ \nis Error, should Error. ✅ \nis \"(literal_type_mismatch \\\"oops\\\" Number)\", should \"(literal_type_mismatch \\\"oops\\\" Number)\". ✅ \nis Error, should Error. ✅ \nis \"(literal_type_mismatch \\\"oops\\\" Number)\", should \"(literal_type_mismatch \\\"oops\\\" Number)\". ✅ \nis Error, should Error. ✅ \nis \"(literal_type_mismatch 15 String)\", should \"(literal_type_mismatch 15 String)\". ✅ \nis Error, should Error. ✅ \nis true, should true. ✅ \nis true, should true. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

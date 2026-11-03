@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_field_in_and",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_field_in_and.metta:3 in:\n  (= (use-field (P $u)) (and $u true))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_field_in_and.metta'/0: Determinism check failed for 'use-field': call(and) (while loading MeTTa file)\n"
+}

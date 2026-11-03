@@ -1,0 +1,7 @@
+{
+ "name": "fail_nonexhaustive_ctor",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_nonexhaustive_ctor.metta:7 in:\n  (= (area (Circle $r)) (* 3 (* $r $r)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_nonexhaustive_ctor.metta'/0: Deterministic function area is not exhaustive: argument 1 matches no clause for Point - cover the remaining cases, or declare it -[semidet]-> (zero or one result, committed exactly like -[det]->) (while loading MeTTa file)\n"
+}

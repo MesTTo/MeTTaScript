@@ -1,0 +1,7 @@
+{
+ "name": "fail_andthen_nonbool",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_andthen_nonbool.metta:2 in:\n  (= (bad-and) (and-then True 42))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_andthen_nonbool.metta'/0: Type mismatch: got 42 but expected 'Bool' (while loading MeTTa file)\n"
+}

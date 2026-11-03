@@ -1,0 +1,6 @@
+{
+ "name": "type_overload_resolved",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 1, should 1. ✅ \ntrue\ntrue\n"
+}

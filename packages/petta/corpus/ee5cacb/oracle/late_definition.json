@@ -1,0 +1,6 @@
+{
+ "name": "late_definition",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 2, should 2. ✅ \ntrue\n"
+}

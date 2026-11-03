@@ -1,0 +1,7 @@
+{
+ "name": "fail_overload_clause_mismatch",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_overload_clause_mismatch.metta:6 in:\n  (= (overloaded 0) \"wrong\")\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_overload_clause_mismatch.metta'/0: Type mismatch: got \"wrong\" but expected 'Number' (while loading MeTTa file)\n"
+}

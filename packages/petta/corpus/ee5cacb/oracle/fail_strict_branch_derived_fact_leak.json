@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_branch_derived_fact_leak",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_branch_derived_fact_leak.metta:11 in:\n  (= (derived-branch-leak? $annotated)\n   (if (= $annotated (LeakTuple $_proof $statement $_tv))\n      (let $derived $statement true)\n      (accepts-leak-statement? $derived)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_branch_derived_fact_leak.metta'/0: Strict mode rejected residual runtime type goal in 'accepts-leak-statement?': typecheck_or_error(_4858,'LeakStatement') (while loading MeTTa file)\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "metta4_streams",
+ "mode": "",
+ "status": 0,
+ "stdout": "is ((num 1) (num 2) (num 3) (num 4)), should ((num 1) (num 2) (num 3) (num 4)). ✅ \nis ((num 1)), should ((num 1)). ✅ \nis 6, should 6. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

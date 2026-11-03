@@ -1,0 +1,6 @@
+{
+ "name": "semidet_partial_constructs",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 10, should 10. ✅ \nis (), should (). ✅ \nis 1, should 1. ✅ \nis (), should (). ✅ \nis 20, should 20. ✅ \nis false, should false. ✅ \nis true, should true. ✅ \nis 0, should 0. ✅ \nis 7, should 7. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

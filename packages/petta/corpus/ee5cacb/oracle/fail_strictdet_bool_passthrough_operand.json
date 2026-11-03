@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_bool_passthrough_operand",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_bool_passthrough_operand.metta:5 in:\n  (= (gate $x) (and (pass-bool $x) True))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_bool_passthrough_operand.metta'/0: Determinism check failed for gate: call(and) (while loading MeTTa file)\n"
+}

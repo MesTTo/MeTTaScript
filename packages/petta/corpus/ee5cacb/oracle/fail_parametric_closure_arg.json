@@ -1,0 +1,7 @@
+{
+ "name": "fail_parametric_closure_arg",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_parametric_closure_arg.metta:2 in:\n  (= (g2 $f) ($f \"hello\"))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_parametric_closure_arg.metta'/0: Declared parametric parameter of g2 is used as 'String' by its implementation; declare the concrete type instead (while loading MeTTa file)\n"
+}

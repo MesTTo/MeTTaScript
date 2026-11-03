@@ -1,0 +1,6 @@
+{
+ "name": "typed_space_proven_update",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (2), should (2). ✅ \nis typecheck, should typecheck. ✅ \nis typecheck, should typecheck. ✅ \nis typecheck, should typecheck. ✅ \nis (2), should (2). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

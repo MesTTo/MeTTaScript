@@ -1,0 +1,7 @@
+{
+ "name": "fail_list_type_mismatch",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_list_type_mismatch.metta:6 in:\n  (takes-number-list (1 \"oops\" 3))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_list_type_mismatch.metta'/0: Type mismatch: got [1,\"oops\",3] but expected ['List','Number'] (while loading MeTTa file)\n"
+}

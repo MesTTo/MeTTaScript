@@ -1,0 +1,50 @@
+{
+  "name": "@mettascript/petta",
+  "version": "3.4.0",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "petta": "./dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "lib"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts src/cli.ts --format esm --dts --clean"
+  },
+  "author": "MesTTo",
+  "engines": {
+    "node": ">=20"
+  },
+  "sideEffects": false,
+  "module": "./dist/index.js",
+  "publishConfig": {
+    "access": "public"
+  },
+  "description": "PeTTa-semantics MeTTa evaluator for MeTTaScript: PeTTa's MeTTa-to-Prolog translation run on a TypeScript resolution engine.",
+  "keywords": [
+    "metta",
+    "petta",
+    "prolog",
+    "typescript"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MesTTo/MeTTaScript.git",
+    "directory": "packages/petta"
+  },
+  "homepage": "https://github.com/MesTTo/MeTTaScript#readme",
+  "bugs": {
+    "url": "https://github.com/MesTTo/MeTTaScript/issues"
+  }
+}

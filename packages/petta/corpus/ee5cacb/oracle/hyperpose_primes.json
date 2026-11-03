@@ -1,0 +1,6 @@
+{
+ "name": "hyperpose_primes",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (1 2 3), should (1 2 3). ✅ \nis (true true true true), should (true true true true). ✅ \nis true, should true. ✅ \ntrue\ntrue\ntrue\n"
+}

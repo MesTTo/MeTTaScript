@@ -1,0 +1,6 @@
+{
+ "name": "type_runtime_output_fallback",
+ "mode": "",
+ "status": 0,
+ "stdout": "is Error, should Error. ✅ \nis Error, should Error. ✅ \nis Error, should Error. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "multiset_operations",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (a b c d), should (a b c d). ✅ \nis (a b b c b c c d), should (a b b c b c c d). ✅ \nis (b c c), should (b c c). ✅ \nis (a b), should (a b). ✅ \nis (b c), should (b c). ✅ \nis (a), should (a). ✅ \nis (a a), should (a a). ✅ \nis (), should (). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_semidet_arrow",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is 10, should 10. ✅ \nis (20), should (20). ✅ \nis (), should (). ✅ \nis 2, should 2. ✅ \nis (), should (). ✅ \nis 11, should 11. ✅ \nis (), should (). ✅ \nis 2, should 2. ✅ \nis 20, should 20. ✅ \nis (), should (). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

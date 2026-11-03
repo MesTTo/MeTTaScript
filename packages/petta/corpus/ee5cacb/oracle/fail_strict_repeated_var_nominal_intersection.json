@@ -1,0 +1,7 @@
+{
+ "name": "fail_strict_repeated_var_nominal_intersection",
+ "mode": "--strict",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strict_repeated_var_nominal_intersection.metta:8 in:\n  (= (use-shared $x) (both $x $x))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strict_repeated_var_nominal_intersection.metta'/0: Strict mode cannot express the unresolved nominal intersection ['A','B'] in both; use an explicit (the ...) cast or redesign the declaration (while loading MeTTa file)\n"
+}

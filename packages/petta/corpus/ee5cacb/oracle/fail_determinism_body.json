@@ -1,0 +1,7 @@
+{
+ "name": "fail_determinism_body",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_determinism_body.metta:2 in:\n  (= (bad-choose $x)\n   (superpose ($x (+ $x 1))))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_determinism_body.metta'/0: Determinism check failed for 'bad-choose': superpose (while loading MeTTa file)\n"
+}

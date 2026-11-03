@@ -1,0 +1,6 @@
+{
+ "name": "strict_match_contextual_result",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (2 \"one\"), should (2 \"one\"). ✅ \nis (11 \"one\"), should (11 \"one\"). ✅ \nis (1 10), should (1 10). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

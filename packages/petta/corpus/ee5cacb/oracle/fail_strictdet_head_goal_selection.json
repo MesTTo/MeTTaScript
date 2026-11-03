@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_head_goal_selection",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_head_goal_selection.metta:5 in:\n  (= (consumes-head-proof) (guarded-head $unknown))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_head_goal_selection.metta'/0: Determinism check failed for 'consumes-head-proof': unknown(['guarded-head',_101194]) (while loading MeTTa file)\n"
+}

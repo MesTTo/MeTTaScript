@@ -1,0 +1,6 @@
+{
+ "name": "types_nondet",
+ "mode": "",
+ "status": 0,
+ "stdout": "is T1out, should T1out. ✅ \nis T2out, should T2out. ✅ \nis (), should (). ✅ \nis Tdefault, should Tdefault. ✅ \ntrue\ntrue\ntrue\ntrue\n"
+}

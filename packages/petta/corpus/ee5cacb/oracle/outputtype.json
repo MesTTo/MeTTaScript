@@ -1,0 +1,6 @@
+{
+ "name": "outputtype",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 44, should 44. ✅ \nis (+ 2 42), should (+ 2 42). ✅ \nis (+ (+ 1 1) 42), should (+ (+ 1 1) 42). ✅ \ntrue\ntrue\ntrue\n"
+}

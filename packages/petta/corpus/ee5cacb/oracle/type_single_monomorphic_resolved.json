@@ -1,0 +1,6 @@
+{
+ "name": "type_single_monomorphic_resolved",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 3, should 3. ✅ \ntrue\ntrue\n"
+}

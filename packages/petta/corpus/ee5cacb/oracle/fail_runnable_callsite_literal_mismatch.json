@@ -1,0 +1,7 @@
+{
+ "name": "fail_runnable_callsite_literal_mismatch",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_runnable_callsite_literal_mismatch.metta:6 in:\n  (sid 7)\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_runnable_callsite_literal_mismatch.metta'/0: Type mismatch: got 7 but expected 'String' (while loading MeTTa file)\n"
+}

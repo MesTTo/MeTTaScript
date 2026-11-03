@@ -1,0 +1,6 @@
+{
+ "name": "python",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 3.141592653589793, should 3.141592653589793. ✅ \nis ABC, should ABC. ✅ \nis 8, should 8. ✅ \nis 42, should 42. ✅ \nis 35, should 35. ✅ \nis HELLO, should HELLO. ✅ \nis true, should true. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

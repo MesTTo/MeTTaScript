@@ -1,0 +1,6 @@
+{
+ "name": "constanthead",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 70, should 70. ✅ \ntrue\n"
+}

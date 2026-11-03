@@ -1,0 +1,6 @@
+{
+ "name": "strict_match_schema",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is 43, should 43. ✅ \nis (apple banana), should (apple banana). ✅ \ntrue\ntrue\ntrue\n"
+}

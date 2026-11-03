@@ -1,0 +1,7 @@
+{
+ "name": "fail_late_effect_conditional",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "ERROR: [Thread main] src/main.pl:123: user:main './examples/fail_late_effect_conditional.metta'/0: Determinism check failed for use: call(conduit) (while loading MeTTa file)\n"
+}

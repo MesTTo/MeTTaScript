@@ -1,0 +1,6 @@
+{
+ "name": "python_import",
+ "mode": "",
+ "status": 0,
+ "stdout": "is \"Hello, PeTTa User from Python!\", should \"Hello, PeTTa User from Python!\". ✅ \nis 30, should 30. ✅ \ntrue\ntrue\ntrue\n"
+}

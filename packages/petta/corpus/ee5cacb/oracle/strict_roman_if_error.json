@@ -1,0 +1,6 @@
+{
+ "name": "strict_roman_if_error",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is 42, should 42. ✅ \nis 0, should 0. ✅ \nis true, should true. ✅ \nis false, should false. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

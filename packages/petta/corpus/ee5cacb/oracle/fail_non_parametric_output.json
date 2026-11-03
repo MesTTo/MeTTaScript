@@ -1,0 +1,7 @@
+{
+ "name": "fail_non_parametric_output",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_non_parametric_output.metta:2 in:\n  (= (magic) 0)\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_non_parametric_output.metta'/0: Declared output type variable of magic requires a parametric (bottom) implementation (while loading MeTTa file)\n"
+}

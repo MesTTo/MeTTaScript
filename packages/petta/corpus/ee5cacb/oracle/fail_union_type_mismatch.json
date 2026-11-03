@@ -1,0 +1,7 @@
+{
+ "name": "fail_union_type_mismatch",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_union_type_mismatch.metta:9 in:\n  (exec-tv 42)\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_union_type_mismatch.metta'/0: Type mismatch: got 42 but expected ['|',['CPU','%Undefined%','%Undefined%','%Undefined%'],[:,'%Undefined%','%Undefined%','%Undefined%','TV']] (while loading MeTTa file)\n"
+}

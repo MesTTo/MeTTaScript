@@ -1,0 +1,7 @@
+{
+ "name": "fail_semidet_nondet_builtin",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_semidet_nondet_builtin.metta:2 in:\n  (= (pick) (let $a (get-atoms &self) 5))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_semidet_nondet_builtin.metta'/0: Determinism check failed for pick: call('get-atoms') (while loading MeTTa file)\n"
+}

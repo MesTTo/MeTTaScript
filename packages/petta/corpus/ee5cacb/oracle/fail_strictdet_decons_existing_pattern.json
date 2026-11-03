@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_decons_existing_pattern",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_decons_existing_pattern.metta:2 in:\n  (= (split-existing-det $term)\n   (if (and (is-expr $term) (not (== $term ())))\n      (let ($head $term) (decons $term) true)\n      false))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_decons_existing_pattern.metta'/0: Determinism check failed for 'split-existing-det': call(decons) (while loading MeTTa file)\n"
+}

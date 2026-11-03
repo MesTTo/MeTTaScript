@@ -1,0 +1,6 @@
+{
+ "name": "test_memo_stats",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 81, should 81. ✅ \nis 81, should 81. ✅ \nis 81, should 81. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

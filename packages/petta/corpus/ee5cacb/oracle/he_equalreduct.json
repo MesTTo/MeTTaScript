@@ -1,0 +1,6 @@
+{
+ "name": "he_equalreduct",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 5, should 5. ✅ \nis true, should true. ✅ \nis false, should false. ✅ \nis \"Equal\", should \"Equal\". ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

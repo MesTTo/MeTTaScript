@@ -1,0 +1,6 @@
+{
+ "name": "specialize_recursive_wrap",
+ "mode": "",
+ "status": 0,
+ "stdout": "is stmt, should stmt. ✅ \ntrue\n"
+}

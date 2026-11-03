@@ -1,0 +1,6 @@
+{
+ "name": "specialized_call_exception",
+ "mode": "",
+ "status": 0,
+ "stdout": "is caught, should caught. ✅ \nis caught, should caught. ✅ \ntrue\ntrue\n"
+}

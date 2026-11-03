@@ -1,0 +1,6 @@
+{
+ "name": "lambda",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 3, should 3. ✅ \nis 9, should 9. ✅ \nis (2 3 4), should (2 3 4). ✅ \nis true, should true. ✅ \nis (42 43 2 3), should (42 43 2 3). ✅ \nis (42 43 44), should (42 43 44). ✅ \nis (42 43 44 45), should (42 43 44 45). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

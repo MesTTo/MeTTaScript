@@ -1,0 +1,6 @@
+{
+ "name": "atomops",
+ "mode": "",
+ "status": 0,
+ "stdout": "is (0 1 2 3), should (0 1 2 3). ✅ \nis 1, should 1. ✅ \nis (2 3), should (2 3). ✅ \nis 2, should 2. ✅ \nis 5, should 5. ✅ \nis true, should true. ✅ \nis false, should false. ✅ \nis A, should A. ✅ \nis B, should B. ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis (), should (). ✅ \nis (), should (). ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

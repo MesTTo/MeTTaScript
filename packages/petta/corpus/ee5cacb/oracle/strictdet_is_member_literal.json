@@ -1,0 +1,6 @@
+{
+ "name": "strictdet_is_member_literal",
+ "mode": "--strict-det",
+ "status": 0,
+ "stdout": "is true, should true. ✅ \nis false, should false. ✅ \nis true, should true. ✅ \ntrue\ntrue\ntrue\n"
+}

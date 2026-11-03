@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_is_member_unbound",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_is_member_unbound.metta:2 in:\n  (= (some-known-name?)\n   (is-member $name (alpha beta gamma)))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_is_member_unbound.metta'/0: Determinism check failed for 'some-known-name?': call('is-member') (while loading MeTTa file)\n"
+}

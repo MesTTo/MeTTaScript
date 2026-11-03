@@ -1,0 +1,7 @@
+{
+ "name": "fail_ground_clause_output_conflict",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_ground_clause_output_conflict.metta:7 in:\n  (= (f a) b)\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_ground_clause_output_conflict.metta'/0: Type mismatch: got b but expected 'A' (while loading MeTTa file)\n"
+}

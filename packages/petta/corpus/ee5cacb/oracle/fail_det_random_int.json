@@ -1,0 +1,7 @@
+{
+ "name": "fail_det_random_int",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_det_random_int.metta:2 in:\n  (= (rr) (random-int 5 1))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_det_random_int.metta'/0: Determinism check failed for rr: call('random-int') (while loading MeTTa file)\n"
+}

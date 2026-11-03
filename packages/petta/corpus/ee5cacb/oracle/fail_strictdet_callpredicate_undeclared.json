@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_callpredicate_undeclared",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_callpredicate_undeclared.metta:2 in:\n  (= (pick-any $list)\n   (let $_picked\n      (callPredicate\n         (Predicate (member $x $list)))\n      true))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_callpredicate_undeclared.metta'/0: Determinism check failed for 'pick-any': call(callPredicate) (while loading MeTTa file)\n"
+}

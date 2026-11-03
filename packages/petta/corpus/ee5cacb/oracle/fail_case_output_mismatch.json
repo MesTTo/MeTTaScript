@@ -1,0 +1,7 @@
+{
+ "name": "fail_case_output_mismatch",
+ "mode": "",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_case_output_mismatch.metta:10 in:\n  (= (bad-case $x)\n   (case $x\n     ((a (aa $x))\n      (Empty b))))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_case_output_mismatch.metta'/0: Type conflict: value is constrained as 'A' but also required as 'B' (while loading MeTTa file)\n"
+}

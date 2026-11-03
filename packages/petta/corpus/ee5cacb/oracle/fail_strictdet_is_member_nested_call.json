@@ -1,0 +1,7 @@
+{
+ "name": "fail_strictdet_is_member_nested_call",
+ "mode": "--strict-det",
+ "status": 2,
+ "stdout": "",
+ "stderr": "Type error at examples/fail_strictdet_is_member_nested_call.metta:4 in:\n  (= (has-one? $x) (is-member $x (1 (one))))\nERROR: [Thread main] src/main.pl:123: user:main './examples/fail_strictdet_is_member_nested_call.metta'/0: Determinism check failed for 'has-one?': call('is-member') (while loading MeTTa file)\n"
+}

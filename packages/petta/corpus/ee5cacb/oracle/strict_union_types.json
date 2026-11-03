@@ -1,0 +1,6 @@
+{
+ "name": "strict_union_types",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is (mkTV 0), should (mkTV 0). ✅ \nis (mkTV 5), should (mkTV 5). ✅ \nis ((mkTV 7) (mkTV 0)), should ((mkTV 7) (mkTV 0)). ✅ \nis 42, should 42. ✅ \nis 0, should 0. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}

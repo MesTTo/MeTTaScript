@@ -1,0 +1,6 @@
+{
+ "name": "patrick_iterate_quad",
+ "mode": "",
+ "status": 0,
+ "stdout": "is 125417041750, should 125417041750. ✅ \ntrue\ntrue\n"
+}

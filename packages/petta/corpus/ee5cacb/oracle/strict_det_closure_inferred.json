@@ -1,0 +1,6 @@
+{
+ "name": "strict_det_closure_inferred",
+ "mode": "--strict",
+ "status": 0,
+ "stdout": "is 3, should 3. ✅ \nis 12, should 12. ✅ \nis 11, should 11. ✅ \nis 42, should 42. ✅ \nis 15, should 15. ✅ \ntrue\ntrue\ntrue\ntrue\ntrue\n"
+}
