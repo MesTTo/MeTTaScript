@@ -129,6 +129,21 @@ function shareGround(t: Term): Term {
   return conv(t);
 }
 
+/** Predicates SWI refuses to let user code modify: ISO builtins and those its boot files define. */
+const PROTECTED = new Set([
+  "=/2", "\\=/2", "==/2", "\\==/2", "@</2", "@>/2", "@=</2", "@>=/2", "compare/3", "var/1", "nonvar/1", "atom/1",
+  "number/1", "integer/1", "float/1", "atomic/1", "compound/1", "callable/1", "is_list/1", "string/1", "ground/1",
+  "functor/3", "arg/3", "=../2", "copy_term/2", "is/2", "=:=/2", "=\\=/2", "</2", ">/2", "=</2", ">=/2",
+  "clause/2", "asserta/1", "assertz/1", "assert/1", "retract/1", "retractall/1", "abolish/1", "findall/3", "findall/4",
+  "bagof/3", "setof/3", "forall/2", "atom_codes/2", "atom_chars/2", "char_code/2", "atom_length/2", "atom_concat/3",
+  "sub_atom/5", "number_codes/2", "number_chars/2", "atom_number/2", "atom_string/2", "string_concat/3",
+  "write/1", "writeq/1", "print/1", "nl/0", "write_canonical/1", "write_term/2", "format/1", "format/2", "format/3",
+  "halt/0", "halt/1", "call/1", "catch/3", "throw/1", "once/1", "ignore/1", "\\+/1", "not/1", "length/2",
+  "msort/2", "sort/2", "sort/4", "keysort/2", "nb_getval/2", "nb_setval/2", "b_getval/2", "b_setval/2",
+  "term_variables/2", "setarg/3", "nb_setarg/3", "tab/1", "atom_to_term/3", "term_to_atom/2", "number_vars/3",
+  "succ_or_fail/0", "read_term/2", "op/3", "current_op/3", "dynamic/1", "consult/1",
+]);
+
 /** A stored head stays a structure, since tryClauses unifies its arguments; only the arguments are shared. */
 function shareHead(h: Term): Term {
   return h instanceof Struct ? new Struct(h.name, h.args.map(shareGround)) : h;
@@ -398,6 +413,9 @@ export class Machine {
     else if (head instanceof Struct) [name, arity] = [head.name, head.args.length];
     else throw typeError("callable", head);
     const key = name + "/" + arity;
+    // SWI protects ISO and boot-defined predicates; a user definition of any other builtin (plus/3, succ/2)
+    // replaces it in the user module.
+    if (this.builtins.has(key) && !PROTECTED.has(key)) this.builtins.delete(key);
     if (this.builtins.has(key) || this.libraryPreds.has(key))
       throw new PrologError(
         mkStruct("error", mkStruct("permission_error", "modify", "static_procedure", mkStruct("/", name, arity)), mkVar()),

@@ -52,7 +52,13 @@ exp(Arg,R) :- R is exp(Arg).
 '#='(_, _, false).
 '#\\='(A, B, true)  :- A =\= B, !.
 '#\\='(_, _, false).
-'$clpfd_sum'(A, B, R) :- ( number(A), number(B) -> R is A + B ; number(A), number(R) -> B is R - A ; number(B), number(R) -> A is R - B ; throw(error(instantiation_error, '#+'/3)) ).
+'$clpfd_sum'(A, B, R) :- ( number(A), number(B) -> R is A + B ; number(A), number(R) -> B is R - A ; number(B), number(R) -> A is R - B ; '$clpfd_suspend'('$clpfd_sum'(A, B, R), [A, B, R]) ).
+'$clpfd_suspend'(G, Vs) :- term_variables(Vs, Us), '$clpfd_attach'(Us, G).
+'$clpfd_attach'([], _).
+'$clpfd_attach'([U|Us], G) :- ( get_attr(U, clpfd, Gs) -> put_attr(U, clpfd, [G|Gs]) ; put_attr(U, clpfd, [G]) ), '$clpfd_attach'(Us, G).
+'$attr_unify_hook'(clpfd, Gs, Other) :- !, ( var(Other) -> ( get_attr(Other, clpfd, G2) -> append(Gs, G2, G3), put_attr(Other, clpfd, G3) ; put_attr(Other, clpfd, Gs) ) ; '$clpfd_wake'(Gs) ).
+'$clpfd_wake'([]).
+'$clpfd_wake'([G|Gs]) :- call(G), '$clpfd_wake'(Gs).
 'pow-math'(A, B, Out) :- Out is A ** B.
 'sqrt-math'(A, Out)   :- Out is sqrt(A).
 'abs-math'(A, Out)    :- Out is abs(A).

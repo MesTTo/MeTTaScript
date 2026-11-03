@@ -71,8 +71,10 @@ export interface PettaOptions {
 }
 
 interface CompiledSource {
-  readonly clause: Clause;
+  clause: Clause;
   readonly source: Term;
+  /** Symbols this clause compiled as plain data heads. */
+  dataSymbols: Set<string>;
 }
 
 /** The directory holding PeTTa's lib/*.metta, shipped beside this package's dist. */
@@ -163,6 +165,34 @@ export class Petta {
     this.funs.add(f);
     const ars = this.predArities(f).filter((a) => !(this.isOperatorName(f) && a <= 2)).sort((a, b) => a - b);
     for (const a of ars) this.noteArity(f, a);
+    if (this.symbolHeads.has(f)) this.recompileDependents(f);
+  }
+
+  /**
+   * A function arriving after clauses compiled its name as plain data: recompile each function that has such
+   * a clause, all its clauses together and in source order (recompile_function_clauses/1), so they call it.
+   */
+  private recompileDependents(f: string): void {
+    for (const [g, sources] of [...this.compiled]) {
+      if (!sources.some((s) => s.dataSymbols.has(f))) continue;
+      for (const s of sources) {
+        this.m.db.retractClause(s.clause);
+        this.m.solveOnce(S("retractall", S("translated_from", clauseRef(s.clause), mkVar())));
+      }
+      for (const s of sources) {
+        const dataSymbols = new Set<string>();
+        const saved = this.translator.dataSymbols;
+        this.translator.dataSymbols = dataSymbols;
+        try {
+          s.clause = this.m.addClause(this.translator.clause(copyTerm(s.source), true), true);
+        } finally {
+          this.translator.dataSymbols = saved;
+        }
+        s.dataSymbols = dataSymbols;
+        this.m.addClause(S("translated_from", clauseRef(s.clause), copyTerm(s.source)), true);
+      }
+      void g;
+    }
   }
 
   unregisterFun(f: string): void {
@@ -268,12 +298,20 @@ export class Petta {
 
   /** Translate a (= Head Body) source term, assert the clause and remember its source for remove-atom. */
   compileAndAssert(source: Term, _label: string): Clause {
-    const clauseT = this.translator.clause(source, true);
+    const savedData = this.translator.dataSymbols;
+    const dataSymbols = new Set<string>();
+    this.translator.dataSymbols = dataSymbols;
+    let clauseT: Term;
+    try {
+      clauseT = this.translator.clause(copyTerm(source), true);
+    } finally {
+      this.translator.dataSymbols = savedData;
+    }
     const c = this.m.addClause(clauseT, true);
     const items = listToArray(deref(source))!;
     const f = deref(listToArray(deref(items[1]!))![0]!) as string;
     const l = this.compiled.get(f) ?? [];
-    l.push({ clause: c, source: copyTerm(source) });
+    l.push({ clause: c, source: copyTerm(source), dataSymbols });
     this.compiled.set(f, l);
     this.m.addClause(S("translated_from", clauseRef(c), copyTerm(source)), true);
     this.functionChanged(f);
@@ -491,8 +529,8 @@ export class Petta {
       this.m.err(
         `Warning: ${f} is defined or imported after already being used; earlier expressions treat it as a plain symbol. Move the import or definition above the first use.\n`,
       );
-    this.registerFun(f);
     this.noteArity(f, arity);
+    this.registerFun(f);
   }
 
   // ---- native runtime predicates ----

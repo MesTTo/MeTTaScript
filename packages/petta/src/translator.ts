@@ -91,6 +91,8 @@ export function specialForm(head: Term, nargs: number): string | null {
 export class Translator {
   /** Variables of the source form being translated (current_unified_source_variable/1). */
   private sourceVars = new Set<Var>();
+  /** Symbols the clause being compiled used as plain data heads, for late-definition recompilation. */
+  dataSymbols: Set<string> | null = null;
   constructor(private readonly p: Petta) {}
 
   /** Translate a runnable's expression with its source variables known. */
@@ -198,7 +200,10 @@ export class Translator {
     }
     // literals and non-function atoms => data
     if (isAtomic(hv) || typeof hv === "string") {
-      if (typeof hv === "string") this.p.symbolHeads.add(hv);
+      if (typeof hv === "string") {
+        this.p.symbolHeads.add(hv);
+        this.dataSymbols?.add(hv);
+      }
       const [gsT, avs] = this.args(T);
       return [[...gsH, ...gsT], mkList([hv, ...avs])];
     }
