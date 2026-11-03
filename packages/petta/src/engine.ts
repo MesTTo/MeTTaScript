@@ -12,9 +12,10 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, extname, isAbsolute, resolve as resolvePath, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { evalArith } from "./arith";
-import { collectVars, installBuiltins, compareTerms, variant } from "./builtins";
+import { clauseRef, collectVars, installBuiltins, compareTerms, variant } from "./builtins";
 import type { Clause } from "./db";
 import { installLibrary } from "./library";
+import { installConsult } from "./consult";
 import { Machine, copyTerm } from "./machine";
 import { METTA_RUNTIME_PL } from "./metta-runtime";
 import { sread, topForms } from "./metta-reader";
@@ -36,7 +37,8 @@ import {
   type Term,
 } from "./terms";
 import { Translator, conj } from "./translator";
-import { TYPES_RUNTIME_PL, Types } from "./types";
+import { TYPES_RUNTIME_PL, Types, fnTypeShape } from "./types";
+import { BUILTIN_SIGNATURES_PL } from "./builtin-signatures";
 import { swrite } from "./writer";
 
 const S = mkStruct;
@@ -112,7 +114,9 @@ export class Petta {
     m.flags.set("argv", mkList(argv));
     installBuiltins(m);
     installLibrary(m);
+    installConsult(m);
     this.installRuntime();
+    this.types.install(m);
     for (const c of readClauses(METTA_RUNTIME_PL)) m.addLibraryClause(c);
     for (const c of readClauses(TYPES_RUNTIME_PL)) m.addLibraryClause(c);
     // get-type is user-extensible (metta.pl declares it dynamic).
@@ -121,7 +125,14 @@ export class Petta {
 `))
       m.addClause(c, true);
     m.db.ensure("space_primitive", 2).dynamic = true;
+    m.db.ensure("translated_from", 2).dynamic = true;
+    // src/ext_points.pl: hooks a consulted library (lib_memo) may extend.
+    for (const c of readClauses("metta_on_function_changed(_).\nmetta_on_function_removed(_).")) m.addClause(c, true);
+    m.db.ensure("metta_memoized_dispatch_call", 4).dynamic = true;
     for (const f of BUILTIN_FUNS) this.registerFun(f);
+    // seed_builtin_types: every builtin signature is a declaration from the start.
+    for (const c of readClauses(BUILTIN_SIGNATURES_PL)) m.addLibraryClause(c);
+    for (const d of this.builtinTypeDeclarations()) this.types.cacheDecl(d[1]!, d[2]!);
   }
 
   // ---- registry ----
@@ -195,8 +206,16 @@ export class Petta {
     return p !== undefined && p.live === 1 && this.m.libraryPreds.has(f + "/3");
   }
 
-  memoizedCall(_f: string, _avs: Term[], _out: Term): Term | null {
+  /** resolve_memoization/4: a memoizing library's dispatch hook may replace the direct call. */
+  memoizedCall(f: string, avs: Term[], out: Term): Term | null {
+    if ((this.m.db.get("metta_memoized_dispatch_call", 4)?.live ?? 0) === 0) return null;
+    const goal = mkVar();
+    if (this.m.solveOnce(S("metta_memoized_dispatch_call", f, mkList(avs), out, goal))) return deref(goal);
     return null;
+  }
+
+  private functionChanged(f: string): void {
+    this.m.solveOnce(S("metta_on_function_changed", f));
   }
 
   commitCall(_f: string, _avs: Term[], goal: Term): Term {
@@ -240,6 +259,8 @@ export class Petta {
     const l = this.compiled.get(f) ?? [];
     l.push({ clause: c, source: copyTerm(source) });
     this.compiled.set(f, l);
+    this.m.addClause(S("translated_from", clauseRef(c), copyTerm(source)), true);
+    this.functionChanged(f);
     return c;
   }
 
@@ -320,12 +341,19 @@ export class Petta {
           if (this.m.unify(s.source, t)) removed.push(s);
           this.m.undoTo(mark);
         }
-        for (const s of removed) this.m.db.retractClause(s.clause);
+        for (const s of removed) {
+          this.m.db.retractClause(s.clause);
+          this.m.solveOnce(S("retractall", S("translated_from", clauseRef(s.clause), mkVar())));
+        }
         this.compiled.set(
           f,
           srcs.filter((s) => !removed.includes(s)),
         );
-        if (!this.aritiesOf(f).some((a) => (this.m.db.get(f, a)?.live ?? 0) > 0) && !this.m.libraryPreds.has(f + "/" + (head!.length))) this.unregisterFun(f);
+        this.functionChanged(f);
+        if (!this.aritiesOf(f).some((a) => (this.m.db.get(f, a)?.live ?? 0) > 0) && !this.m.libraryPreds.has(f + "/" + (head!.length))) {
+          this.unregisterFun(f);
+          this.m.solveOnce(S("metta_on_function_removed", f));
+        }
         return removed.length > 0;
       }
     }
@@ -407,7 +435,8 @@ export class Petta {
     for (const p of parsed) {
       if (p.kind !== "expression") continue;
       const items = listToArray(p.term);
-      if (items !== null && items.length === 3 && deref(items[0]!) === ":" && space === "&self") this.types.cacheDecl(items[1]!, items[2]!);
+      if (items !== null && items.length === 3 && deref(items[0]!) === ":" && space === "&self" && fnTypeShape(items[2]!) !== null)
+        this.types.cacheDecl(items[1]!, items[2]!);
     }
     const results: Term[] = [];
     for (const p of parsed) {
@@ -529,11 +558,29 @@ export class Petta {
       return m.unify(out!, mkList(kept));
     });
     det("library", 2, ([n, out]) => m.unify(out!, join(this.libDir, textOfTerm(n!))));
+    det("process_metta_string", 2, ([str, out]) => m.unify(out!, mkList(this.processString(textOfTerm(str!))))); 
+    det("add_builtin_signatures", 2, ([sp, out]) => {
+      for (const d of this.builtinTypeDeclarations()) this.addAtom(textOfTerm(sp!), mkList(d));
+      return m.unify(out!, "true");
+    });
     void compareTerms;
     void collectVars;
     void Cons;
     void NIL;
     void existenceError;
+  }
+
+  /** builtin_type_declaration/1: (: F (Arrow ArgTypes... Out)) for each builtin signature. */
+  builtinTypeDeclarations(): Term[][] {
+    const out: Term[][] = [];
+    const [f, n, det, ats, ot] = [mkVar(), mkVar(), mkVar(), mkVar(), mkVar()];
+    const arrows: Record<string, string> = { unspecified: "->", det: "-[det]->", semidet: "-[semidet]->", nondet: "-[nondet]->" };
+    this.m.solveAll(S("builtin_signature", f, n, det, ats, ot), () => {
+      const arrow = arrows[deref(det) as string] ?? "->";
+      const types = listToArray(ats) ?? [];
+      out.push([":", deref(f), copyTerm(mkList([arrow, ...types, ot]))]);
+    });
+    return out;
   }
 
   overapplication(f: string, n: number): PrologError {

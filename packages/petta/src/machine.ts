@@ -137,6 +137,20 @@ export class Machine {
   private trailBoundary = 0;
   private curCC = -1;
   readonly ops = new OpTable();
+  /** Predicates declared with `:- table`, as Name/Arity keys, and their completed answer tables by variant. */
+  readonly tabled = new Set<string>();
+  readonly tables = new Map<string, Term[]>();
+  private readonly objects: unknown[] = [];
+  /** Opaque host objects (streams) referenced from terms by index. */
+  registerObject(o: unknown): number {
+    this.objects.push(o);
+    return this.objects.length - 1;
+  }
+  objectOf(t: Term): unknown {
+    const d = deref(t);
+    if (d instanceof Struct && d.name === "$stream") return this.objects[deref(d.args[0]!) as number];
+    return undefined;
+  }
   private stdinBuf = "";
   private stdinEof = false;
   /** One line from stdin without its newline, or null at end of input. Blocks, as SWI's read does. */
@@ -730,6 +744,7 @@ export class Machine {
       }
       return true;
     }
+    if (this.tabled.size > 0 && this.tabled.has(key)) return this.callTabled(name, args, f);
     const p = this.db.preds.get(key);
     if (p !== undefined) {
       const cands = p.candidates(args);
@@ -737,6 +752,52 @@ export class Machine {
     }
     if (this.flags.get("unknown") === "fail") return false;
     throw existenceError("procedure", mkStruct("/", name, args.length));
+  }
+
+  /**
+   * A call to a `:- table` predicate: the first call of a variant completes its answers (distinct up to
+   * variance) by solving the clauses directly; later calls, and a recursive call while the first is running,
+   * answer from the table. Time: one full evaluation per distinct variant.
+   */
+  private callTabled(name: string, args: Term[], f: Frame): boolean {
+    const goal = new Struct(name, args);
+    const vkey = variantKeyOf(goal);
+    let answers = this.tables.get(vkey);
+    if (answers === undefined) {
+      answers = [];
+      this.tables.set(vkey, answers);
+      const g2 = copyTerm(goal) as Struct;
+      const p = this.db.get(name, args.length);
+      const collected: Term[] = [];
+      if (p !== undefined) {
+        const saved = this.tabled.delete(name + "/" + args.length);
+        try {
+          this.solveAll(g2, () => {
+            const a = copyTerm(g2);
+            if (!collected.some((x) => variantKeyOf(x) === variantKeyOf(a))) collected.push(a);
+          });
+        } finally {
+          if (saved) this.tabled.add(name + "/" + args.length);
+        }
+      }
+      answers.push(...collected);
+    }
+    const h = this.cps.length;
+    const list = answers.slice();
+    const self = this;
+    const cp = this.pushCP(K.Redo, f.next, f.cb, f.cc);
+    cp.iter = (function* () {
+      for (const a of list) {
+        if (self.unify(goal, copyTerm(a))) yield;
+        self.undoTo(cp.trailTop);
+      }
+    })();
+    const r = cp.iter.next();
+    if (r.done) {
+      this.cutTo(h);
+      return false;
+    }
+    return true;
   }
 
   private disjunction(left: Term, right: Term, f: Frame): boolean {
@@ -765,6 +826,29 @@ export class Machine {
   pushGoal(goal: Term): void {
     this.goals = new Frame(goal, this.goals, this.cps.length, this.curCC);
   }
+}
+
+/** A string identifying a term up to variable renaming, for table keys. */
+function variantKeyOf(t: Term): string {
+  const names = new Map<Var, number>();
+  const go = (x: Term): string => {
+    x = deref(x);
+    if (x instanceof Var) {
+      let n = names.get(x);
+      if (n === undefined) {
+        n = names.size;
+        names.set(x, n);
+      }
+      return "_" + n;
+    }
+    if (x instanceof Cons) return "[" + go(x.head) + "|" + go(x.tail) + "]";
+    if (x instanceof Struct) return x.name + "(" + x.args.map(go).join(",") + ")";
+    if (x instanceof Str) return JSON.stringify(x.s);
+    if (x instanceof Float) return "f" + x.v;
+    if (x === NIL) return "[]";
+    return typeof x + ":" + String(x);
+  };
+  return go(t);
 }
 
 /** Cheap pre-filter: a clause whose first argument's principal functor differs cannot match. */

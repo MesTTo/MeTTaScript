@@ -20,30 +20,44 @@ export class OpTable {
   readonly prefix = new Map<string, OpDef>();
   readonly postfix = new Map<string, OpDef>();
   constructor() {
+    // swipl 10's current_op/3 table, plus the operators library(clpfd) adds (metta.pl loads it).
     const defs: [number, OpType, string[]][] = [
-      [1200, "xfx", [":-", "-->"]],
+      [1200, "xfx", [":-", "-->", "=>", "==>"]],
       [1200, "fx", [":-", "?-"]],
-      [1100, "xfy", [";", "|"]],
+      [1100, "xfy", [";"]],
       [1105, "xfy", ["|"]],
       [1050, "xfy", ["->", "*->"]],
       [1000, "xfy", [","]],
-      [990, "xfx", [":="]],
+      [800, "xfx", [":="]],
       [900, "fy", ["\\+"]],
       [
         700,
         "xfx",
         ["=", "\\=", "==", "\\==", "@<", "@>", "@=<", "@>=", "=..", "is", "=:=", "=\\=", "<", ">", "=<", ">=", ">:<", ":<", "as", "=@=", "\\=@="],
       ],
+      [700, "xfx", ["#>", "#<", "#>=", "#=<", "#=", "#\\=", "in", "ins", "in_set"]],
+      [760, "yfx", ["#<==>"]],
+      [750, "xfy", ["#==>"]],
+      [750, "yfx", ["#<=="]],
+      [740, "yfx", ["#\\/"]],
+      [730, "yfx", ["#\\"]],
+      [720, "yfx", ["#/\\"]],
+      [710, "fy", ["#\\"]],
+      [450, "xfx", [".."]],
+      [150, "fx", ["#"]],
       [600, "xfy", [":"]],
-      [500, "yfx", ["+", "-", "/\\", "\\/", "xor"]],
-      [500, "fx", ["?"]],
-      [400, "yfx", ["*", "/", "//", "rdiv", "<<", ">>", "mod", "rem", "div", "divmod"]],
+      [500, "yfx", ["+", "-", "/\\", "\\/"]],
+      [400, "yfx", ["*", "/", "//", "rdiv", "<<", ">>", "mod", "rem", "div", "xor"]],
       [200, "xfx", ["**"]],
       [200, "xfy", ["^"]],
       [200, "fy", ["-", "+", "\\"]],
       [100, "yfx", ["."]],
       [1, "fx", ["$"]],
-      [1150, "fx", ["dynamic", "discontiguous", "initialization", "meta_predicate", "module_transparent", "multifile", "public", "thread_local", "table"]],
+      [
+        1150,
+        "fx",
+        ["dynamic", "discontiguous", "initialization", "meta_predicate", "module_transparent", "multifile", "public", "thread_local", "table", "thread_initialization", "volatile"],
+      ],
     ];
     for (const [pri, type, names] of defs) for (const n of names) this.add(pri, type, n);
   }

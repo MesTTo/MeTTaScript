@@ -9,4 +9,5 @@ export { Petta, type PettaOptions } from "./engine";
 export { sread, topForms } from "./metta-reader";
 export { swrite, writeTerm } from "./writer";
 export { Machine } from "./machine";
+export { readClauses, PrologReader } from "./prolog-reader";
 export * from "./terms";

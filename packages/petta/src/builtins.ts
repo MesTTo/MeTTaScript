@@ -452,8 +452,15 @@ export function installBuiltins(m: Machine): void {
 
   // arithmetic
   def("is", 2, det((m2, [r, e]) => m2.unify(r!, evalArith(e!))));
+  // A NaN operand makes every comparison false except =\=, as IEEE comparison does in SWI.
+  const isNaNNum = (x: Term): boolean => x instanceof Float && Number.isNaN(x.v);
   const cmp = (name: string, ok: (c: number) => boolean): void =>
-    def(name, 2, det((_, [a, b]) => ok(compareNum(evalArith(a!), evalArith(b!)))));
+    def(name, 2, det((_, [a, b]) => {
+      const x = evalArith(a!);
+      const y = evalArith(b!);
+      if (isNaNNum(x) || isNaNNum(y)) return name === "=\\=";
+      return ok(compareNum(x, y));
+    }));
   cmp("=:=", (c) => c === 0);
   cmp("=\\=", (c) => c !== 0);
   cmp("<", (c) => c < 0);
@@ -1257,8 +1264,54 @@ export function installBuiltins(m: Machine): void {
   }));
   def("read_file_to_string", 3, det((m2, [f, s]) => m2.unify(s!, new Str(readFileSync(textArg(f!), "utf8")))));
   def("format_time", 3, det((m2, [sink, fmt, stamp]) => {
-    const t = Number(evalArith(stamp!)) * 1000;
+    const d = deref(stamp!);
+    // A date/9 term formats in its own offset; a time stamp in local time.
+    if (d instanceof Struct && d.name === "date" && d.args.length === 9) {
+      const [y, mo, da, h, mi, se, off] = d.args.slice(0, 7).map((a) => {
+        const v = evalArith(a);
+        return v instanceof Float ? v.v : Number(v);
+      });
+      const utc = Date.UTC(y!, mo! - 1, da!, h!, mi!, Math.floor(se!)) + off! * 1000;
+      return sinkText(m2, sink!, formatTime(textArg(fmt!), new Date(utc), off === 0));
+    }
+    const tv = evalArith(d);
+    const t = (tv instanceof Float ? tv.v : Number(tv)) * 1000;
     return sinkText(m2, sink!, formatTime(textArg(fmt!), new Date(t)));
+  }));
+  def("stamp_date_time", 3, det((m2, [stamp, dt, tz]) => {
+    const tv = evalArith(stamp!);
+    const t = tv instanceof Float ? tv.v : Number(tv);
+    const zone = deref(tz!);
+    const utc = zone === "UTC" || zone === 0;
+    const d = new Date(t * 1000);
+    const off = utc ? 0 : d.getTimezoneOffset() * 60;
+    const g = (u: () => number, l: () => number): number => (utc ? u() : l());
+    const secs = g(() => d.getUTCSeconds(), () => d.getSeconds()) + (t - Math.floor(t));
+    return m2.unify(
+      dt!,
+      mkStruct(
+        "date",
+        g(() => d.getUTCFullYear(), () => d.getFullYear()),
+        g(() => d.getUTCMonth() + 1, () => d.getMonth() + 1),
+        g(() => d.getUTCDate(), () => d.getDate()),
+        g(() => d.getUTCHours(), () => d.getHours()),
+        g(() => d.getUTCMinutes(), () => d.getMinutes()),
+        new Float(secs),
+        off,
+        utc ? "UTC" : "-",
+        utc ? "-" : "false",
+      ),
+    );
+  }));
+  def("re_replace", 4, det((m2, [pat, rep, str, out]) => {
+    let p = deref(pat!);
+    let flags = "";
+    if (p instanceof Struct && p.name === "/" && p.args.length === 2) {
+      flags = textArg(p.args[1]!);
+      p = deref(p.args[0]!);
+    }
+    const re = new RegExp(textArg(p), (flags.includes("g") ? "g" : "") + (flags.includes("i") ? "i" : ""));
+    return m2.unify(out!, new Str(textArg(str!).replace(re, textArg(rep!))));
   }));
 
   // clause references are opaque '$cref'(N) terms
@@ -1529,7 +1582,7 @@ export function parseTermText(text: string): Term {
 // Clause references.
 const refTable: import("./db").Clause[] = [];
 const refIds = new WeakMap<object, number>();
-function clauseRef(c: import("./db").Clause): Term {
+export function clauseRef(c: import("./db").Clause): Term {
   let id = refIds.get(c);
   if (id === undefined) {
     id = refTable.length;
@@ -1544,8 +1597,10 @@ function refClause(r: Term): import("./db").Clause | undefined {
   return undefined;
 }
 
-function formatTime(fmt: string, d: Date): string {
+function formatTime(fmt: string, d0: Date, utc = false): string {
   const pad = (n: number, w = 2): string => String(n).padStart(w, "0");
+  // In UTC mode read the UTC fields through a shifted local Date.
+  const d = utc ? new Date(d0.getTime() + d0.getTimezoneOffset() * 60000) : d0;
   const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
   return fmt.replace(/%([a-zA-Z%])/g, (_, c: string) => {
