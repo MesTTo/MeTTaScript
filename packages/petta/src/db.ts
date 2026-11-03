@@ -71,27 +71,79 @@ class ArgIndex {
 }
 
 const INDEX_THRESHOLD = 8;
+const EMPTY_CLAUSES: Clause[] = [];
+
+/** A key for a ground term, or null if it has a variable or slot. Time: term size. */
+function groundKey(t: Term, out: string[]): boolean {
+  if (out.length > KEY_BUDGET) return false;
+  t = t instanceof Slot ? t : deref(t);
+  if (t instanceof Slot || t instanceof Var) return false;
+  if (typeof t === "string") out.push("a", t, "\u0001");
+  else if (typeof t === "number" || typeof t === "bigint") out.push("i", String(t), "\u0001");
+  else if (t instanceof Float) out.push("f", String(t.v), "\u0001");
+  else if (t instanceof Str) out.push("s", JSON.stringify(t.s));
+  else if (t === NIL) out.push("[]");
+  else if (t instanceof Cons) {
+    out.push("[");
+    let c: Term = t;
+    while (c instanceof Cons) {
+      if (!groundKey(c.head, out) || out.length > KEY_BUDGET) return false;
+      c = c.tail instanceof Slot ? c.tail : deref(c.tail);
+    }
+    out.push("|");
+    if (!groundKey(c, out)) return false;
+    out.push("]");
+  } else if (t instanceof Struct) {
+    out.push("c", t.name, "(");
+    for (const a of t.args) if (!groundKey(a, out)) return false;
+    out.push(")");
+  } else {
+    const g = (t as { t?: Term }).t;
+    if (g === undefined) return false;
+    return groundKey(g, out);
+  }
+  return true;
+}
+
+/** The whole-tuple key of ground call arguments, or null when one is not ground or the tuple is large. */
+function argsKey(args: Term[]): string | null {
+  const out: string[] = [];
+  for (const a of args) if (!groundKey(a, out) || out.length > KEY_BUDGET) return null;
+  return out.join("");
+}
+
+/** Key pieces at most per call: a space row is small, a queue or a whole list argument is not worth hashing. */
+const KEY_BUDGET = 256;
 const MAX_INDEXED_ARGS = 4;
 
 export class Pred {
   clauses: Clause[] = [];
   live = 0;
+  /** A MeTTa space's rows (PeTTa names a space &name), where ground membership tests dominate. */
+  readonly isSpace: boolean;
   dynamic = false;
   private indexes: (ArgIndex | null)[] | null = null;
+  /** Clauses by the key of their whole ground argument tuple, and the clauses whose head is not ground. */
+  private groundIndex: Map<string, Clause[]> | null = null;
+  private nonGround: Clause[] = [];
   constructor(
     public readonly name: string,
     public readonly arity: number,
-  ) {}
+  ) {
+    this.isSpace = name.startsWith("&") || name === "space_primitive";
+  }
 
   add(c: Clause, atEnd: boolean): void {
     if (atEnd) {
       this.clauses.push(c);
       if (this.indexes !== null)
         for (let p = 0; p < this.indexes.length; p++) this.indexes[p]?.add(c, clauseArgKey(c.head, p));
+      if (this.groundIndex !== null) this.indexGround(c);
     } else {
       // asserta: a new array, so calls already iterating keep their snapshot; indexes rebuild lazily.
       this.clauses = [c, ...this.clauses];
       this.indexes = null;
+      this.groundIndex = null;
     }
     this.live++;
   }
@@ -104,11 +156,23 @@ export class Pred {
     if (compact && this.clauses.length > 32 && this.live * 2 < this.clauses.length) {
       this.clauses = this.clauses.filter((x) => x.died === Infinity);
       this.indexes = null;
+      this.groundIndex = null;
     }
   }
 
   resetIndexes(): void {
     this.indexes = null;
+    this.groundIndex = null;
+  }
+
+  private indexGround(c: Clause): void {
+    const key = c.head instanceof Struct ? argsKey(c.head.args) : "";
+    if (key === null) this.nonGround.push(c);
+    else {
+      let b = this.groundIndex!.get(key);
+      if (b === undefined) this.groundIndex!.set(key, (b = []));
+      b.push(c);
+    }
   }
 
   /**
@@ -117,6 +181,18 @@ export class Pred {
    */
   candidates(args: Term[]): Clause[] {
     if (this.clauses.length <= INDEX_THRESHOLD || args.length === 0) return this.clauses;
+    // A call with every argument ground selects by the whole tuple (a membership test on a large space).
+    const key = this.isSpace ? argsKey(args) : null;
+    if (key !== null) {
+      if (this.groundIndex === null) {
+        this.groundIndex = new Map();
+        this.nonGround = [];
+        for (const c of this.clauses) if (c.died === Infinity) this.indexGround(c);
+      }
+      const b = this.groundIndex.get(key) ?? EMPTY_CLAUSES;
+      if (this.nonGround.length === 0) return b;
+      return [...b, ...this.nonGround].sort((x, y) => x.seq - y.seq);
+    }
     if (this.indexes === null) this.indexes = new Array(Math.min(args.length, MAX_INDEXED_ARGS)).fill(null);
     let best: Clause[] = this.clauses;
     for (let p = 0; p < this.indexes.length; p++) {
