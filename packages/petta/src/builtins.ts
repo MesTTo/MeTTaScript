@@ -5,13 +5,16 @@
 // Purpose: the SWI-Prolog builtins implemented natively: type tests, standard order, arithmetic comparison,
 // term construction and inspection, atom and string predicates, the clause database, global variables,
 // output through format/2 and write/1, and the file and time predicates PeTTa's loader and libraries call.
-// Predicates SWI defines in Prolog libraries live in library.ts as Prolog text.
+// A nondeterministic builtin ends its last solution without a choicepoint where SWI's does. Predicates SWI
+// defines in Prolog libraries live in library.ts as Prolog text; char_type/2 and code_type/2 in ctype.ts.
 // am[implements a-pe-swi-builtins]
 
 import { compareNum, evalArith, evaluableFunctors, type Num } from "./arith";
-import { indexKey, Slot } from "./db";
+import { Slot, type Clause } from "./db";
 import { Machine, atomicEq, copyTerm, resolve, type Builtin } from "./machine";
-import { readClauses, PrologReader, OpTable } from "./prolog-reader";
+import { candidateClauses as swiCandidates } from "./swi-index";
+import { charTypeSolutions } from "./ctype";
+import { readClauses, PrologReader, PrologSyntaxError, OpTable } from "./prolog-reader";
 import {
   Cons,
   Float,
@@ -41,7 +44,7 @@ import {
   typeError,
   type Term, unqualify,
 } from "./terms";
-import { quoteAtom, writeTerm } from "./writer";
+import { canonicalVarNames, quoteAtom, writeTerm } from "./writer";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
@@ -154,6 +157,57 @@ export function variant(a: Term, b: Term): boolean {
 const det = (fn: (m: Machine, a: Term[]) => boolean): Builtin => ({ det: fn });
 const nondet = (fn: (m: Machine, a: Term[]) => Iterator<unknown>): Builtin => ({ nondet: fn });
 
+/**
+ * Try candidates in order: yield after each success while another candidate follows, and return the last
+ * candidate's result, so the enumeration ends without a choicepoint as SWI's foreign predicates do once no
+ * candidate is left, whether or not that last candidate unifies. Use as `return yield* eachCandidate(...)`.
+ * am[implements a-hp-cp-parity]
+ */
+function* eachCandidate<T>(m2: Machine, items: Iterable<T>, tryOne: (x: T) => boolean): Generator<void, boolean> {
+  const it = items[Symbol.iterator]();
+  let cur = it.next();
+  while (!cur.done) {
+    const nx = it.next();
+    if (nx.done) return tryOne(cur.value);
+    const mark = m2.trailMark();
+    if (tryOne(cur.value)) yield;
+    m2.undoTo(mark);
+    cur = nx;
+  }
+  return false;
+}
+
+function* range(lo: number, hi: number): Generator<number> {
+  for (let i = lo; i <= hi; i++) yield i;
+}
+
+/** The live clauses of Head's predicate a call with Head scans under SWI's clause selection (swi-index.ts). */
+function candidateClauses(m2: Machine, head: Term, name: string, ar: number): Clause[] {
+  const p = m2.db.get(name, ar);
+  return p === undefined ? [] : swiCandidates(p, head instanceof Struct ? head.args : [], m2.db.generation);
+}
+
+/** mkconj/mkdisj: A op B with a unit side dropped, a left A op' nesting re-associated to the right. */
+function joinGoals(a: Term, b: Term, op: string, units: string[]): Term {
+  const x = deref(a);
+  const y = deref(b);
+  if (typeof x === "string" && units.includes(x)) return y;
+  if (typeof y === "string" && units.includes(y)) return x;
+  const join = (l: Term): Term => {
+    const d = deref(l);
+    return d instanceof Struct && d.name === op && d.args.length === 2 ? mkStruct(op, d.args[0]!, join(d.args[1]!)) : mkStruct(op, d, y);
+  };
+  return join(x);
+}
+
+/** Whether two terms share name and arity (an atom has arity 0). */
+function sameFunctor(a: Term, b: Term): boolean {
+  const x = deref(a);
+  const y = deref(b);
+  if (x instanceof Struct) return y instanceof Struct && x.name === y.name && x.args.length === y.args.length;
+  return !(y instanceof Struct) && atomicEq(x, y);
+}
+
 function intArg(t: Term): number {
   t = deref(t);
   if (t instanceof Var) throw instantiationError();
@@ -177,22 +231,27 @@ function textArg(t: Term, what = "text"): string {
   return s;
 }
 
-/** Parse SWI number syntax from text, or null. */
-export function parseNumber(s: string): Term | null {
-  const t = s.trim();
-  if (t === "") return null;
+// am[implements a-hp-text-nil]
+/**
+ * The number a text denotes in SWI's syntax (str_number): an optional sign right before a number literal and
+ * nothing after it, or null. number_codes/2 also skips leading layout (`leadingLayout`); atom_number/2 and
+ * number_string/2 accept no layout at all (" 12" and "12 " are not numbers there, ai-tmp/probe/num.pl).
+ */
+export function parseNumber(s: string, leadingLayout = false): Term | null {
+  const t = leadingLayout ? s.replace(/^\s+/u, "") : s;
+  if (t === "" || /^\s|\s$/u.test(t)) return null;
+  const sign = t[0] === "-" || t[0] === "+" ? t[0] : "";
+  const body = t.slice(sign.length);
+  if (body === "" || /^\s/u.test(body) || !/^[0-9]/.test(body)) return null;
   try {
-    const r = new PrologReader(t + " .");
+    const r = new PrologReader(body + " .");
     const c = r.readClause();
-    if (c === null) return null;
+    if (c === null || r.offset() !== body.length + 2) return null;
     const d = deref(c);
-    if (typeof d === "number" || typeof d === "bigint" || d instanceof Float) return d;
-    if (d instanceof Struct && d.args.length === 1 && (d.name === "-" || d.name === "+")) {
-      const x = deref(d.args[0]!);
-      if (typeof x === "number") return d.name === "-" ? -x : x;
-      if (typeof x === "bigint") return normInt(d.name === "-" ? -x : x);
-      if (x instanceof Float) return d.name === "-" ? new Float(-x.v) : x;
-    }
+    const neg = sign === "-";
+    if (typeof d === "number") return neg ? -d : d;
+    if (typeof d === "bigint") return normInt(neg ? -d : d);
+    if (d instanceof Float) return neg ? new Float(-d.v) : d;
   } catch {
     return null;
   }
@@ -202,10 +261,15 @@ export function parseNumber(s: string): Term | null {
 const codes = (s: string): Term => mkList([...s].map((c) => c.codePointAt(0)!));
 const chars = (s: string): Term => mkList([...s]);
 
-function atomicText(t: Term): string {
+// am[implements a-hp-text-nil]
+/**
+ * Text of an atomic argument where SWI accepts no list: [] is then a type error of `type`, as in
+ * atom_codes([], _) (atom) or atom_concat([], a, _) (string), not the empty text it is elsewhere.
+ */
+function atomicText(t: Term, type = "atomic"): string {
   const d = deref(t);
   if (d instanceof Var) throw instantiationError();
-  if (d instanceof Cons || d instanceof Struct) throw typeError("atomic", d);
+  if (d instanceof Cons || d instanceof Struct || d === NIL) throw typeError(type, d);
   return textOf(d)!;
 }
 
@@ -255,9 +319,12 @@ export function formatString(m: Machine, fmt: string, argsT: Term): string {
       case "q":
         out += writeTerm(next(), { quoted: true, numbervars: true });
         break;
-      case "a":
-        out += atomicText(next());
+      case "a": {
+        const x = next();
+        if (deref(x) === NIL) throw new PrologError(mkStruct("error", mkStruct("format_argument_type", "a", NIL), mkVar()));
+        out += atomicText(x);
         break;
+      }
       case "d": {
         const v = evalArith(next());
         if (v instanceof Float) throw typeError("integer", v);
@@ -608,16 +675,15 @@ export function installBuiltins(m: Machine): void {
     throw instantiationError();
   }));
   def("between", 3, nondet(function* (m2, [lo, hi, x]) {
-    const l = evalArith(lo!);
+    const l = Number(evalArith(lo!));
     const hd = deref(hi!);
     const h = hd === "inf" || hd === "infinite" ? Infinity : Number(evalArith(hd));
     const xv = deref(x!);
     if (!(xv instanceof Var)) {
       const n = Number(evalArith(xv));
-      if (n >= Number(l) && n <= h) yield;
-      return;
+      return n >= l && n <= h;
     }
-    for (let i = Number(l); i <= h; i++) if (m2.unify(xv, i)) yield;
+    return yield* eachCandidate(m2, range(l, h), (i) => m2.unify(xv, i));
   }));
 
   // terms
@@ -641,15 +707,8 @@ export function installBuiltins(m: Machine): void {
     const args = argsOf(d);
     if (!(d instanceof Struct || d instanceof Cons)) throw typeError("compound", d);
     const nd = deref(n!);
-    if (typeof nd === "number") {
-      if (nd >= 1 && nd <= args.length && m2.unify(a!, args[nd - 1]!)) yield;
-      return;
-    }
-    for (let i = 0; i < args.length; i++) {
-      const mark = m2.trailMark();
-      if (m2.unify(n!, i + 1) && m2.unify(a!, args[i]!)) yield;
-      m2.undoTo(mark);
-    }
+    if (typeof nd === "number") return nd >= 1 && nd <= args.length && m2.unify(a!, args[nd - 1]!);
+    return yield* eachCandidate(m2, range(1, args.length), (i) => m2.unify(n!, i) && m2.unify(a!, args[i - 1]!));
   }));
   def("=..", 2, det((m2, [t, l]) => {
     const d = deref(t!);
@@ -765,6 +824,22 @@ export function installBuiltins(m: Machine): void {
     return m2.unify(sz!, go(t!));
   }));
   def("term_hash", 2, det((m2, [t, h]) => (isGround(t!) ? m2.unify(h!, hashString(writeTerm(t!, { quoted: true }))) : true)));
+  // term_hash(+Term, +Depth, +Range, -Hash): the hash of Term cut off below Depth (-1: whole), modulo Range;
+  // unbound when what remains is not ground.
+  def("term_hash", 4, det((m2, [t, depth, range, h]) => {
+    const cut = (x: Term, d: number): Term => {
+      x = deref(x);
+      if (d === 0) return "$cut";
+      if (x instanceof Cons) return new Cons(cut(x.head, d - 1), cut(x.tail, d - 1));
+      if (x instanceof Struct) return new Struct(x.name, x.args.map((a) => cut(a, d - 1)));
+      return x;
+    };
+    const dv = intArg(depth!);
+    const c = dv < 0 ? t! : cut(t!, dv);
+    if (!isGround(c)) return true;
+    const r = intArg(range!);
+    return m2.unify(h!, hashString(writeTerm(c, { quoted: true })) % r);
+  }));
   def("variant_hash", 2, det((m2, [t, h]) => m2.unify(h!, hashString(variantKey(t!)))));
   def("numbervars", 3, det((m2, [t, s, e]) => {
     let n = intArg(s!);
@@ -807,9 +882,14 @@ export function installBuiltins(m: Machine): void {
     return m2.unify(a!, new Str(writeTerm(d, { quoted: true })));
   }));
   def("term_to_string", 2, det((m2, [t, a]) => m2.unify(a!, new Str(writeTerm(t!, { quoted: true })))));
-  def("read_term_from_atom", 3, det((m2, [a, t]) => m2.unify(t!, parseTermText(textArg(a!)))));
+  def("read_term_from_atom", 3, det((m2, [a, t]) => {
+    const txt = textArg(a!);
+    return m2.unify(t!, txt.trim() === "" ? "end_of_file" : parseTermText(txt));
+  }));
   def("atom_to_term", 3, det((m2, [a, t, b]) => {
-    const r = new PrologReader(textArg(a!) + " .");
+    const txt = textArg(a!);
+    parseTermText(txt);
+    const r = new PrologReader(txt + " .");
     const c = r.readClause();
     return m2.unify(t!, c ?? "end_of_file") && m2.unify(b!, mkList(r.varNames.map(([n, v]) => mkStruct("=", n, v))));
   }));
@@ -817,12 +897,12 @@ export function installBuiltins(m: Machine): void {
   // atoms and strings
   def("atom_codes", 2, det((m2, [a, l]) => {
     const d = deref(a!);
-    if (!(d instanceof Var)) return m2.unify(l!, codes(atomicText(d)));
+    if (!(d instanceof Var)) return m2.unify(l!, codes(atomicText(d, "atom")));
     return m2.unify(d, textArg(l!));
   }));
   def("atom_chars", 2, det((m2, [a, l]) => {
     const d = deref(a!);
-    if (!(d instanceof Var)) return m2.unify(l!, chars(atomicText(d)));
+    if (!(d instanceof Var)) return m2.unify(l!, chars(atomicText(d, "atom")));
     return m2.unify(d, textArg(l!));
   }));
   def("char_code", 2, det((m2, [a, c]) => {
@@ -830,7 +910,7 @@ export function installBuiltins(m: Machine): void {
     if (typeof d === "string") return m2.unify(c!, d.codePointAt(0)!);
     return m2.unify(a!, String.fromCodePoint(intArg(c!)));
   }));
-  def("atom_length", 2, det((m2, [a, l]) => m2.unify(l!, [...atomicText(a!)].length)));
+  def("atom_length", 2, det((m2, [a, l]) => m2.unify(l!, [...textArg(a!)].length)));
   def("string_length", 2, det((m2, [a, l]) => m2.unify(l!, [...textArg(a!)].length)));
   def("atom_number", 2, det((m2, [a, n]) => {
     const d = deref(a!);
@@ -839,33 +919,33 @@ export function installBuiltins(m: Machine): void {
       if (nd instanceof Var) throw instantiationError();
       return m2.unify(d, atomicText(nd));
     }
-    const num = parseNumber(atomicText(d));
+    const num = parseNumber(atomicText(d, "atom"));
     return num !== null && m2.unify(n!, num);
   }));
   def("number_codes", 2, det((m2, [n, l]) => {
     const d = deref(n!);
     if (!(d instanceof Var)) return m2.unify(l!, codes(atomicText(d)));
-    const num = parseNumber(textArg(l!));
+    const num = parseNumber(textArg(l!), true);
     if (num === null) throw new PrologError(mkStruct("error", mkStruct("syntax_error", "illegal_number"), mkVar()));
     return m2.unify(d, num);
   }));
   def("number_chars", 2, det((m2, [n, l]) => {
     const d = deref(n!);
     if (!(d instanceof Var)) return m2.unify(l!, chars(atomicText(d)));
-    const num = parseNumber(textArg(l!));
+    const num = parseNumber(textArg(l!), true);
     if (num === null) throw new PrologError(mkStruct("error", mkStruct("syntax_error", "illegal_number"), mkVar()));
     return m2.unify(d, num);
   }));
   def("number_string", 2, det((m2, [n, s]) => {
     const d = deref(n!);
     if (!(d instanceof Var)) return m2.unify(s!, new Str(atomicText(d)));
+    // Text that is not a number fails, as SWI's number_string/2 does.
     const num = parseNumber(textArg(s!));
-    if (num === null) throw new PrologError(mkStruct("error", mkStruct("syntax_error", "illegal_number"), mkVar()));
-    return m2.unify(d, num);
+    return num !== null && m2.unify(d, num);
   }));
   def("atom_string", 2, det((m2, [a, s]) => {
     const d = deref(a!);
-    if (!(d instanceof Var)) return m2.unify(s!, new Str(atomicText(d)));
+    if (!(d instanceof Var)) return m2.unify(s!, new Str(textArg(d)));
     return m2.unify(d, textArg(s!));
   }));
   def("string_to_atom", 2, det((m2, [s, a]) => {
@@ -883,60 +963,45 @@ export function installBuiltins(m: Machine): void {
     if (!(d instanceof Var)) return m2.unify(l!, codes(textArg(d)));
     return m2.unify(d, new Str(textArg(l!)));
   }));
-  def("string_code", 3, det((m2, [i, s, c]) => {
-    const idx = intArg(i!);
+  // string_code(?Index, +String, ?Code): with Index unbound, every position in turn, the last without a choicepoint.
+  def("string_code", 3, nondet(function* (m2, [i, s, c]) {
     const cs = [...textArg(s!)];
-    if (idx < 1 || idx > cs.length) return false;
-    return m2.unify(c!, cs[idx - 1]!.codePointAt(0)!);
+    if (!(deref(i!) instanceof Var)) {
+      const idx = intArg(i!);
+      return idx >= 1 && idx <= cs.length && m2.unify(c!, cs[idx - 1]!.codePointAt(0)!);
+    }
+    return yield* eachCandidate(m2, range(1, cs.length), (k) => m2.unify(i!, k) && m2.unify(c!, cs[k - 1]!.codePointAt(0)!));
   }));
+  // mkconj(A, B, Conj) and mkdisj(A, B, Disj), as SWI builds goals: true (fail, false) on one side is dropped and a
+  // left conjunction (disjunction) is re-associated to the right; nothing inside is simplified (ai-tmp/probe/mkconj.pl).
+  def("mkconj", 3, det((m2, [a, b, c]) => m2.unify(c!, joinGoals(a!, b!, ",", ["true"]))));
+  def("mkdisj", 3, det((m2, [a, b, c]) => m2.unify(c!, joinGoals(a!, b!, ";", ["fail", "false"]))));
   def("number_vars", 3, det(() => true));
   def("string", 1, det((_, [a]) => deref(a!) instanceof Str));
   def("text_to_string", 2, det((m2, [t, s]) => m2.unify(s!, new Str(textArg(t!)))));
-  def("string_lower", 2, det((m2, [s, l]) => m2.unify(l!, new Str(textArg(s!).toLowerCase()))));
-  def("string_upper", 2, det((m2, [s, l]) => m2.unify(l!, new Str(textArg(s!).toUpperCase()))));
-  def("upcase_atom", 2, det((m2, [s, l]) => m2.unify(l!, textArg(s!).toUpperCase())));
-  def("downcase_atom", 2, det((m2, [s, l]) => m2.unify(l!, textArg(s!).toLowerCase())));
+  def("string_lower", 2, det((m2, [s, l]) => m2.unify(l!, new Str(atomicText(s!, "string").toLowerCase()))));
+  def("string_upper", 2, det((m2, [s, l]) => m2.unify(l!, new Str(atomicText(s!, "string").toUpperCase()))));
+  def("upcase_atom", 2, det((m2, [s, l]) => m2.unify(l!, atomicText(s!, "string").toUpperCase())));
+  def("downcase_atom", 2, det((m2, [s, l]) => m2.unify(l!, atomicText(s!, "string").toLowerCase())));
   def("term_string", 3, det((m2, [t, a]) => m2.unify(a!, new Str(writeTerm(t!, { quoted: true })))));
   def("string_concat", 3, nondet(function* (m2, [a, b, c]) {
-    const x = deref(a!);
-    const y = deref(b!);
-    if (!(x instanceof Var) && !(y instanceof Var)) {
-      if (m2.unify(c!, new Str(atomicText(x) + atomicText(y)))) yield;
-      return;
-    }
-    const z = [...textArg(c!)];
-    for (let i = 0; i <= z.length; i++) {
-      const mark = m2.trailMark();
-      if (m2.unify(x, new Str(z.slice(0, i).join(""))) && m2.unify(y, new Str(z.slice(i).join("")))) yield;
-      m2.undoTo(mark);
-    }
+    return yield* concatText(m2, a!, b!, c!, (s) => new Str(s));
   }));
   def("atom_concat", 3, nondet(function* (m2, [a, b, c]) {
-    const x = deref(a!);
-    const y = deref(b!);
-    if (!(x instanceof Var) && !(y instanceof Var)) {
-      if (m2.unify(c!, atomicText(x) + atomicText(y))) yield;
-      return;
-    }
-    const z = [...atomicText(c!)];
-    for (let i = 0; i <= z.length; i++) {
-      const mark = m2.trailMark();
-      if (m2.unify(x, z.slice(0, i).join("")) && m2.unify(y, z.slice(i).join(""))) yield;
-      m2.undoTo(mark);
-    }
+    return yield* concatText(m2, a!, b!, c!, (s) => s);
   }));
   def("atomic_list_concat", 2, det((m2, [l, a]) => {
     const items = listToArray(l!);
     if (items === null) throw instantiationError();
-    return m2.unify(a!, items.map(atomicText).join(""));
+    return m2.unify(a!, items.map((x) => atomicText(x, "text")).join(""));
   }));
   def("atomic_list_concat", 3, det((m2, [l, sep, a]) => {
-    const s = atomicText(sep!);
+    const s = atomicText(sep!, "text");
     const items = listToArray(l!);
     if (items !== null && items.every((x) => !(deref(x) instanceof Var)))
-      return m2.unify(a!, items.map(atomicText).join(s));
+      return m2.unify(a!, items.map((x) => atomicText(x, "text")).join(s));
     if (s === "") throw domainError("non_empty_atom", sep!);
-    const whole = atomicText(a!);
+    const whole = atomicText(a!, "string");
     return m2.unify(l!, mkList(whole.split(s)));
   }));
   def("split_string", 4, det((m2, [s, sepT, padT, out]) => {
@@ -966,17 +1031,18 @@ export function installBuiltins(m: Machine): void {
     return m2.unify(out!, mkList(fields.map((f) => new Str(strip(f)))));
   }));
   def("sub_atom", 5, nondet(function* (m2, [a, b, l, af, sub]) {
-    yield* subText(m2, atomicText(a!), b!, l!, af!, sub!, (x) => x);
+    return yield* subText(m2, atomicText(a!, "atom"), b!, l!, af!, sub!, (x) => x, "atom");
   }));
   def("sub_string", 5, nondet(function* (m2, [a, b, l, af, sub]) {
-    yield* subText(m2, textArg(a!), b!, l!, af!, sub!, (x) => new Str(x));
+    return yield* subText(m2, atomicText(a!, "string"), b!, l!, af!, sub!, (x) => new Str(x), "string");
   }));
   def("sub_atom_icasechk", 3, det((_, [a, _s, sub]) => textArg(a!).toLowerCase().includes(textArg(sub!).toLowerCase())));
-  def("char_type", 2, det((m2, [c, t]) => charType(m2, c!, t!)));
-  def("code_type", 2, det((m2, [c, t]) => {
-    const d = deref(c!);
-    const ch = typeof d === "number" ? String.fromCodePoint(d) : d;
-    return charType(m2, ch, t!);
+  // char_type/2 and code_type/2: SWI's pl-ctype.c classes and modes (ctype.ts).
+  def("char_type", 2, nondet(function* (m2, [c, t]) {
+    return yield* charTypeSolutions(m2, c!, t!, false);
+  }));
+  def("code_type", 2, nondet(function* (m2, [c, t]) {
+    return yield* charTypeSolutions(m2, c!, t!, true);
   }));
   def("format_atom", 3, det(() => false));
   def("sformat", 3, det((m2, [s, f, a]) => m2.unify(s!, new Str(formatString(m2, textArg(f!), a!)))));
@@ -986,7 +1052,7 @@ export function installBuiltins(m: Machine): void {
   def("print", 1, det((m2, [t]) => (m2.out(writeTerm(t!, { quoted: true, numbervars: true })), true)));
   def("writeln", 1, det((m2, [t]) => (m2.out(writeTerm(t!, { numbervars: true }) + "\n"), true)));
   def("writeq", 1, det((m2, [t]) => (m2.out(writeTerm(t!, { quoted: true, numbervars: true })), true)));
-  def("write_canonical", 1, det((m2, [t]) => (m2.out(writeTerm(t!, { quoted: true, ignoreOps: true })), true)));
+  def("write_canonical", 1, det((m2, [t]) => (m2.out(writeTerm(t!, { quoted: true, ignoreOps: true, varNames: canonicalVarNames(t!) })), true)));
   def("write_term", 2, det((m2, [t, o]) => (m2.out(writeTerm(t!, writeOpts(o!))), true)));
   def("write", 2, det((m2, [s, t]) => sinkText(m2, s!, writeTerm(t!, { numbervars: true }))));
   def("writeln", 2, det((m2, [s, t]) => sinkText(m2, s!, writeTerm(t!, { numbervars: true }) + "\n")));
@@ -1030,6 +1096,12 @@ export function installBuiltins(m: Machine): void {
   def("open", 4, det((m2, [f, mode, s]) => openStream(m2, f!, mode!, s!)));
   def("close", 1, det(() => true));
   def("close", 2, det(() => true));
+  // Edinburgh append/1: later output goes to the end of File until told/0.
+  def("append", 1, det((m2, [f]) => {
+    const o = new OutStream(textArg(f!), true);
+    m2.out = (s) => o.write(s);
+    return true;
+  }));
   def("current_output", 1, det((m2, [s]) => m2.unify(s!, "user_output")));
   def("current_input", 1, det((m2, [s]) => m2.unify(s!, "user_input")));
   def("read_line_to_string", 2, det((m2, [_s, out]) => {
@@ -1053,16 +1125,14 @@ export function installBuiltins(m: Machine): void {
     }
     const [name, ar] = functorOf(head);
     if (typeof name !== "string") throw typeError("callable", head);
-    for (const cl of m2.visibleClauses(name, ar)) {
-      const mark = m2.trailMark();
+    // Each solution retracts one more matching clause of those visible at the call (the logical update view).
+    return yield* eachCandidate(m2, candidateClauses(m2, head, name, ar), (cl) => {
+      if (cl.died !== Infinity) return false;
       const [h, b] = m2.clauseTerms(cl);
-      if (m2.unify(head, h) && m2.unify(body, b)) {
-        m2.db.retractClause(cl);
-        yield;
-        return;
-      }
-      m2.undoTo(mark);
-    }
+      if (!(m2.unify(head, h) && m2.unify(body, b))) return false;
+      m2.db.retractClause(cl);
+      return true;
+    });
   }));
   def("retractall", 1, det((m2, [h]) => {
     const head = unqualify(h!);
@@ -1097,67 +1167,55 @@ export function installBuiltins(m: Machine): void {
     if (head instanceof Var) throw instantiationError();
     const [name, ar] = functorOf(head);
     if (typeof name !== "string") throw typeError("callable", head);
-    for (const cl of m2.visibleClauses(name, ar)) {
-      const mark = m2.trailMark();
+    return yield* eachCandidate(m2, candidateClauses(m2, head, name, ar), (cl) => {
       const [hh, bb] = m2.clauseTerms(cl);
-      if (m2.unify(head, hh) && m2.unify(b!, bb)) yield;
-      m2.undoTo(mark);
-    }
+      return m2.unify(head, hh) && m2.unify(b!, bb);
+    });
   }));
   def("clause", 3, nondet(function* (m2, [h, b, r]) {
     const rr = deref(r!);
     if (!(rr instanceof Var)) {
       const cl = refClause(rr);
-      if (cl === undefined || cl.died !== Infinity) return;
+      if (cl === undefined || cl.died !== Infinity) return false;
       const [hh, bb] = m2.clauseTerms(cl);
-      if (m2.unify(unqualify(h!), hh) && m2.unify(b!, bb)) yield;
-      return;
+      return m2.unify(unqualify(h!), hh) && m2.unify(b!, bb);
     }
     const head = unqualify(h!);
     const [name, ar] = functorOf(head);
     if (typeof name !== "string") throw typeError("callable", head);
-    for (const cl of m2.visibleClauses(name, ar)) {
-      const mark = m2.trailMark();
+    return yield* eachCandidate(m2, candidateClauses(m2, head, name, ar), (cl) => {
       const [hh, bb] = m2.clauseTerms(cl);
-      if (m2.unify(head, hh) && m2.unify(b!, bb) && m2.unify(r!, clauseRef(cl))) yield;
-      m2.undoTo(mark);
-    }
+      return m2.unify(head, hh) && m2.unify(b!, bb) && m2.unify(r!, clauseRef(cl));
+    });
   }));
   // nth_clause(?Head, ?N, ?Ref): the N-th (1-based) live clause of Head's predicate.
   def("nth_clause", 3, nondet(function* (m2, [h, n, r]) {
     const rr = deref(r!);
     if (!(rr instanceof Var)) {
       const cl = refClause(rr);
-      if (cl === undefined || cl.died !== Infinity) return;
+      if (cl === undefined || cl.died !== Infinity) return false;
       const idx = m2.visibleClauses(cl.pred.name, cl.pred.arity).indexOf(cl);
       const args: Term[] = [];
       for (let i = 0; i < cl.pred.arity; i++) args.push(mkVar());
-      if (m2.unify(unqualify(h!), cl.pred.arity === 0 ? cl.pred.name : new Struct(cl.pred.name, args)) && m2.unify(n!, idx + 1)) yield;
-      return;
+      return m2.unify(unqualify(h!), cl.pred.arity === 0 ? cl.pred.name : new Struct(cl.pred.name, args)) && m2.unify(n!, idx + 1);
     }
     const head = unqualify(h!);
     const [name, ar] = functorOf(head);
     if (typeof name !== "string") throw instantiationError();
     const cls = m2.visibleClauses(name, ar);
-    for (let i = 0; i < cls.length; i++) {
-      const mark = m2.trailMark();
-      if (m2.unify(n!, i + 1) && m2.unify(r!, clauseRef(cls[i]!))) yield;
-      m2.undoTo(mark);
-    }
+    const nd = deref(n!);
+    if (typeof nd === "number") return nd >= 1 && nd <= cls.length && m2.unify(r!, clauseRef(cls[nd - 1]!));
+    return yield* eachCandidate(m2, range(1, cls.length), (i) => m2.unify(n!, i) && m2.unify(r!, clauseRef(cls[i - 1]!)));
   }));
   // clause_property(+Ref, ?Prop): file/1 and source/1 for consulted clauses, fact, erased, predicate/1.
   def("clause_property", 2, nondet(function* (m2, [r, prop]) {
     const cl = refClause(r!);
-    if (cl === undefined) return;
+    if (cl === undefined) return false;
     const props: Term[] = [mkStruct("predicate", mkStruct("/", cl.pred.name, cl.pred.arity)), mkStruct("module", "user")];
     if (cl.file !== null) props.push(mkStruct("file", cl.file), mkStruct("source", cl.file));
     if (cl.body === "true") props.push("fact");
     if (cl.died !== Infinity) props.push("erased");
-    for (const p of props) {
-      const mark = m2.trailMark();
-      if (m2.unify(prop!, p)) yield;
-      m2.undoTo(mark);
-    }
+    return yield* eachCandidate(m2, props, (p) => m2.unify(prop!, p));
   }));
   // listing(+Spec): a predicate's clauses as portray_clause writes them, after its dynamic declaration.
   def("listing", 1, det((m2, [spec]) => {
@@ -1181,8 +1239,12 @@ export function installBuiltins(m: Machine): void {
     return true;
   }));
   def("discontiguous", 1, det(() => true));
-  def("current_predicate", 1, nondet(function* (m2, [spec]) {
-    const d = deref(spec!);
+  // current_predicate(?Name/?Arity): defined user predicates and, as in SWI, the system ones (builtins and the
+  // library clauses here, which are system predicates in SWI); library modules count once loaded. PeTTa's
+  // register_fun/1 takes a builtin function's arities from it (ai-tmp/probe/swi-arities.txt).
+  def("current_predicate", 1, nondet(function* (m2, [spec0]) {
+    const spec = unqualify(spec0!);
+    const d = deref(spec);
     let nameT: Term = mkVar();
     let arT: Term = mkVar();
     if (d instanceof Struct && d.name === "/" && d.args.length === 2) {
@@ -1199,13 +1261,19 @@ export function installBuiltins(m: Machine): void {
     const ad = deref(arT);
     if (typeof nd === "string" && typeof ad === "number") {
       const p = m2.db.get(nd, ad);
-      if ((p !== undefined && (p.live > 0 || p.dynamic)) || m2.libraryPreds.has(nd + "/" + ad)) yield;
-      return;
+      return (p !== undefined && (p.live > 0 || p.dynamic)) || m2.libraryPreds.has(nd + "/" + ad) || m2.builtins.has(nd + "/" + ad);
     }
-    for (const p of [...m2.db.preds.values()]) {
-      if (p.live === 0 && !p.dynamic) continue;
+    // An enumeration leaves a choicepoint after its last solution, as SWI's does.
+    const keys = new Set<string>();
+    for (const p of m2.db.preds.values()) if (p.live > 0 || p.dynamic) keys.add(p.name + "/" + p.arity);
+    for (const k of m2.builtins.keys()) keys.add(k);
+    for (const k of m2.libraryPreds) keys.add(k);
+    for (const k of keys) {
+      const i = k.lastIndexOf("/");
+      const [name, arity] = [k.slice(0, i), Number(k.slice(i + 1))];
+      if (typeof nd === "string" && nd !== name) continue;
       const mark = m2.trailMark();
-      if (m2.unify(nameT, p.name) && m2.unify(arT, p.arity)) yield;
+      if (m2.unify(nameT, name) && m2.unify(arT, arity)) yield;
       m2.undoTo(mark);
     }
   }));
@@ -1221,39 +1289,34 @@ export function installBuiltins(m: Machine): void {
   }));
   def("predicate_property", 2, nondet(function* (m2, [h, prop]) {
     const head = deref(h!);
-    if (head instanceof Var) return;
+    if (head instanceof Var) return false;
     const hd = head instanceof Struct && head.name === ":" ? deref(head.args[1]!) : head;
     const [name, ar] = functorOf(hd);
-    if (typeof name !== "string") return;
+    if (typeof name !== "string") return false;
     const key = name + "/" + ar;
     const props: Term[] = [];
     if (m2.builtins.has(key)) props.push("defined", "built_in", "static");
     else {
       const p = m2.db.get(name, ar);
-      if (p === undefined) return;
+      if (p === undefined) return false;
       props.push("defined", mkStruct("number_of_clauses", p.live));
       if (p.dynamic) props.push("dynamic");
       else props.push("static");
     }
-    for (const pr of props) {
-      const mark = m2.trailMark();
-      if (m2.unify(prop!, pr)) yield;
-      m2.undoTo(mark);
-    }
+    // A named property is looked up, so only properties of its functor are candidates (SWI is det there).
+    const pd = deref(prop!);
+    const cands = pd instanceof Var ? props : props.filter((pr) => sameFunctor(pr, pd));
+    return yield* eachCandidate(m2, cands, (pr) => m2.unify(prop!, pr));
   }));
   def("current_op", 3, nondet(function* (m2, [p, t, n]) {
-    for (const [map, kinds] of [
-      [m2.ops.infix, ["xfx", "xfy", "yfx"]],
-      [m2.ops.prefix, ["fy", "fx"]],
-      [m2.ops.postfix, ["xf", "yf"]],
-    ] as const) {
-      for (const [name, def2] of map) {
-        if (!(kinds as readonly string[]).includes(def2.type)) continue;
-        const mark = m2.trailMark();
-        if (m2.unify(n!, name) && m2.unify(t!, def2.type) && m2.unify(p!, def2.pri)) yield;
-        m2.undoTo(mark);
-      }
-    }
+    // Definitions named by a bound name or type are looked up, so only they are candidates (SWI is det there).
+    const nd = deref(n!);
+    const td = deref(t!);
+    const defs: [string, string, number][] = [];
+    for (const map of [m2.ops.infix, m2.ops.prefix, m2.ops.postfix])
+      for (const [name, def2] of map)
+        if ((typeof nd !== "string" || nd === name) && (typeof td !== "string" || td === def2.type)) defs.push([name, def2.type, def2.pri]);
+    return yield* eachCandidate(m2, defs, ([name, type, pri]) => m2.unify(n!, name) && m2.unify(t!, type) && m2.unify(p!, pri));
   }));
   def("op", 3, det((m2, [p, t, n]) => {
     for (const name of listToArray(n!) ?? [n!]) m2.ops.add(intArg(p!), atomArg(t!) as never, atomArg(name));
@@ -1281,9 +1344,9 @@ export function installBuiltins(m: Machine): void {
     const kd = deref(k!);
     if (typeof kd === "string") {
       const val = m2.globals.get(kd);
-      if (val !== undefined && m2.unify(v!, val)) yield;
-      return;
+      return val !== undefined && m2.unify(v!, val);
     }
+    // Enumerating every global leaves a choicepoint after the last, as SWI's does.
     for (const [key, val] of [...m2.globals]) {
       const mark = m2.trailMark();
       if (m2.unify(k!, key) && m2.unify(v!, val)) yield;
@@ -1344,17 +1407,15 @@ export function installBuiltins(m: Machine): void {
       t = deref(t.tail);
     }
     if (t === NIL) {
-      if (m2.unify(n!, count)) yield;
-      return;
+      return m2.unify(n!, count);
     }
     if (!(t instanceof Var)) throw typeError("list", l!);
     const nd = deref(n!);
     if (typeof nd === "number") {
-      if (nd < count) return;
+      if (nd < count) return false;
       const extra: Term[] = [];
       for (let i = count; i < nd; i++) extra.push(mkVar());
-      if (m2.unify(t, mkList(extra))) yield;
-      return;
+      return m2.unify(t, mkList(extra));
     }
     const tailVar = t;
     for (let k = count; ; k++) {
@@ -1506,12 +1567,8 @@ export function installBuiltins(m: Machine): void {
       if (od instanceof Struct && od.name === "extensions" && od.args.length === 1) ext = (listToArray(od.args[0]!) ?? []).map((x) => atomArg(x))[0] ?? null;
       if (od instanceof Struct && od.name === "file_type" && od.args.length === 1 && deref(od.args[0]!) === "prolog") ext = "pl";
     }
-    for (const name of readdirSync(dir).sort()) {
-      if (ext !== null && extname(name) !== "." + ext) continue;
-      const mark = m2.trailMark();
-      if (m2.unify(f!, join(dir, name))) yield;
-      m2.undoTo(mark);
-    }
+    const names = readdirSync(dir).sort().filter((name) => ext === null || extname(name) === "." + ext);
+    return yield* eachCandidate(m2, names, (name) => m2.unify(f!, join(dir, name)));
   }));
   def("assertion", 1, det((m2, [g]) => {
     if (m2.solveOnce(g!)) return true;
@@ -1549,16 +1606,13 @@ export function installBuiltins(m: Machine): void {
     const d = deref(h!);
     if (!(d instanceof Var)) {
       const [name, arity] = typeof d === "string" ? [d, 0] : d instanceof Struct ? [d.name, d.args.length] : ["", -1];
-      if (evaluableFunctors().some(([n, a]) => n === name && a === arity)) yield;
-      return;
+      return evaluableFunctors().some(([n, a]) => n === name && a === arity);
     }
-    for (const [n, a] of evaluableFunctors()) {
+    return yield* eachCandidate(m2, evaluableFunctors(), ([n, a]) => {
       const args: Term[] = [];
       for (let i = 0; i < a; i++) args.push(mkVar());
-      const mark = m2.trailMark();
-      if (m2.unify(d, a === 0 ? n : new Struct(n, args))) yield;
-      m2.undoTo(mark);
-    }
+      return m2.unify(d, a === 0 ? n : new Struct(n, args));
+    });
   }));
   const isCharAtom = (t: Term): boolean => typeof t === "string" && [...t].length === 1;
   const isCode = (t: Term): boolean => typeof t === "number" && Number.isInteger(t) && t >= 0 && t <= 0x10ffff;
@@ -1630,7 +1684,6 @@ export function installBuiltins(m: Machine): void {
 
   // clause references are opaque '$cref'(N) terms
   void Slot;
-  void indexKey;
   void resolve;
   void quoteAtom;
   void readClauses;
@@ -1793,6 +1846,33 @@ function mergeSort<T>(items: T[], cmp: (a: T, b: T) => number): T[] {
   return out;
 }
 
+/**
+ * atom_concat/3 and string_concat/3: a bound part is a prefix or suffix test (det); with both parts unbound
+ * every split point is a candidate, the last (whole text, empty suffix) ending without a choicepoint.
+ */
+function* concatText(m: Machine, a: Term, b: Term, c: Term, wrap: (s: string) => Term): Generator<void, boolean> {
+  const x = deref(a);
+  const y = deref(b);
+  if (!(x instanceof Var) && !(y instanceof Var)) return m.unify(c, wrap(atomicText(x, "string") + atomicText(y, "string")));
+  const z = atomicText(c, "string");
+  if (!(x instanceof Var)) {
+    const pre = atomicText(x, "string");
+    return z.startsWith(pre) && m.unify(y, wrap(z.slice(pre.length)));
+  }
+  if (!(y instanceof Var)) {
+    const suf = atomicText(y, "string");
+    return z.endsWith(suf) && m.unify(x, wrap(z.slice(0, z.length - suf.length)));
+  }
+  const cs = [...z];
+  return yield* eachCandidate(m, range(0, cs.length), (i) => m.unify(x, wrap(cs.slice(0, i).join(""))) && m.unify(y, wrap(cs.slice(i).join(""))));
+}
+
+/**
+ * sub_atom/5 and sub_string/5. Candidates are (Before, Length) pairs in SWI's order, Before ascending then
+ * Length ascending, restricted by whichever of Before, Length and After are bound; with Sub bound, every start
+ * position it could fit at is a candidate. The last candidate ends without a choicepoint even when it fails to
+ * match, as in SWI (sub_atom(abcd, B, L, A, bc) leaves one; sub_atom(abcbc, B, L, A, bc) ends det at B = 3).
+ */
 function* subText(
   m: Machine,
   text: string,
@@ -1801,80 +1881,41 @@ function* subText(
   aT: Term,
   subT: Term,
   wrap: (s: string) => Term,
-): Generator<void> {
+  subType: string,
+): Generator<void, boolean> {
   const cs = [...text];
   const n = cs.length;
   const sub = deref(subT);
-  if (!(sub instanceof Var)) {
-    const s = [...(textOf(sub) ?? "")];
-    const L = s.length;
-    const target = s.join("");
-    for (let b = 0; b + L <= n; b++) {
-      if (cs.slice(b, b + L).join("") !== target) continue;
-      const mark = m.trailMark();
-      if (m.unify(bT, b) && m.unify(lT, L) && m.unify(aT, n - b - L)) yield;
-      m.undoTo(mark);
-    }
-    return;
-  }
   const bd = deref(bT);
   const ld = deref(lT);
   const ad = deref(aT);
-  const bs = typeof bd === "number" ? [bd] : null;
-  for (let b = 0; b <= n; b++) {
-    if (bs !== null && !bs.includes(b)) continue;
-    for (let L = 0; b + L <= n; L++) {
-      if (typeof ld === "number" && ld !== L) continue;
-      if (typeof ad === "number" && ad !== n - b - L) continue;
-      const mark = m.trailMark();
-      if (m.unify(bT, b) && m.unify(lT, L) && m.unify(aT, n - b - L) && m.unify(subT, wrap(cs.slice(b, b + L).join("")))) yield;
-      m.undoTo(mark);
+  if (sub === NIL) throw typeError(subType, sub);
+  const target = sub instanceof Var ? null : [...(textOf(sub) ?? "")].join("");
+  const fixedL = target !== null ? [...target].length : typeof ld === "number" ? ld : null;
+  const fixedB = typeof bd === "number" ? bd : null;
+  const fixedA = typeof ad === "number" ? ad : null;
+  function* pairs(): Generator<[number, number]> {
+    if (fixedB !== null) {
+      if (fixedL !== null) yield [fixedB, fixedL];
+      else if (fixedA !== null) yield [fixedB, n - fixedB - fixedA];
+      else for (let L = 0; fixedB + L <= n; L++) yield [fixedB, L];
+    } else if (fixedL !== null) {
+      if (fixedA !== null) yield [n - fixedL - fixedA, fixedL];
+      else for (let b = 0; b + fixedL <= n; b++) yield [b, fixedL];
+    } else if (fixedA !== null) {
+      for (let b = 0; b <= n - fixedA; b++) yield [b, n - fixedA - b];
+    } else {
+      for (let b = 0; b <= n; b++) for (let L = 0; b + L <= n; L++) yield [b, L];
     }
   }
+  return yield* eachCandidate(m, pairs(), ([b, L]) => {
+    if (b < 0 || L < 0 || b + L > n) return false;
+    const piece = cs.slice(b, b + L).join("");
+    if (target !== null && piece !== target) return false;
+    return m.unify(bT, b) && m.unify(lT, L) && m.unify(aT, n - b - L) && (target !== null || m.unify(subT, wrap(piece)));
+  });
 }
 
-function charType(m: Machine, c: Term, t: Term): boolean {
-  const ch = deref(c);
-  if (typeof ch !== "string") return false;
-  const type = deref(t);
-  const name = typeof type === "string" ? type : type instanceof Struct ? type.name : "";
-  switch (name) {
-    case "alpha":
-      return /[\p{L}\p{N}_]/u.test(ch);
-    case "alnum":
-      return /[\p{L}\p{N}]/u.test(ch);
-    case "digit":
-      if (type instanceof Struct) {
-        if (!/[0-9]/.test(ch)) return false;
-        return m.unify(type.args[0]!, ch.charCodeAt(0) - 48);
-      }
-      return /[0-9]/.test(ch);
-    case "space":
-    case "white":
-      return /\s/.test(ch);
-    case "upper":
-      if (type instanceof Struct) return /\p{Lu}/u.test(ch) && m.unify(type.args[0]!, ch.toLowerCase());
-      return /\p{Lu}/u.test(ch);
-    case "lower":
-      if (type instanceof Struct) return /\p{Ll}/u.test(ch) && m.unify(type.args[0]!, ch.toUpperCase());
-      return /\p{Ll}/u.test(ch);
-    case "punct":
-      return /[\p{P}\p{S}]/u.test(ch);
-    case "csym":
-      return /[\p{L}\p{N}_]/u.test(ch);
-    case "csymf":
-      return /[\p{L}_]/u.test(ch);
-    case "end_of_line":
-      return ch === "\n" || ch === "\r";
-    case "graph":
-      return /[^\s]/.test(ch) && !/[\p{L}\p{N}]/u.test(ch);
-    case "to_lower":
-      return type instanceof Struct && m.unify(type.args[0]!, ch.toLowerCase());
-    case "to_upper":
-      return type instanceof Struct && m.unify(type.args[0]!, ch.toUpperCase());
-  }
-  return false;
-}
 
 function writeOpts(o: Term): { quoted?: boolean; numbervars?: boolean; ignoreOps?: boolean } {
   const opts: { quoted?: boolean; numbervars?: boolean; ignoreOps?: boolean } = {};
@@ -1910,11 +1951,22 @@ function messageText(msg: Term, prefix: string): string {
 }
 
 /** Read a term from text, as term_to_atom/2 with an unbound term does. */
+// am[implements a-hp-text-nil]
+/**
+ * The term a text holds, as term_to_atom/2 and term_string/2 read it: blank text is SWI's
+ * syntax_error(end_of_string), and a reader error becomes error(syntax_error(Message), string(Text, Pos)).
+ */
 export function parseTermText(text: string): Term {
-  const r = new PrologReader(text + " .");
-  const c = r.readClause();
-  if (c === null) throw new PrologError(mkStruct("error", mkStruct("syntax_error", "end_of_file"), mkVar()));
-  return c;
+  const ctx = mkStruct("string", new Str(text), 0);
+  if (text.trim() === "") throw new PrologError(mkStruct("error", mkStruct("syntax_error", "end_of_string"), ctx));
+  try {
+    const c = new PrologReader(text + " .").readClause();
+    if (c === null) throw new PrologError(mkStruct("error", mkStruct("syntax_error", "end_of_string"), ctx));
+    return c;
+  } catch (e) {
+    if (e instanceof PrologSyntaxError) throw new PrologError(mkStruct("error", mkStruct("syntax_error", e.message), ctx));
+    throw e;
+  }
 }
 
 // Clause references.

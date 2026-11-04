@@ -32,3 +32,6 @@ isolate-*.log
 # Agent worktrees and gate trees
 /worktrees/
 /ai-battery-*/
+
+# git_import clones its repository here at run time (scripts/petta-compare.mjs prepares it)
+packages/petta/corpus/ee5cacb/repos/

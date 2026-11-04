@@ -4,7 +4,8 @@
 
 // Purpose: the SWI-Prolog predicates that are system predicates or C code in SWI, written here as Prolog
 // clauses with SWI's semantics (memberchk/2, findall/4, bagof/3, setof/3, keysort/2, the sequential
-// concurrent_* forms) plus yall's Params>>Lambda calls, which copy the lambda per call. SWI's library modules
+// concurrent_* forms) plus yall's Params>>Lambda and Free/Lambda calls, which copy the lambda per call (a lambda
+// in source code is compiled at load time instead, goal-expansion.ts). SWI's library modules
 // (lists, apply, pairs, aggregate, error, ordsets, heaps, ...) are its own sources, vendored under swipl/library
 // and autoloaded by consult.ts.
 // am[implements a-pe-swi-builtins]
@@ -16,8 +17,6 @@ import { collectVars, compareTerms } from "./builtins";
 
 export const LIBRARY_PL = String.raw`
 memberchk(X, L) :- member(X, L), !.
-maplist(_, [], [], [], [], []).
-maplist(G, [X|Xs], [Y|Ys], [Z|Zs], [W|Ws], [V|Vs]) :- call(G, X, Y, Z, W, V), maplist(G, Xs, Ys, Zs, Ws, Vs).
 sumlist(Xs, Sum) :- sum_list(Xs, Sum).
 sumlist(Xs, Ys, S) :- foldl([X,Y,A0,A]>>(A is A0+X*Y), Xs, Ys, 0, S).
 findall(T, G, L, Tail) :- findall(T, G, L0), append(L0, Tail, L).
@@ -64,6 +63,19 @@ export function installLibrary(m: Machine): void {
         for (; i < cps.length && i < extra.length; i++) if (!m2.unify(cps[i]!, extra[i]!)) return false;
         if (i < extra.length) body = addCallArgs(body, extra.slice(i));
         m2.pushGoal(body);
+        return true;
+      },
+    });
+  }
+  // yall's Free/Lambda called with N more arguments: Lambda copied except the variables of Free, then called
+  // with the arguments (a Params>>Body lambda binds them through >>).
+  for (let n = 0; n <= 7; n++) {
+    m.defBuiltin("/", 2 + n, {
+      det: (m2, args) => {
+        const map = new Map<Var, Var>();
+        for (const v of collectVars(args[0]!)) map.set(v, v);
+        const lambda = copyTerm(args[1]!, map);
+        m2.pushGoal(n === 0 ? lambda : addCallArgs(lambda, args.slice(2)));
         return true;
       },
     });

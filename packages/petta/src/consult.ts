@@ -7,7 +7,8 @@
 // qualifications are dropped, which c-petta-flatten-safe shows keeps every definition), DCG rules translate as
 // SWI's dcg_translate_rule/2 does, directives run (dynamic, multifile, table, initialization, use_module and
 // ensure_loaded of files resolved against the loading file's directory, each loaded once), plunit blocks are
-// skipped, and prolog_load_context/2 answers for the file being loaded.
+// skipped, and prolog_load_context/2 answers for the file being loaded. Clause bodies are goal-expanded as SWI
+// expands them once library(yall) is loaded (goal-expansion.ts), meta_predicate declarations taken into account.
 // am[implements a-hp-loader]
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -36,6 +37,7 @@ import {
   type Term,
 } from "./terms";
 import { InStream } from "./builtins";
+import { declareMetaPredicates, enableYallExpansion, expandClauseGoals, expandDirectiveGoal } from "./goal-expansion";
 
 const S = mkStruct;
 
@@ -279,7 +281,8 @@ export function consultText(m: Machine, text: string, file = ""): void {
 /** Add one clause read from a file and return it; an error is reported as SWI's loader does, and loading goes on. */
 function addSourceClause(m: Machine, ctx: LoadCtx, d: Term): Term | null {
   try {
-    const clause = sourceClause(d, ctx.module);
+    // Goal expansion (yall lambdas) runs on the translated clause; its auxiliary clauses are stored first.
+    const clause = expandClauseGoals(m, sourceClause(d, ctx.module), (aux) => addSourceClause(m, ctx, aux));
     warnRedefinition(m, clause, ctx.file);
     m.sourceFile = ctx.file || null;
     try {
@@ -357,13 +360,26 @@ function libraryPrivacy(m: Machine, file: string, terms: Term[]): ((t: Term) => 
     if (p !== null) exported.add(p[0] + "/" + p[1]);
   }
   const defined = new Set<string>();
+  // am[implements a-hp-library-multifile]
+  // A multifile predicate is meant to be extended from other modules (error:has_type/2 from assoc.pl), so it stays shared.
+  const multifile = new Set<string>();
   for (const t of terms) {
     const d = deref(t);
-    if (d instanceof Struct && (d.name === ":-" || d.name === "?-") && d.args.length === 1) continue;
+    if (d instanceof Struct && d.name === ":-" && d.args.length === 1) {
+      const g = deref(d.args[0]!);
+      if (g instanceof Struct && g.name === "multifile" && g.args.length === 1)
+        for (const pi of commaItems(g.args[0]!)) {
+          const p = piOf(pi);
+          if (p !== null) multifile.add(p[0] + "/" + p[1]);
+        }
+      continue;
+    }
+    if (d instanceof Struct && d.name === "?-" && d.args.length === 1) continue;
     const k = headKey(sourceClause(d, mod));
     if (k !== null) defined.add(k);
   }
-  const isPrivate = (name: string, arity: number): boolean => defined.has(name + "/" + arity) && !exported.has(name + "/" + arity);
+  const isPrivate = (name: string, arity: number): boolean =>
+    defined.has(name + "/" + arity) && !exported.has(name + "/" + arity) && !multifile.has(name + "/" + arity);
   const rename = (name: string, arity: number): string => (isPrivate(name, arity) ? `${mod}:${name}` : name);
   const closure = (c: Term, extra: number): Term => {
     const d = unqualify(c);
@@ -397,6 +413,18 @@ function libraryPrivacy(m: Machine, file: string, terms: Term[]): ((t: Term) => 
         return S("^", a[0]!, goal(a[1]!));
       case "catch/3":
         return S("catch", goal(a[0]!), a[1]!, goal(a[2]!));
+      // am[implements a-hp-library-multifile]
+      // Database predicates take a clause head or clause (meta-argument :), which names the module's own predicate.
+      case "clause/2":
+        return S("clause", goal(a[0]!), a[1]!);
+      case "clause/3":
+        return S("clause", goal(a[0]!), a[1]!, a[2]!);
+      case "assert/1":
+      case "asserta/1":
+      case "assertz/1":
+      case "retract/1":
+      case "retractall/1":
+        return S(d.name, clause(a[0]!));
       case "setup_call_cleanup/3":
         return S(d.name, goal(a[0]!), goal(a[1]!), goal(a[2]!));
     }
@@ -514,12 +542,15 @@ function directive(m: Machine, ctx: LoadCtx, g: Term): void {
     case "ensure_loaded/1":
     case "reexport/1":
     case "reexport/2":
+      if (isLibrary(a[0]!, "yall")) enableYallExpansion(m);
       loadSpecs(m, a[0]!, true);
       return;
     case "consult/1":
       loadSpecs(m, a[0]!, false);
       return;
     case "meta_predicate/1":
+      declareMetaPredicates(m, a[0]!);
+      return;
     case "autoload/1":
     case "autoload/2":
     case "license/1":
@@ -543,7 +574,13 @@ function directive(m: Machine, ctx: LoadCtx, g: Term): void {
     loadSpecs(m, d, false);
     return;
   }
-  runDirective(m, ctx, d);
+  runDirective(m, ctx, expandDirectiveGoal(m, d, (aux) => addSourceClause(m, ctx, aux)));
+}
+
+/** Whether a load spec is library(Name). */
+function isLibrary(spec: Term, name: string): boolean {
+  const d = deref(spec);
+  return d instanceof Struct && d.name === "library" && d.args.length === 1 && deref(d.args[0]!) === name;
 }
 
 /** A file spec as a path: an atom or string, or Dir/File written with the / operator. */

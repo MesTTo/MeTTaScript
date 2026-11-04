@@ -14,8 +14,8 @@
 //  - examples PeTTa ran past the oracle's 300 s cap match when ours also runs past this run's cap and the
 //    stdout both printed agrees over their common length.
 
-import { spawn } from "node:child_process";
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -49,6 +49,14 @@ const names = readdirSync(join(corpus, "examples"))
   .map((f) => f.slice(0, -6))
   .filter((n) => n.includes(FILTER) && (NAMES === null || NAMES.has(n)))
   .sort();
+// git_import's oracle run found its repository already cloned under repos/ (its stdout has no "Cloning ..."
+// line), as any run after the first does; give this run the same starting state.
+// am[implements a-mettascript-petta-1104.oracle]
+const GIT_IMPORT_REPO = join(corpus, "repos/test_metta_lib");
+if (names.includes("git_import") && !existsSync(GIT_IMPORT_REPO)) {
+  const r = spawnSync("git", ["clone", "--depth", "1", "https://github.com/rTreutlein/test_metta_lib.git", GIT_IMPORT_REPO], { stdio: "inherit" });
+  if (r.status !== 0) throw new Error(`cloning git_import's repository failed: ${r.error ?? r.status}`);
+}
 
 function run(name, mode) {
   const argv = [cli, `./examples/${name}.metta`, "--silent", ...(mode ? [mode] : [])];

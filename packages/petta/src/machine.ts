@@ -5,12 +5,14 @@
 // Purpose: the resolution machine that runs PeTTa's translated Prolog: an iterative solver over goal terms
 // with a heap continuation and a choicepoint stack, so recursion depth costs heap rather than JS stack.
 // Cut, catch/throw, findall, negation, if-then-else and soft-cut are control frames on that stack, and the
-// machine is reentrant so builtins and the translator can solve subgoals.
+// machine is reentrant so builtins and the translator can solve subgoals. A call tries the clauses SWI's clause
+// selection picks (swi-index.ts), so a choicepoint stays exactly where SWI leaves one.
 // am[implements a-pe-runtime]
 
 import { readSync } from "node:fs";
-import { Clause, Database, Slot, compileClause } from "./db";
-import { OpTable } from "./prolog-reader";
+import { Clause, Database, Ground, Slot, compileClause } from "./db";
+import { MAX_LOOKAHEAD, clauseScan, type Scan } from "./swi-index";
+import { OpTable, PrologSyntaxError } from "./prolog-reader";
 import {
   Cons,
   Float,
@@ -64,9 +66,8 @@ const enum K {
 
 class CP {
   // Fields of every kind, set in one shape so the stack stays monomorphic.
-  cands: Clause[] | null = null;
+  scan: Scan | null = null;
   idx = 0;
-  len = 0;
   gen = 0;
   args: Term[] | null = null;
   alt: Frame | null = null;
@@ -89,6 +90,12 @@ class CP {
 }
 
 export type DetBuiltin = (m: Machine, args: Term[]) => boolean;
+/**
+ * A nondeterministic builtin: each `yield` is a solution that may have more after it; returning `true` is a
+ * last solution, which leaves no choicepoint (SWI's foreign predicates return TRUE there instead of retrying,
+ * and setup_call_cleanup runs its cleanup at such an exit); returning anything else means no more solutions.
+ * am[implements a-hp-cp-parity]
+ */
 export type NondetBuiltin = (m: Machine, args: Term[]) => Iterator<unknown>;
 export interface Builtin {
   readonly det?: DetBuiltin;
@@ -97,11 +104,6 @@ export interface Builtin {
 
 type TrailEntry = Var | (() => void);
 const EMPTY: Term[] = [];
-
-/** A stored clause's ground compound subterm, shared by every renaming instead of copied. */
-class Ground {
-  constructor(public readonly t: Term) {}
-}
 
 /**
  * A fresh copy of a stored ground literal, made where the literal enters an activation: SWI builds a clause's
@@ -603,7 +605,9 @@ export class Machine {
             if (this.wakeups.length > 0) this.flushWakeups();
           }
         }
-      } catch (e) {
+      } catch (e0) {
+        // A reader error inside a builtin (read_term/2 on bad text) is a Prolog syntax error the program can catch.
+        const e = e0 instanceof PrologSyntaxError ? new PrologError(mkStruct("error", mkStruct("syntax_error", e0.message), mkVar())) : e0;
         if (!(e instanceof PrologError)) throw e;
         if (!this.handleThrow(e, base)) throw e;
       }
@@ -623,7 +627,7 @@ export class Machine {
         case K.Clauses: {
           cps.pop();
           this.trailBoundary = cps.length > 0 ? cps[cps.length - 1]!.varMark : 0;
-          if (this.tryClauses(cp.cands!, cp.idx, cp.len, cp.gen, cp.args!, cp.next, cp.cc)) return true;
+          if (this.tryClauses(cp.scan!, cp.idx, cp.gen, cp.args!, cp.next, cp.cc)) return true;
           break;
         }
         case K.Alt:
@@ -648,6 +652,10 @@ export class Machine {
           if (r.done) {
             cps.pop();
             this.trailBoundary = cps.length > 0 ? cps[cps.length - 1]!.varMark : 0;
+            if (r.value === true) {
+              this.goals = cp.next;
+              return true;
+            }
             break;
           }
           this.goals = cp.next;
@@ -710,33 +718,47 @@ export class Machine {
     return false;
   }
 
-  /** Try clauses cands[start..len) visible at `gen`; on a match push the rest as a choicepoint. */
+  /**
+   * Try the clauses of `scan` from `start` that are visible at `gen` and that its key admits; after a match a
+   * choicepoint stays only if another admitted clause follows within SWI's lookahead (pl-index.c
+   * next_clause_primary_index), so the last candidate leaves none, as in SWI.
+   * am[implements a-hp-swi-clause-select]
+   */
   private tryClauses(
-    cands: Clause[],
+    scan: Scan,
     start: number,
-    len: number,
     gen: number,
     args: Term[],
     next: Frame | null,
     cc: number,
   ): boolean {
     const h = this.cps.length;
+    const cands = scan.list;
+    const len = cands.length;
+    const key = scan.key;
+    const keyAt = key === null ? null : scan.keyAt;
     for (let i = start; i < len; i++) {
       const c = cands[i]!;
-      if (c.born > gen || c.died <= gen || !mayMatch(c.head, args)) continue;
-      // Find whether a later clause could match, so a last match leaves no choicepoint.
+      if (c.born > gen || c.died <= gen) continue;
+      if (keyAt !== null) {
+        const k = keyAt(c);
+        if (k !== null && k !== key) continue;
+      }
       let j = i + 1;
-      while (j < len) {
+      for (let budget = MAX_LOOKAHEAD; j < len; j++) {
         const d = cands[j]!;
-        if (d.born <= gen && d.died > gen && mayMatch(d.head, args)) break;
-        j++;
+        if (d.born <= gen && d.died > gen) {
+          if (keyAt === null) break;
+          const k = keyAt(d);
+          if (k === null || k === key) break;
+        }
+        if (--budget === 0) break;
       }
       let cp: CP | null = null;
       if (j < len) {
         cp = this.pushCP(K.Clauses, next, h, cc);
-        cp.cands = cands;
+        cp.scan = scan;
         cp.idx = j;
-        cp.len = len;
         cp.gen = gen;
         cp.args = args;
       }
@@ -814,8 +836,14 @@ export class Machine {
           return true;
         }
         if (name === "$softcut") {
-          const cp = this.cps[deref(args[0]!) as number];
-          if (cp !== undefined && cp.kind === K.Soft) cp.disabled = true;
+          // am[implements a-hp-cp-parity]
+          const i = deref(args[0]!) as number;
+          const cp = this.cps[i];
+          if (cp !== undefined && cp.kind === K.Soft) {
+            // A condition that left no choicepoint has no more solutions, so the else branch goes now, as in SWI.
+            if (i === this.cps.length - 1) this.cutTo(i);
+            else cp.disabled = true;
+          }
           return true;
         }
         if (name === "$nafail") {
@@ -951,22 +979,22 @@ export class Machine {
       const r = cp.iter.next();
       if (r.done) {
         this.cutTo(h);
-        return false;
+        return r.value === true;
       }
       return true;
     }
     if (this.tabled.size > 0 && this.tabled.has(key)) return this.callTabled(name, args, f);
     const p = this.db.preds.get(key);
     if (p !== undefined) {
-      const cands = p.candidates(args);
-      return this.tryClauses(cands, 0, cands.length, this.db.generation, args, f.next, f.cc);
+      const scan = clauseScan(p, args);
+      return this.tryClauses(scan, scan.start, this.db.generation, args, f.next, f.cc);
     }
     // An undefined predicate a library exports loads that library and is called (SWI's autoloader).
     if (this.autoload !== null && this.autoload(name, args.length)) {
       const p2 = this.db.preds.get(key);
       if (p2 !== undefined) {
-        const cands = p2.candidates(args);
-        return this.tryClauses(cands, 0, cands.length, this.db.generation, args, f.next, f.cc);
+        const scan = clauseScan(p2, args);
+        return this.tryClauses(scan, scan.start, this.db.generation, args, f.next, f.cc);
       }
     }
     if (this.flags.get("unknown") === "fail") return false;
@@ -1104,21 +1132,6 @@ function variantKeyOf(t: Term): string {
     return typeof x + ":" + String(x);
   };
   return go(t);
-}
-
-/** Cheap pre-filter: a clause whose first argument's principal functor differs cannot match. */
-function mayMatch(head: Term, args: Term[]): boolean {
-  if (args.length === 0 || !(head instanceof Struct)) return true;
-  const t = head.args[0]!;
-  if (t instanceof Slot) return true;
-  const a = deref(args[0]!);
-  if (a instanceof Var) return true;
-  const tt = t instanceof Ground ? t.t : t;
-  if (typeof tt === "string" || typeof tt === "number") return atomicEq(tt, a);
-  if (tt instanceof Cons) return a instanceof Cons;
-  if (tt instanceof Struct) return a instanceof Struct && a.name === tt.name && a.args.length === tt.args.length;
-  if (tt === NIL) return a === NIL;
-  return true;
 }
 
 /** Equality of two dereferenced atomic terms as unification sees it: 1 and 1.0 differ. */

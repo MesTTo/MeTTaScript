@@ -309,9 +309,15 @@ class Lexer {
   }
 }
 
+const NO_STOP: readonly string[] = [];
+const ARG_STOP: readonly string[] = [","];
+const LIST_STOP: readonly string[] = [",", "|"];
+
 /** Parses clauses one at a time; each clause's variables are scoped to it. */
 export class PrologReader {
   private tok: Tok;
+  /** The token after `tok`, read ahead when a decision needs it. */
+  private ahead: Tok | null = null;
   private readonly lex: Lexer;
   private varMap = new Map<string, Var>();
   /** Variable names of the last clause read, in first-occurrence order (for read_term/3 variable_names). */
@@ -332,7 +338,7 @@ export class PrologReader {
     if (this.tok.t === T.EOF) return null;
     const t = this.parse(1200);
     if (this.tok.t !== T.End) throw new PrologSyntaxError(`operator expected at ${this.tok.pos}, got ${JSON.stringify(this.tok.v)}`);
-    this.tok = this.lex.next();
+    this.advance();
     return t;
   }
 
@@ -343,8 +349,13 @@ export class PrologReader {
 
   private advance(): Tok {
     const t = this.tok;
-    this.tok = this.lex.next();
+    this.tok = this.ahead ?? this.lex.next();
+    this.ahead = null;
     return t;
+  }
+
+  private peek(): Tok {
+    return (this.ahead ??= this.lex.next());
   }
 
   private expect(v: string): void {
@@ -353,21 +364,34 @@ export class PrologReader {
     this.advance();
   }
 
+  // am[implements a-hp-term-io]
+  /**
+   * Whether `tok` begins an operand of a prefix operator. An atom that is only an infix operator does not,
+   * unless the term ends right after it, as in \+ = (SWI reads \+(=)).
+   */
   private isTermStart(): boolean {
     const t = this.tok;
     if (t.t === T.End || t.t === T.EOF) return false;
     if (t.t === T.Punct) return t.v === "(" || t.v === "[" || t.v === "{";
-    if (t.t === T.Atom && this.ops.infix.has(t.v) && !this.ops.prefix.has(t.v)) return false;
+    if (t.t === T.Atom && this.ops.infix.has(t.v) && !this.ops.prefix.has(t.v)) {
+      const n = this.peek();
+      return n.t === T.End || n.t === T.EOF || (n.t === T.Punct && [")", ",", "|", "]", "}"].includes(n.v));
+    }
     return true;
   }
 
-  private parse(maxPri: number): Term {
-    let [left, leftPri] = this.parsePrimary(maxPri);
+  // am[implements a-hp-term-io]
+  /**
+   * A term of priority at most `maxPri`. `stop` lists the punctuation that ends it instead of acting as an
+   * infix operator: the comma between arguments, and the bar too in a list (pl-read.c complex_term's stop).
+   */
+  private parse(maxPri: number, stop: readonly string[] = NO_STOP): Term {
+    let [left, leftPri] = this.parsePrimary(maxPri, stop);
     for (;;) {
       const t = this.tok;
       let name: string | null = null;
       if (t.t === T.Atom || t.t === T.QAtom) name = t.v;
-      else if (t.t === T.Punct && (t.v === "," || t.v === "|")) name = t.v;
+      else if (t.t === T.Punct && (t.v === "," || t.v === "|") && !stop.includes(t.v)) name = t.v;
       if (name === null) break;
       const inf = this.ops.infix.get(name);
       if (inf !== undefined) {
@@ -375,7 +399,7 @@ export class PrologReader {
           inf.type === "xfx" ? [inf.pri - 1, inf.pri - 1] : inf.type === "xfy" ? [inf.pri - 1, inf.pri] : [inf.pri, inf.pri - 1];
         if (inf.pri <= maxPri && leftPri <= lmax) {
           this.advance();
-          const right = this.parse(rmax);
+          const right = this.parse(rmax, stop);
           left = mkStruct(name === "|" ? ";" : name, left, right);
           leftPri = inf.pri;
           continue;
@@ -393,18 +417,20 @@ export class PrologReader {
     return left;
   }
 
+  // am[implements a-hp-term-io]
+  /** Arguments may hold any term up to priority 1200, commas separating them (SWI reads f(a:-b) as f((a:-b))). */
   private parseArgs(): Term[] {
     this.expect("(");
-    const args = [this.parse(999)];
+    const args = [this.parse(1200, ARG_STOP)];
     while (this.tok.t === T.Punct && this.tok.v === ",") {
       this.advance();
-      args.push(this.parse(999));
+      args.push(this.parse(1200, ARG_STOP));
     }
     this.expect(")");
     return args;
   }
 
-  private parsePrimary(maxPri: number): [Term, number] {
+  private parsePrimary(maxPri: number, stop: readonly string[]): [Term, number] {
     const t = this.advance();
     switch (t.t) {
       case T.Int:
@@ -436,15 +462,15 @@ export class PrologReader {
             this.advance();
             return this.atomOrCall("[]", NIL);
           }
-          const items = [this.parse(999)];
+          const items = [this.parse(1200, LIST_STOP)];
           while (this.tok.t === T.Punct && this.tok.v === ",") {
             this.advance();
-            items.push(this.parse(999));
+            items.push(this.parse(1200, LIST_STOP));
           }
           let tail: Term = NIL;
           if (this.tok.t === T.Punct && this.tok.v === "|") {
             this.advance();
-            tail = this.parse(999);
+            tail = this.parse(1200, LIST_STOP);
           }
           this.expect("]");
           return [mkList(items, tail), 0];
@@ -475,7 +501,7 @@ export class PrologReader {
           let pri = pre.pri;
           if (pri > maxPri) pri = 999;
           const argMax = pre.type === "fy" ? pri : pri - 1;
-          const arg = this.parse(argMax);
+          const arg = this.parse(argMax, stop);
           return [mkStruct(name, arg), pri];
         }
         const opPri = Math.max(

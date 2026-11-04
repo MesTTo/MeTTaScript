@@ -86,21 +86,31 @@ export interface WriteOptions {
   readonly numbervars?: boolean;
   readonly ignoreOps?: boolean;
   readonly ops?: OpTable;
-  /** Name variables as _G<n>, n stable per variable within one call. */
+  /** Names for variables, filled in as _<n> for those it lacks (SWI writes _123). */
   readonly varNames?: Map<Var, string>;
 }
 
-const SOLO = new Set(["[]", "!", ";", "{}", ","]);
-const SYMBOL = /^[+\-*/\\^<>=~:.?@#&$]+$/;
-const ALNUM = /^\p{Ll}[\p{L}\p{N}_]*$/u;
+const SYMBOL_CHARS = "#$&*+-./:<=>?@^~\\";
+const isSymbolChar = (c: string): boolean => SYMBOL_CHARS.includes(c);
+/** pl-read.c's prolog_atom_start: a lowercase letter or a letter with no case. */
+const ATOM_START = /^[\p{Ll}\p{Lo}\p{Lm}]/u;
+const ID_CONTINUE = /^[\p{L}\p{N}\p{Mn}\p{Mc}\p{Pc}]$/u;
 
-/** Whether an atom must be quoted by writeq. */
+// am[implements a-hp-term-io]
+/**
+ * Whether writeq must quote an atom (pl-write.c atomType and unquoted_text): an identifier starting with a
+ * lowercase letter, a run of symbol characters other than a lone . or one starting with slash-star, and the
+ * solo atoms !, ; and {} stand bare; [] is the empty-list atom only when written as '[]' here, so it is quoted.
+ */
 export function atomNeedsQuotes(a: string): boolean {
-  if (a === "[]" || a === "!" || a === ";" || a === "{}") return false;
-  if (a === ",") return true;
-  if (a === "|") return true;
-  if (ALNUM.test(a)) return false;
-  if (SYMBOL.test(a)) return false;
+  if (a === "" || a === "[]") return true;
+  if (a === "!" || a === ";" || a === "{}") return false;
+  const cs = [...a];
+  if (ATOM_START.test(cs[0]!)) return !cs.slice(1).every((c) => ID_CONTINUE.test(c));
+  if (isSymbolChar(cs[0]!)) {
+    if (a === "." || a.startsWith("/*")) return true;
+    return !cs.every(isSymbolChar);
+  }
   return true;
 }
 
@@ -132,139 +142,209 @@ function varName(v: Var, opts: WriteOptions): string {
   if (m !== undefined) {
     let n = m.get(v);
     if (n === undefined) {
-      n = "_G" + v.id;
+      n = "_" + v.id;
       m.set(v, n);
     }
     return n;
   }
-  return "_G" + v.id;
+  return "_" + v.id;
 }
 
+// am[implements a-hp-term-io]
+/**
+ * pl-write.c writeNumberVar: '$VAR'(N) prints as a variable name, A..Z then A1.., S_N for negative N, and
+ * '$VAR'(Name) as Name when Name is itself a variable name; anything else prints as the compound.
+ */
 function numbervarName(n: Term): string | null {
   n = deref(n);
-  if (typeof n === "number" && n >= 0) {
+  if (typeof n === "number") {
+    if (n < 0) return "S_" + -n;
     const letter = String.fromCharCode(65 + (n % 26));
     const num = Math.floor(n / 26);
     return num === 0 ? letter : letter + num;
   }
-  if (n instanceof Str || typeof n === "string") return typeof n === "string" ? n : n.s;
+  const name = typeof n === "string" ? n : n instanceof Str ? n.s : null;
+  if (name !== null && /^[\p{Lu}\p{Lt}_][\p{L}\p{N}\p{Mn}\p{Mc}\p{Pc}]*$/u.test(name)) return name;
   return null;
 }
 
-/** SWI write/writeq of a term; operators printed infix with SWI's spacing for symbolic and alphanumeric names. */
+// am[implements a-hp-term-io]
+/**
+ * SWI-Prolog's write/writeq/print/write_canonical text of a term, ported from pl-write.c (writeTerm2,
+ * writeInfixOp, writePrefixArg, writeNumberVar, PutOpenToken/needSpace): a space goes between two tokens exactly
+ * where they would otherwise read back as one, after a prefix operator before ( { or a symbol character, and
+ * after a prefix minus before a digit; an infix operator that needed a space before it gets one after it too;
+ * an atom that is an operator is bracketed where it is an operand of an operator, never as a plain argument.
+ * Time: linear in the size of the term.
+ */
 export function writeTerm(t: Term, opts: WriteOptions = {}): string {
   const ops = opts.ops ?? DEFAULT_OPS;
-  const atomText = (a: string): string => (opts.quoted ? quoteAtom(a) : a);
   const parts: string[] = [];
-  const emit = (s: string): void => {
-    // Insert a space where two tokens would otherwise read back as one.
-    if (parts.length > 0 && s.length > 0) {
-      const prev = parts[parts.length - 1]!;
-      const a = prev[prev.length - 1]!;
-      const b = s[0]!;
-      const sym = (c: string): boolean => "+-*/\\^<>=~:.?@#&$".includes(c);
-      const alnum = (c: string): boolean => /[\p{L}\p{N}_]/u.test(c);
-      if ((sym(a) && sym(b)) || (alnum(a) && alnum(b)) || (a === "," && false)) parts.push(" ");
-    }
-    parts.push(s);
+  // The last character written and the C_* flags of pl-write.c needSpace (prefix sign, prefix op, infix op).
+  let lastc = "";
+  let prefixSign = false;
+  let prefixOp = false;
+  let infixOp = false;
+  const needSpace = (c: string): boolean => {
+    if (lastc === "") return false;
+    const sign = prefixSign;
+    const pre = prefixOp;
+    const inf = infixOp;
+    prefixSign = prefixOp = infixOp = false;
+    if (sign && (/[0-9]/.test(c) || isSymbolChar(c))) return true;
+    if (pre && (c === "(" || c === "{" || isSymbolChar(c))) return true;
+    if (inf && c === "(") return false;
+    const idc = (x: string): boolean => ID_CONTINUE.test(x);
+    if (idc(lastc) && idc(c)) return true;
+    if (isSymbolChar(lastc) && isSymbolChar(c)) return true;
+    if (c === "(" && !(isPunct(lastc) || lastc === " ")) return true;
+    if (c === "'" && /[0-9]/.test(lastc)) return true;
+    if ((c === "'" || c === '"' || c === "`") && lastc === c) return true;
+    return false;
   };
-  const go = (x: Term, maxPri: number): void => {
-    x = deref(x);
-    if (x instanceof Var) return emit(varName(x, opts));
-    if (typeof x === "number" || typeof x === "bigint") {
-      const s = String(x);
-      return emit(s);
-    }
-    if (x instanceof Float) return emit(formatFloat(x.v));
-    if (x instanceof Str) return emit(opts.quoted ? '"' + escapeQuoted(x.s, '"') + '"' : x.s);
+  const put = (s: string): void => {
+    if (s.length === 0) return;
+    parts.push(s);
+    lastc = [...s].pop()!;
+    prefixSign = prefixOp = infixOp = false;
+  };
+  /** PutToken: the token, after a space if the previous one would merge with it; true when a space went first. */
+  const token = (s: string): boolean => {
+    const spaced = needSpace([...s][0]!);
+    if (spaced) parts.push(" ");
+    put(s);
+    return spaced;
+  };
+  const atomTokenText = (a: string): string => (opts.quoted && atomNeedsQuotes(a) ? "'" + escapeQuoted(a, "'") + "'" : a);
+  const writeAtom = (a: string): boolean => token(atomTokenText(a));
+  const isOperator = (a: string): boolean => ops.infix.has(a) || ops.prefix.has(a) || ops.postfix.has(a);
+  const openBrace = (): void => void token("(");
+  const go = (x0: Term, prec: number, opArg: boolean): void => {
+    const x = deref(x0);
+    if (x instanceof Var) return void token(varName(x, opts));
+    if (typeof x === "number" || typeof x === "bigint") return void token(String(x));
+    if (x instanceof Float) return void token(formatFloat(x.v));
+    if (x instanceof Str) return void token(opts.quoted ? '"' + escapeQuoted(x.s, '"') + '"' : x.s);
+    if (x === NIL) return void token("[]");
     if (typeof x === "string") {
-      const isOp = ops.infix.has(x) || ops.prefix.has(x) || ops.postfix.has(x);
-      const txt = atomText(x);
-      if (isOp && maxPri < 1200 && !SOLO.has(x)) {
-        const pri = Math.max(ops.infix.get(x)?.pri ?? 0, ops.prefix.get(x)?.pri ?? 0, ops.postfix.get(x)?.pri ?? 0);
-        if (pri > maxPri) return emit("(" + txt + ")");
+      if (opArg && isOperator(x)) {
+        openBrace();
+        writeAtom(x);
+        put(")");
+        return;
       }
-      return emit(txt);
+      return void writeAtom(x);
     }
-    if (x === NIL) return emit("[]");
     if (x instanceof Cons) {
-      emit("[");
-      go(x.head, 999);
+      token("[");
+      go(x.head, 999, false);
       let rest = deref(x.tail);
       while (rest instanceof Cons) {
-        parts.push(",");
-        go(rest.head, 999);
+        put(",");
+        go(rest.head, 999, false);
         rest = deref(rest.tail);
       }
       if (rest !== NIL) {
-        parts.push("|");
-        go(rest, 999);
+        put("|");
+        go(rest, 999, false);
       }
-      parts.push("]");
+      put("]");
       return;
     }
-    if (x instanceof Struct) {
-      const { name, args } = x;
-      if (opts.numbervars && name === "$VAR" && args.length === 1) {
-        const n = numbervarName(args[0]!);
-        if (n !== null) return emit(n);
-      }
-      if (name === "{}" && args.length === 1 && !opts.ignoreOps) {
-        emit("{");
-        go(args[0]!, 1200);
-        parts.push("}");
+    if (!(x instanceof Struct)) return;
+    const { name, args } = x;
+    if (opts.numbervars && name === "$VAR" && args.length === 1) {
+      const n = numbervarName(args[0]!);
+      if (n !== null) return void token(n);
+    }
+    if (name === "{}" && args.length === 1 && !opts.ignoreOps) {
+      token("{");
+      go(args[0]!, 1200, false);
+      put("}");
+      return;
+    }
+    if (!opts.ignoreOps && args.length === 1) {
+      const pre = ops.prefix.get(name);
+      if (pre !== undefined) {
+        const embrace = pre.pri > prec;
+        if (embrace) openBrace();
+        writeAtom(name);
+        prefixOp = true;
+        if (name === "-") prefixSign = true;
+        go(args[0]!, pre.type === "fx" ? pre.pri - 1 : pre.pri, true);
+        if (embrace) put(")");
         return;
       }
-      if (!opts.ignoreOps && args.length === 2) {
-        const op = ops.infix.get(name);
-        if (op !== undefined) {
-          const [lp, rp] = op.type === "xfx" ? [op.pri - 1, op.pri - 1] : op.type === "xfy" ? [op.pri - 1, op.pri] : [op.pri, op.pri - 1];
-          const paren = op.pri > maxPri;
-          if (paren) emit("(");
-          go(args[0]!, lp);
-          if (name === ",") parts.push(",");
-          else if (/^\p{L}/u.test(name)) {
-            parts.push(" ");
-            parts.push(atomText(name));
-            parts.push(" ");
-          } else emit(atomText(name));
-          go(args[1]!, rp);
-          if (paren) parts.push(")");
-          return;
-        }
+      const post = ops.postfix.get(name);
+      if (post !== undefined) {
+        const embrace = post.pri > prec;
+        if (embrace) openBrace();
+        go(args[0]!, post.type === "xf" ? post.pri - 1 : post.pri, true);
+        writeAtom(name);
+        if (embrace) put(")");
+        return;
       }
-      if (!opts.ignoreOps && args.length === 1) {
-        const op = ops.prefix.get(name);
-        if (op !== undefined && name !== "-" && name !== "+") {
-          const ap = op.type === "fy" ? op.pri : op.pri - 1;
-          const paren = op.pri > maxPri;
-          if (paren) emit("(");
-          emit(atomText(name));
-          if (/^\p{L}/u.test(name)) parts.push(" ");
-          go(args[0]!, ap);
-          if (paren) parts.push(")");
-          return;
-        }
-        if (op !== undefined) {
-          // - and + before a number print with a space so they do not read back as a signed literal.
-          const a = deref(args[0]!);
-          const paren = op.pri > maxPri;
-          if (paren) emit("(");
-          emit(atomText(name));
-          if (typeof a === "number" || typeof a === "bigint" || a instanceof Float) parts.push(" ");
-          go(a, op.type === "fy" ? op.pri : op.pri - 1);
-          if (paren) parts.push(")");
-          return;
-        }
-      }
-      emit(atomText(name) + "(");
-      args.forEach((a, i) => {
-        if (i > 0) parts.push(",");
-        go(a, 999);
-      });
-      parts.push(")");
     }
+    if (!opts.ignoreOps && args.length === 2) {
+      const inf = ops.infix.get(name);
+      if (inf !== undefined) {
+        const embrace = inf.pri > prec;
+        if (embrace) openBrace();
+        go(args[0]!, inf.type === "xfx" || inf.type === "xfy" ? inf.pri - 1 : inf.pri, true);
+        if (name === ",") put(",");
+        else if (name === "|") put("|");
+        else if (writeAtom(name)) put(" ");
+        infixOp = true;
+        go(args[1]!, inf.type === "xfx" || inf.type === "yfx" ? inf.pri - 1 : inf.pri, true);
+        if (embrace) put(")");
+        return;
+      }
+    }
+    writeAtom(name);
+    put("(");
+    args.forEach((a, i) => {
+      if (i > 0) put(",");
+      go(a, 999, false);
+    });
+    put(")");
   };
-  go(t, 1200);
+  go(t, 1200, false);
   return parts.join("");
+}
+
+/** pl-write.c's punctuation for the space before an opening parenthesis: ( ) , | [ ] { } ! ; and quotes. */
+function isPunct(c: string): boolean {
+  return "(),|[]{}!;%'\"`".includes(c);
+}
+
+// am[implements a-hp-term-io]
+/**
+ * write_canonical/1's variable names (pl-write.c pl_write_canonical2, numbervars with singletons): a variable
+ * that occurs once is _, the others A, B, ... in order of first occurrence.
+ */
+export function canonicalVarNames(t: Term): Map<Var, string> {
+  const count = new Map<Var, number>();
+  const order: Var[] = [];
+  const walk = (x: Term): void => {
+    const d = deref(x);
+    if (d instanceof Var) {
+      const c = count.get(d) ?? 0;
+      if (c === 0) order.push(d);
+      count.set(d, c + 1);
+    } else if (d instanceof Cons) {
+      walk(d.head);
+      walk(d.tail);
+    } else if (d instanceof Struct) for (const a of d.args) walk(a);
+  };
+  walk(t);
+  const names = new Map<Var, string>();
+  let n = 0;
+  for (const v of order) {
+    if (count.get(v) === 1) names.set(v, "_");
+    else {
+      const k = n++;
+      names.set(v, String.fromCharCode(65 + (k % 26)) + (k >= 26 ? Math.floor(k / 26) : ""));
+    }
+  }
+  return names;
 }

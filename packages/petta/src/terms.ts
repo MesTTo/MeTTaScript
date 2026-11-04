@@ -173,7 +173,9 @@ export function textOf(t: Term): string | null {
   if (t instanceof Str) return t.s;
   if (typeof t === "number" || typeof t === "bigint") return String(t);
   if (t instanceof Float) return formatFloat(t.v);
-  if (t === NIL) return "[]";
+  // am[implements a-hp-text-nil]
+  // [] is the empty code list where text may be a list, as SWI reads it (atom_length([], 0)).
+  if (t === NIL) return "";
   if (t instanceof Cons) {
     const items = listToArray(t);
     if (items === null) return null;
