@@ -10,7 +10,7 @@
 // am[implements a-pe-runtime]
 
 import { readSync } from "node:fs";
-import { Clause, Database, Ground, Slot, compileClause } from "./db";
+import { Clause, Database, Ground, Slot, clauseArgHashes, compileClause, groundHash } from "./db";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "./swi-index";
 import { OpTable, PrologSyntaxError } from "./prolog-reader";
 import {
@@ -105,6 +105,23 @@ export interface Builtin {
 type TrailEntry = Var | (() => void);
 const EMPTY: Term[] = [];
 
+/** What one thread of control owns: its goals, choicepoints, trail, pending wakeups and global variables. */
+interface SolverState {
+  goals: Frame | null;
+  cps: CP[];
+  trail: TrailEntry[];
+  trailBoundary: number;
+  curCC: number;
+  wakeups: Term[];
+  globals: Map<string, Term>;
+}
+
+/** A suspended solve (Machine.newFiber, runFiber). */
+export interface Fiber {
+  state: SolverState;
+  solved: boolean;
+}
+
 /**
  * A fresh copy of a stored ground literal, made where the literal enters an activation: SWI builds a clause's
  * terms anew for each call, so nb_setarg/setarg on them never reach the stored clause (ai-tmp/probe/lit.pl:
@@ -184,16 +201,21 @@ function shareHead(h: Term): Term {
 export class Machine {
   readonly db = new Database();
   readonly builtins = new Map<string, Builtin>();
+  /** With PETTA_PROFILE set: calls per predicate key, and clause candidates examined under "#key" (profileReport). */
+  readonly profile: Map<string, number> | null = process.env.PETTA_PROFILE ? new Map() : null;
   /** The file whose clauses a consult is adding now; clauses added meanwhile are static and record it. */
   sourceFile: string | null = null;
   /** Loads the library exporting Name/Arity when an undefined predicate is called; true if it did. */
   autoload: ((name: string, arity: number) => boolean) | null = null;
   /** Predicates the engine's own library defines: assert/retract on them is a permission error. */
   readonly libraryPreds = new Set<string>();
-  readonly globals = new Map<string, Term>();
+  /** Global variables (b_setval/nb_setval): per thread of control, as SWI's are per thread. */
+  globals = new Map<string, Term>();
+  /** flag/3 values, shared by every thread of control as SWI's flags are. */
+  readonly flagValues = new Map<string, Term>();
   readonly flags = new Map<string, Term>();
   private goals: Frame | null = null;
-  private readonly cps: CP[] = [];
+  private cps: CP[] = [];
   private trail: TrailEntry[] = [];
   /** Variables created at or after the newest choicepoint need no trail entry. */
   private trailBoundary = 0;
@@ -541,6 +563,88 @@ export class Machine {
 
   // ---- solving ----
 
+  /** Install a thread of control's solver state and return the one it replaces. */
+  private swapState(s: SolverState): SolverState {
+    const old: SolverState = {
+      goals: this.goals,
+      cps: this.cps,
+      trail: this.trail,
+      trailBoundary: this.trailBoundary,
+      curCC: this.curCC,
+      wakeups: this.wakeups,
+      globals: this.globals,
+    };
+    this.goals = s.goals;
+    this.cps = s.cps;
+    this.trail = s.trail;
+    this.trailBoundary = s.trailBoundary;
+    this.curCC = s.curCC;
+    this.wakeups = s.wakeups;
+    this.globals = s.globals;
+    return old;
+  }
+
+  /** A fiber solving `goal` on its own goal stack, choicepoints, trail and globals, sharing the clause database. */
+  newFiber(goal: Term): Fiber {
+    const saved = this.swapState({ goals: null, cps: [], trail: [], trailBoundary: 0, curCC: -1, wakeups: [], globals: new Map() });
+    try {
+      this.pushCP(K.Barrier, null, 0, -1);
+      this.goals = new Frame(goal, null, 1, -1);
+      return { state: this.swapState(saved), solved: false };
+    } catch (e) {
+      this.swapState(saved);
+      throw e;
+    }
+  }
+
+  /**
+   * Run a fiber for at most `steps` goals: "solution" when its goal is solved (its bindings are in place; the next
+   * run backtracks into it for another), "failed" when it has no more, "suspended" when the slice ran out. An
+   * uncaught error in the fiber propagates to the caller, as an error in a concurrent_and worker does in SWI.
+   * am[implements a-hp-concurrent]
+   */
+  runFiber(fb: Fiber, steps: number): "solution" | "failed" | "suspended" {
+    const saved = this.swapState(fb.state);
+    try {
+      if (fb.solved) {
+        fb.solved = false;
+        if (!this.backtrack(1)) return "failed";
+        if (this.wakeups.length > 0) this.flushWakeups();
+      }
+      let left = steps;
+      for (;;) {
+        try {
+          for (;;) {
+            const f = this.goals;
+            if (f === null) {
+              if (this.wakeups.length === 0) {
+                fb.solved = true;
+                return "solution";
+              }
+              this.flushWakeups();
+              continue;
+            }
+            if (left-- <= 0) return "suspended";
+            this.goals = f.next;
+            if (this.step(f)) {
+              if (this.wakeups.length > 0) this.flushWakeups();
+            } else {
+              this.wakeups.length = 0;
+              if (!this.backtrack(1)) return "failed";
+              if (this.wakeups.length > 0) this.flushWakeups();
+            }
+          }
+        } catch (e0) {
+          const e = e0 instanceof PrologSyntaxError ? new PrologError(mkStruct("error", mkStruct("syntax_error", e0.message), mkVar())) : e0;
+          if (!(e instanceof PrologError)) throw e;
+          if (!this.handleThrow(e, 1)) throw e;
+        }
+      }
+    } finally {
+      fb.state = this.swapState(saved);
+    }
+  }
+
   /** Solve `goal` once; bindings persist on success. Exceptions propagate as PrologError. */
   solveOnce(goal: Term): boolean {
     const savedGoals = this.goals;
@@ -737,13 +841,21 @@ export class Machine {
     const len = cands.length;
     const key = scan.key;
     const keyAt = key === null ? null : scan.keyAt;
+    // On a long scan, ground call arguments are hashed once so a clause whose ground head argument hashes apart is
+    // passed over without a unification. The lookahead below still counts it, so choicepoints stay where SWI's do.
+    const callHashes = len - start > 8 ? groundArgHashes(args) : null;
     for (let i = start; i < len; i++) {
       const c = cands[i]!;
+      if (this.profile !== null) {
+        const pk = "#" + c.pred.name + "/" + c.pred.arity;
+        this.profile.set(pk, (this.profile.get(pk) ?? 0) + 1);
+      }
       if (c.born > gen || c.died <= gen) continue;
       if (keyAt !== null) {
         const k = keyAt(c);
         if (k !== null && k !== key) continue;
       }
+      if (callHashes !== null && hashesDiffer(callHashes, clauseArgHashes(c))) continue;
       let j = i + 1;
       for (let budget = MAX_LOOKAHEAD; j < len; j++) {
         const d = cands[j]!;
@@ -965,7 +1077,8 @@ export class Machine {
       this.goals = new Frame(goal, f.next, this.cps.length, f.cc);
       return true;
     }
-    const key = name + "/" + args.length;
+    const key = predKey(name, args.length);
+    if (this.profile !== null) this.profile.set(key, (this.profile.get(key) ?? 0) + 1);
     const b = this.builtins.get(key);
     if (b !== undefined) {
       if (b.det !== undefined) {
@@ -1132,6 +1245,44 @@ function variantKeyOf(t: Term): string {
     return typeof x + ":" + String(x);
   };
   return go(t);
+}
+
+/** The profile's busiest predicates by calls and by clause candidates examined, as lines for stderr. */
+export function profileReport(m: Machine, top = 40): string {
+  if (m.profile === null) return "";
+  const rows = [...m.profile].sort((a, b) => b[1] - a[1]);
+  const calls = rows.filter(([k]) => !k.startsWith("#")).slice(0, top);
+  const scans = rows.filter(([k]) => k.startsWith("#")).slice(0, top);
+  return ["% calls", ...calls.map(([k, n]) => `${n}\t${k}`), "% clause candidates", ...scans.map(([k, n]) => `${n}\t${k.slice(1)}`)].join("\n") + "\n";
+}
+
+/** "Name/Arity", interned per name and arity, so dispatching a goal builds no string. */
+const predKeys = new Map<string, string[]>();
+export function predKey(name: string, arity: number): string {
+  let byArity = predKeys.get(name);
+  if (byArity === undefined) predKeys.set(name, (byArity = []));
+  return (byArity[arity] ??= name + "/" + arity);
+}
+
+/** groundHash of each call argument, or null when no argument is ground (nothing to compare). */
+function groundArgHashes(args: Term[]): (number | null)[] | null {
+  let any = false;
+  const out = args.map((a) => {
+    const h = groundHash(a);
+    if (h !== null) any = true;
+    return h;
+  });
+  return any ? out : null;
+}
+
+/** Whether some argument is ground on both sides with different hashes, so the head cannot unify. */
+function hashesDiffer(call: (number | null)[], head: (number | null)[]): boolean {
+  for (let k = 0; k < call.length; k++) {
+    const a = call[k];
+    const b = head[k];
+    if (a !== null && a !== undefined && b !== null && b !== undefined && a !== b) return true;
+  }
+  return false;
 }
 
 /** Equality of two dereferenced atomic terms as unification sees it: 1 and 1.0 differ. */

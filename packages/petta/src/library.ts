@@ -4,7 +4,8 @@
 
 // Purpose: the SWI-Prolog predicates that are system predicates or C code in SWI, written here as Prolog
 // clauses with SWI's semantics (memberchk/2, findall/4, bagof/3, setof/3, keysort/2, the sequential
-// concurrent_* forms) plus yall's Params>>Lambda and Free/Lambda calls, which copy the lambda per call (a lambda
+// concurrent_maplist/forall forms), concurrent_and/2,3 over interleaved fibers, and yall's Params>>Lambda and
+// Free/Lambda calls, which copy the lambda per call (a lambda
 // in source code is compiled at load time instead, goal-expansion.ts). SWI's library modules
 // (lists, apply, pairs, aggregate, error, ordsets, heaps, ...) are its own sources, vendored under swipl/library
 // and autoloaded by consult.ts.
@@ -15,13 +16,14 @@ import { readClauses } from "./prolog-reader";
 import { Cons, NIL, Struct, Var, deref, instantiationError, listToArray, mkStruct, typeError, type Term } from "./terms";
 import { collectVars, compareTerms } from "./builtins";
 
+/** Goals a concurrent_and worker runs before the next worker's turn. */
+const SLICE = 2000;
+
 export const LIBRARY_PL = String.raw`
 memberchk(X, L) :- member(X, L), !.
 sumlist(Xs, Sum) :- sum_list(Xs, Sum).
 sumlist(Xs, Ys, S) :- foldl([X,Y,A0,A]>>(A is A0+X*Y), Xs, Ys, 0, S).
 findall(T, G, L, Tail) :- findall(T, G, L0), append(L0, Tail, L).
-concurrent_and(G, T) :- call(G), call(T).
-concurrent_and(G, T, _) :- call(G), call(T).
 concurrent_maplist(G, L) :- maplist(G, L).
 concurrent_maplist(G, L1, L2) :- maplist(G, L1, L2).
 concurrent_forall(C, A) :- forall(C, A).
@@ -77,6 +79,38 @@ export function installLibrary(m: Machine): void {
         const lambda = copyTerm(args[1]!, map);
         m2.pushGoal(n === 0 ? lambda : addCallArgs(lambda, args.slice(2)));
         return true;
+      },
+    });
+  }
+  // concurrent_and(:Generator, :Test[, +Options]) (library(thread)): every solution of Generator starts a worker
+  // solving a copy of Test; workers run interleaved in slices, as SWI's threads run at once, and each solution is
+  // returned as its worker finds it, unified back into Generator-Test. So once/1 around it takes the first worker to
+  // finish (hyperpose_primes' cheap branch among expensive ones), and an error in a worker propagates to the caller.
+  // am[implements a-hp-concurrent]
+  for (const arity of [2, 3]) {
+    m.defBuiltin("concurrent_and", arity, {
+      nondet: function* (m2, [gen, test]) {
+        const both = mkStruct("-", gen!, test!);
+        const pairs: Struct[] = [];
+        m2.solveAll(gen!, () => void pairs.push(copyTerm(both) as Struct));
+        const workers = pairs.map((p) => ({ pair: p, fiber: m2.newFiber(p.args[1]!) }));
+        while (workers.length > 0) {
+          for (let i = 0; i < workers.length; ) {
+            const w = workers[i]!;
+            const r = m2.runFiber(w.fiber, SLICE);
+            if (r === "failed") {
+              workers.splice(i, 1);
+              continue;
+            }
+            if (r === "solution") {
+              const mark = m2.trailMark();
+              if (m2.unify(both, copyTerm(w.pair))) yield;
+              m2.undoTo(mark);
+            }
+            i++;
+          }
+        }
+        return false;
       },
     });
   }

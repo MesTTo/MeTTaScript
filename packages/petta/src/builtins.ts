@@ -1356,9 +1356,9 @@ export function installBuiltins(m: Machine): void {
   def("nb_delete", 1, det((m2, [k]) => (m2.globals.delete(atomArg(k!)), true)));
   def("flag", 3, det((m2, [k, old, nw]) => {
     const key = "$flag:" + writeTerm(k!, { quoted: true });
-    const cur = m2.globals.get(key) ?? 0;
+    const cur = m2.flagValues.get(key) ?? 0;
     if (!m2.unify(old!, cur)) return false;
-    m2.globals.set(key, evalArith(nw!));
+    m2.flagValues.set(key, evalArith(nw!));
     return true;
   }));
   def("set_prolog_flag", 2, det((m2, [k, v]) => (m2.flags.set(atomArg(k!), copyTerm(v!)), true)));

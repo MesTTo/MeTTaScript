@@ -24,25 +24,39 @@ const PINDEX_IMPOSSIBLE = -1;
 const PINDEX_MAYBEDEEP = -2;
 const f32 = Math.fround;
 
-/** An index key: atoms, integers, floats and strings by value, compounds by name/arity (indexOfWord, argKey). */
-type Key = string;
+/**
+ * An index key: an atom is its own string and an integer its own number (Map keys keep the types apart); floats,
+ * strings, [] and compounds get "\u0001"-prefixed strings, a compound's cached per name and arity (indexOfWord,
+ * argKey). Building no string per call keeps clause selection allocation-free on the hot path.
+ */
+type Key = string | number | bigint;
+
+const NIL_KEY = "\u0001n";
+const LIST_KEY = "\u0001c[|]/2";
+const functorKeys = new Map<string, string[]>();
+function functorKey(name: string, arity: number): string {
+  let byArity = functorKeys.get(name);
+  if (byArity === undefined) functorKeys.set(name, (byArity = []));
+  return (byArity[arity] ??= "\u0001c" + name + "/" + arity);
+}
 
 /** The key of a term, null for a variable (pl-index.c indexOfWord on a call argument, pl-comp.c argKey on a stored head). */
 function termKey(t: Term): Key | null {
+  if (typeof t === "string" || typeof t === "number" || typeof t === "bigint") return t;
   if (t instanceof Var || t instanceof Slot) return null;
   if (t instanceof Ground) return termKey(t.t);
-  if (typeof t === "string") return "a" + t;
-  if (typeof t === "number") return "i" + t;
-  if (typeof t === "bigint") return "i" + t.toString();
-  if (t instanceof Float) return "f" + (Object.is(t.v, -0) ? "-0" : String(t.v));
-  if (t instanceof Str) return "s" + t.s;
-  if (t === NIL) return "n";
-  if (t instanceof Cons) return "c[|]/2";
-  if (t instanceof Struct) return "c" + t.name + "/" + t.args.length;
+  if (t instanceof Struct) return functorKey(t.name, t.args.length);
+  if (t instanceof Cons) return LIST_KEY;
+  if (t === NIL) return NIL_KEY;
+  if (t instanceof Float) return "\u0001f" + (Object.is(t.v, -0) ? "-0" : String(t.v));
+  if (t instanceof Str) return "\u0001s" + t.s;
   return null;
 }
 
-const isFunctorKey = (k: Key): boolean => k.charCodeAt(0) === 99;
+const isFunctorKey = (k: Key): boolean => typeof k === "string" && k.charCodeAt(0) === 1 && k.charCodeAt(1) === 99;
+
+/** A key as a string with its type tagged, for ordering assessments and joining the keys of a multi-argument index. */
+const keyString = (k: Key): string => (typeof k === "string" ? (k.charCodeAt(0) === 1 ? k : "a" + k) : "i" + k.toString());
 
 /** The arguments of a stored or live compound: a structure's arguments, a list cell's head and tail. */
 function compoundArgs(t: Term): Term[] | null {
@@ -131,12 +145,23 @@ class ClauseList {
     return this.path.length === 0 ? this.root.pred.clauses : this.ownClauses;
   }
 
-  /** number_of_clauses: the live clauses. */
+  /** Live clauses of a deep bucket, kept as clauses join and die (the predicate's own count is pred.live). */
+  private live = 0;
+
+  /** number_of_clauses: the live clauses. Time: O(1). */
   liveCount(): number {
-    if (this.path.length === 0) return this.root.pred.live;
-    let n = 0;
-    for (const c of this.ownClauses) if (c.died === Infinity) n++;
-    return n;
+    return this.path.length === 0 ? this.root.pred.live : this.live;
+  }
+
+  /** A clause of this list died: deep buckets holding it count one fewer (pl-index.c deleteActiveClauseFromIndex). */
+  died(c: Clause): void {
+    if (this.path.length > 0) this.live--;
+    for (const ci of this.indexes) {
+      if (!ci.realised || !ci.list) continue;
+      const key = this.keyOf(c, ci.args[0]!);
+      const sub = key === null ? ci.varList : ci.lists.get(key);
+      sub?.died(c);
+    }
   }
 
   /** The stored term at argument `a` of this list's argument vector in clause `c`. */
@@ -153,8 +178,12 @@ class ClauseList {
   }
 
   keyOf(c: Clause, a: number): Key | null {
-    let ks = this.keyCache.get(c);
-    if (ks === undefined) this.keyCache.set(c, (ks = new Array(this.arity)));
+    let ks = this.path.length === 0 ? c.topKeys : this.keyCache.get(c);
+    if (ks === undefined || ks === null) {
+      ks = new Array(this.arity);
+      if (this.path.length === 0) c.topKeys = ks;
+      else this.keyCache.set(c, ks);
+    }
     let k = ks[a];
     if (k === undefined) {
       const t = this.argTerm(c, a);
@@ -176,13 +205,19 @@ class ClauseList {
     for (const a of args) {
       const k = this.keyOf(c, a);
       if (k === null) return null;
-      parts.push(k);
+      parts.push(keyString(k));
     }
     return parts.join("\u0000");
   }
 
   forget(c: Clause): void {
     this.keyCache.delete(c);
+  }
+
+  /** One bound key function per argument position, so a call allocates none. */
+  private readonly keyAtFns: ((c: Clause) => Key | null)[] = [];
+  keyAtFn(a: number): (c: Clause) => Key | null {
+    return (this.keyAtFns[a] ??= (c: Clause) => this.keyOf(c, a));
   }
 
   /** pl-index.c update_primary_index: a small static predicate indexes on the first argument whose clause keys differ. */
@@ -249,7 +284,7 @@ class ClauseList {
     for (;;) {
       const pindex = this.primary;
       const pkey = termKey(deref(args[pindex]!));
-      const pkeyAt = (c: Clause): Key | null => this.keyOf(c, pindex);
+      const pkeyAt = this.keyAtFn(pindex);
       let fast: Scan | null = null;
       if (pkey !== null && depth === 0 && n <= MIN_CLAUSES_FOR_INDEX) {
         // The primary key scan, unless its first two candidates both carry exactly the call's key.
@@ -358,6 +393,7 @@ class ClauseList {
   insert(c: Clause, atEnd: boolean): void {
     if (atEnd) this.ownClauses.push(c);
     else this.ownClauses.unshift(c);
+    if (c.died === Infinity) this.live++;
     for (const ci of this.indexes) if (ci.realised) this.addToIndex(ci, c, atEnd);
   }
 
@@ -569,7 +605,7 @@ function matches(k: Key | null, key: Key): boolean {
 }
 
 function functorArity(key: Key): number {
-  return isFunctorKey(key) ? Number(key.slice(key.lastIndexOf("/") + 1)) : 0;
+  return isFunctorKey(key) ? Number((key as string).slice((key as string).lastIndexOf("/") + 1)) : 0;
 }
 
 function canonical(args: number[]): number[] {
@@ -583,11 +619,11 @@ function betterIndex(betterThan: ClauseIndex | null, speedup: number): boolean {
 /** The call's key for an index, null when one of its arguments is unbound. */
 function callIndexKey(ci: ClauseIndex, args: readonly Term[]): Key | null {
   if (ci.args.length === 1) return termKey(deref(args[ci.args[0]!]!));
-  const parts: Key[] = [];
+  const parts: string[] = [];
   for (const a of ci.args) {
     const k = termKey(deref(args[a]!));
     if (k === null) return null;
-    parts.push(k);
+    parts.push(keyString(k));
   }
   return parts.join("\u0000");
 }
@@ -624,7 +660,10 @@ function removeDuplicates(a: Assessment, n: number): boolean {
   a.speedup = 0;
   a.list = false;
   if (a.keys.length === 0 && a.allocated === 0) return false;
-  const sorted = a.keys.map((k, i) => ({ k, i })).sort((x, y) => (x.k.key < y.k.key ? -1 : x.k.key > y.k.key ? 1 : x.i - y.i)).map((x) => x.k);
+  const sorted = a.keys
+    .map((k, i) => ({ k, s: keyString(k.key), i }))
+    .sort((x, y) => (x.s < y.s ? -1 : x.s > y.s ? 1 : x.i - y.i))
+    .map((x) => x.k);
   const out: { key: Key; count: number; nvcomp: number }[] = [];
   let fc = 0;
   let i = 0;
@@ -704,6 +743,7 @@ export class SwiIndex implements ClauseObserver {
   }
 
   removed(c: Clause): void {
+    this.top.died(c);
     this.top.forget(c);
     if (this.staticLike()) {
       this.top = new ClauseList(this, [], this.pred.arity, null);

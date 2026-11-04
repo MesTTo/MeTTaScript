@@ -17,7 +17,7 @@ import { installProcess } from "./process";
 import { installJanus } from "./janus";
 import { consultFile, installConsult, mainGoalOf, markLoaded } from "./consult";
 import { installLibrary } from "./library";
-import { Machine } from "./machine";
+import { Machine, profileReport } from "./machine";
 import { errorMessage } from "./messages";
 import { readClauses } from "./prolog-reader";
 import { Halt, PrologError, Str, Struct, deref, listToArray, mkList, mkStruct, mkVar, NIL, textOf, type Term } from "./terms";
@@ -93,6 +93,14 @@ export class HostedPetta {
    * succeeds, 1 when it fails; an uncaught error is reported on stderr as SWI does and the status is 2.
    */
   run(): number {
+    try {
+      return this.runMain();
+    } finally {
+      if (this.m.profile !== null) this.m.err(profileReport(this.m));
+    }
+  }
+
+  private runMain(): number {
     const g = mainGoalOf(this.m);
     if (g === null) throw new Error(`${this.srcDir}/main.pl declares no initialization(main, main) goal`);
     try {

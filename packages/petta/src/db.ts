@@ -7,7 +7,7 @@
 // a call scans is SWI's own clause selection (swi-index.ts), told of every change through a ClauseObserver.
 // am[implements a-pe-runtime]
 
-import { Cons, NIL, Struct, Var, deref, type Term } from "./terms";
+import { Cons, Float, NIL, Str, Struct, Var, deref, type Term } from "./terms";
 
 /** A clause variable slot in a stored clause; renaming replaces slot i by the call's i-th fresh variable. */
 export class Slot {
@@ -19,6 +19,10 @@ export class Clause {
   died = Infinity;
   /** The file a consult loaded the clause from (clause_property/2 file(F)); null for asserted clauses. */
   file: string | null = null;
+  /** groundHash of each head argument (null where it has a variable), computed on first use. */
+  argHashes: (number | null)[] | null = null;
+  /** The index key of each head argument (swi-index.ts), computed on first use. */
+  topKeys: (string | number | bigint | null | undefined)[] | null = null;
   constructor(
     public readonly pred: Pred,
     public readonly head: Term,
@@ -182,4 +186,48 @@ export function compileClause(head: Term, body: Term): { head: Term; body: Term;
   const h = conv(head);
   const b = conv(body);
   return { head: h, body: b, nvars: map.size };
+}
+
+/**
+ * A 32-bit FNV-1a hash of a ground term's structure, null if it has a variable: equal ground terms hash equally and
+ * unify only if equal, so a differing hash rules a clause out without unifying (1 and 1.0, atoms and strings, [] and
+ * '[]' all hash apart). Stored clause terms are read through Slot (a variable) and Ground holders.
+ * Time: linear in the size of the term.
+ * am[implements a-hp-speed]
+ */
+export function groundHash(t0: Term): number | null {
+  let h = 0x811c9dc5;
+  const mix = (s: string): void => {
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+  };
+  const stack: Term[] = [t0];
+  while (stack.length > 0) {
+    let t = stack.pop()!;
+    if (t instanceof Ground) t = t.t;
+    if (t instanceof Slot) return null;
+    t = deref(t);
+    if (t instanceof Var) return null;
+    if (typeof t === "string") mix("a" + t + "\u0000");
+    else if (typeof t === "number" || typeof t === "bigint") mix("i" + t + "\u0000");
+    else if (t instanceof Float) mix("f" + (Object.is(t.v, -0) ? "-0" : String(t.v)) + "\u0000");
+    else if (t instanceof Str) mix("s" + t.s.length + ":" + t.s);
+    else if (t === NIL) mix("n");
+    else if (t instanceof Cons) {
+      mix("l");
+      stack.push(t.tail, t.head);
+    } else if (t instanceof Struct) {
+      mix("c" + t.name + "/" + t.args.length + "\u0000");
+      for (let i = t.args.length - 1; i >= 0; i--) stack.push(t.args[i]!);
+    } else return null;
+  }
+  return h >>> 0;
+}
+
+/** The hashes of a clause's head arguments (cached on the clause). */
+export function clauseArgHashes(c: Clause): (number | null)[] {
+  if (c.argHashes === null) c.argHashes = c.head instanceof Struct ? c.head.args.map(groundHash) : [];
+  return c.argHashes;
 }
