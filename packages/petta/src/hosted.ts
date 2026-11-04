@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { installBuiltins, formatString } from "./builtins";
 import { installClpfd } from "./clpfd";
 import { installProcess } from "./process";
+import { installJanus } from "./janus";
 import { consultFile, installConsult, mainGoalOf, markLoaded } from "./consult";
 import { installLibrary } from "./library";
 import { Machine } from "./machine";
@@ -81,6 +82,7 @@ export class HostedPetta {
     installConsult(m);
     installClpfd(m);
     installProcess(m);
+    installJanus(m);
     markLoaded(m, join(this.srcDir, "load_cache.pl"));
     for (const c of readClauses(UNCACHED_LOAD_PL)) m.addClause(c, true);
     consultFile(m, join(this.srcDir, "main.pl"));
