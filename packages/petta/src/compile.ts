@@ -683,9 +683,11 @@ export function compileClauseCode(m: Machine, c: Clause, rt: Runtime): Code {
     for (let k = 0; k < c.nvars; k++) if (!hc.set.has(k) && !assigned.has(k)) make += `v[${k}] = V();\n`;
   }
   const RS: Resume[] = [];
+  // The head and body are parenthesized so V8 compiles them along with the factory rather than preparsing them and
+  // parsing them again at their first call: 4% fewer instructions on strict_tuple_types and roman_test.
   const factory = new Function(
     "Frame", "E", "C", "cmp", "EMPTY", "NIL", "throwBall", "K", "RS", "S", "L", "deref", "Var", "V", "atomicEq",
-    `return [function head(m, args, v) {\n${hc.source()}\n${make}return true;\n}, ${fact ? "null" : `function body(m, f, pc) {\n${bc.source()}\n}`}];`,
+    `return [(function head(m, args, v) {\n${hc.source()}\n${make}return true;\n}), ${fact ? "null" : `(function body(m, f, pc) {\n${bc.source()}\n})`}];`,
   ) as (...a: unknown[]) => [HeadFn, BodyFn | null];
   const [headFn, fn] = factory(rt.Frame, rt.E, rt.C, numCompare, [], NIL, (b: Term) => throwBall(b, rt.copy), bc.consts, RS, Struct, Cons, deref, Var, mkVar, rt.atomicEq);
   if (fn !== null) for (let pc = 0; pc < bc.steps.length; pc++) RS.push(new Resume(fn, pc));

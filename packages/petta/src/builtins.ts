@@ -1340,7 +1340,7 @@ export function installBuiltins(m: Machine): void {
     const key = atomArg(k!);
     const old = m2.globals.get(key);
     m2.globals.set(key, v!);
-    m2.trailUndo(() => (old === undefined ? m2.globals.delete(key) : m2.globals.set(key, old)));
+    m2.trailGlobal(key, old);
     return true;
   }));
   const getval = (m2: Machine, k: Term, v: Term): boolean => {

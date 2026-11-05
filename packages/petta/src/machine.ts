@@ -92,7 +92,7 @@ const enum K {
 
 /**
  * A choicepoint. Every kind has one shape, so the stack stays monomorphic, and three untyped fields serve each kind's
- * own data through the named accessors below, so a choicepoint is eleven fields rather than one per role.
+ * own data through the named accessors below, rather than a field per role.
  * am[implements a-petta-speed-1105.goal]
  */
 class CP {
@@ -105,6 +105,8 @@ class CP {
   gen = 0;
   /** Trail entries below this index, above trailTop, were already tidied against this choicepoint (tidyTrail). */
   tidied = 0;
+  /** The push order of this choicepoint among all pushed (Machine.cpSerial), which a retry keeps. */
+  serial = 0;
   constructor(
     public readonly kind: K,
     public readonly trailTop: number,
@@ -165,7 +167,33 @@ export interface Builtin {
   readonly detMode?: (m: Machine, args: Term[]) => boolean | null;
 }
 
-type TrailEntry = Var | (() => void);
+/**
+ * A trail entry restoring an older variable's attributes (Machine.putAttr). Unlike an undo closure it names its
+ * variable, so tidying drops it once the variable is newer than every choicepoint left.
+ * am[implements a-petta-speed-1105.memory.trail-values]
+ */
+class AttrUndo {
+  constructor(
+    readonly v: Var,
+    readonly old: Map<string, Term> | null,
+  ) {}
+}
+
+/**
+ * A trail entry restoring a b_setval global variable's value (Machine.trailGlobal), recorded for the first assignment
+ * to its key after the choicepoints pushed up to serial `serial`; `live` until backtracking runs it.
+ * am[implements a-petta-speed-1105.memory.trail-values]
+ */
+class GlobalUndo {
+  live = true;
+  constructor(
+    readonly key: string,
+    readonly old: Term | undefined,
+    readonly serial: number,
+  ) {}
+}
+
+type TrailEntry = Var | AttrUndo | GlobalUndo | (() => void);
 const EMPTY: Term[] = [];
 const EMPTY_POS: number[] = [];
 
@@ -198,6 +226,7 @@ interface SolverState {
   curCC: number;
   wakeups: Term[];
   globals: Map<string, Term>;
+  globalUndos: Map<string, GlobalUndo>;
 }
 
 /** A suspended solve (Machine.newFiber, runFiber). */
@@ -300,6 +329,8 @@ export class Machine {
   readonly libraryPreds = new Set<string>();
   /** Global variables (b_setval/nb_setval): per thread of control, as SWI's are per thread. */
   globals = new Map<string, Term>();
+  /** Each global variable's newest b_setval trail entry (trailGlobal). */
+  private globalUndos = new Map<string, GlobalUndo>();
   /** flag/3 values, shared by every thread of control as SWI's flags are. */
   readonly flagValues = new Map<string, Term>();
   readonly flags = new Map<string, Term>();
@@ -406,8 +437,38 @@ export class Machine {
     while (tr.length > mark) {
       const e = tr.pop()!;
       if (e instanceof Var) e.ref = null;
-      else e();
+      else if (e instanceof AttrUndo) e.v.attrs = e.old;
+      else if (e instanceof GlobalUndo) {
+        e.live = false;
+        if (e.old === undefined) this.globals.delete(e.key);
+        else this.globals.set(e.key, e.old);
+      } else e();
     }
+    // A tidy's record of the region above the top choicepoint holds only while that region stands (tidyTrail).
+    // am[implements a-petta-speed-1105.memory.trail-values]
+    const top = this.cps[this.cps.length - 1];
+    if (top !== undefined && top.tidied > mark) {
+      top.tidied = top.trailTop;
+      this.tidySeen.delete(top);
+    }
+  }
+
+  /**
+   * Trail a b_setval of global `key`, whose value was `old`: backtracking to a choicepoint restores the value the key
+   * had when the choicepoint was made, which the undo of the first assignment after it restores, so a later
+   * assignment needs none while an undo recorded since the newest choicepoint was pushed is still on the trail; with
+   * no choicepoint nothing is restored at all. A trail of every assignment held every value ever set: he_minimalmetta
+   * kept 148 thousand under short-lived choicepoints.
+   * am[implements a-petta-speed-1105.memory.trail-values]
+   */
+  trailGlobal(key: string, old: Term | undefined): void {
+    const top = this.cps[this.cps.length - 1];
+    if (top === undefined) return;
+    const last = this.globalUndos.get(key);
+    if (last !== undefined && last.live && last.serial >= top.serial) return;
+    const e = new GlobalUndo(key, old, this.cpSerial);
+    this.trail.push(e);
+    this.globalUndos.set(key, e);
   }
 
   /**
@@ -427,23 +488,48 @@ export class Machine {
     // a tidy keeps (undo actions, older variables) are otherwise rescanned by every later cut.
     const from = Math.max(top.trailTop, Math.min(top.tidied, tr.length));
     const mark = top.varMark;
+    // Of the b_setval undos above the top choicepoint only each key's first is needed, and of the attribute undos
+    // only each variable's first: it restores what every choicepoint at or below the top saw. `seen` holds what the
+    // region tidied before kept.
+    // am[implements a-petta-speed-1105.memory.trail-values]
+    let seen = this.tidySeen.get(top);
     let w = from;
     for (let r = from; r < tr.length; r++) {
       const e = tr[r]!;
       if (e instanceof Var && e.id >= mark) continue;
+      if (e instanceof AttrUndo) {
+        if (e.v.id >= mark) continue;
+        if (seen === undefined) this.tidySeen.set(top, (seen = { keys: new Map(), vars: new Set() }));
+        if (seen.vars.has(e.v)) continue;
+        seen.vars.add(e.v);
+      } else if (e instanceof GlobalUndo) {
+        if (seen === undefined) this.tidySeen.set(top, (seen = { keys: new Map(), vars: new Set() }));
+        const first = seen.keys.get(e.key);
+        if (first !== undefined) {
+          // trailGlobal's test now rests on the first undo, which stays on the trail.
+          if (this.globalUndos.get(e.key) === e) this.globalUndos.set(e.key, first);
+          continue;
+        }
+        seen.keys.set(e.key, e);
+      }
       tr[w++] = e;
     }
     while (tr.length > w) tr.pop();
     top.tidied = w;
   }
+  /** Per choicepoint, the b_setval undos by key and the variables with an attribute undo its tidied region keeps. */
+  private readonly tidySeen = new WeakMap<CP, { keys: Map<string, GlobalUndo>; vars: Set<Var> }>();
 
   private pushCP(kind: K, next: Frame | null, cb: number, cc: number): CP {
     const vm = varCount();
     const cp = new CP(kind, this.trail.length, vm, next, cb, cc);
+    cp.serial = ++this.cpSerial;
     this.cps.push(cp);
     this.trailBoundary = vm;
     return cp;
   }
+  /** Choicepoints pushed so far (CP.serial). */
+  private cpSerial = 0;
 
   cutTo(h: number): void {
     if (this.cps.length > h) {
@@ -517,19 +603,32 @@ export class Machine {
   /** put_attr/3: backtrackable. */
   putAttr(v: Var, mod: string, val: Term): void {
     const old = v.attrs;
+    // A variable newer than the newest choicepoint is unreachable from any state backtracking returns to, so its
+    // attributes change in place with nothing to restore, as bind leaves such a variable off the trail.
+    // am[implements a-petta-speed-1105.memory.trail-values]
+    if (v.id >= this.trailBoundary) {
+      if (old === null) v.attrs = new Map([[mod, val]]);
+      else old.set(mod, val);
+      return;
+    }
     const next = new Map(old ?? []);
     next.set(mod, val);
     v.attrs = next;
-    this.trail.push(() => (v.attrs = old));
+    this.trail.push(new AttrUndo(v, old));
   }
 
   delAttr(v: Var, mod: string): void {
     const old = v.attrs;
     if (old === null || !old.has(mod)) return;
+    if (v.id >= this.trailBoundary) {
+      old.delete(mod);
+      if (old.size === 0) v.attrs = null;
+      return;
+    }
     const next = new Map(old);
     next.delete(mod);
     v.attrs = next.size > 0 ? next : null;
-    this.trail.push(() => (v.attrs = old));
+    this.trail.push(new AttrUndo(v, old));
   }
 
   /** Run the hooks woken since the last goal before the continuation. */
@@ -896,6 +995,7 @@ export class Machine {
       curCC: this.curCC,
       wakeups: this.wakeups,
       globals: this.globals,
+      globalUndos: this.globalUndos,
     };
     this.goals = s.goals;
     this.cps = s.cps;
@@ -904,12 +1004,13 @@ export class Machine {
     this.curCC = s.curCC;
     this.wakeups = s.wakeups;
     this.globals = s.globals;
+    this.globalUndos = s.globalUndos;
     return old;
   }
 
   /** A fiber solving `goal` on its own goal stack, choicepoints, trail and globals, sharing the clause database. */
   newFiber(goal: Term): Fiber {
-    const saved = this.swapState({ goals: null, cps: [], trail: [], trailBoundary: 0, curCC: -1, wakeups: [], globals: new Map() });
+    const saved = this.swapState({ goals: null, cps: [], trail: [], trailBoundary: 0, curCC: -1, wakeups: [], globals: new Map(), globalUndos: new Map() });
     try {
       this.pushCP(K.Barrier, null, 0, -1);
       this.goals = new Frame(goal, null, 1, -1);
