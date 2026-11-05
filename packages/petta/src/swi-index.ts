@@ -101,14 +101,21 @@ interface Assessment {
   functCount: number;
 }
 
-/** A clause index (pl-index.c clause_index): unrealised until a call uses it. */
+/**
+ * A clause index (pl-index.c clause_index): unrealised until a call uses it. `size` counts what SWI's does (keyed
+ * clauses of a hash index, distinct keys of a list index); a dynamic predicate's index goes once it would grow past
+ * twice its filled size or the predicate shrinks below a quarter of it, and a later call builds a new one from a
+ * fresh assessment (pl-index.c addClauseToListIndexes, deleteActiveClauseFromIndexes).
+ */
 class ClauseIndex {
   realised = false;
   good = false;
   buckets = new Map<Key, Clause[]>();
   varClauses: Clause[] = [];
   lists = new Map<Key, ClauseList>();
-  varList: ClauseList | null = null;
+  size = 0;
+  resizeAbove = 0;
+  resizeBelow = 0;
   constructor(
     readonly args: number[],
     readonly list: boolean,
@@ -159,8 +166,7 @@ class ClauseList {
     for (const ci of this.indexes) {
       if (!ci.realised || !ci.list) continue;
       const key = this.keyOf(c, ci.args[0]!);
-      const sub = key === null ? ci.varList : ci.lists.get(key);
-      sub?.died(c);
+      if (key !== null) ci.lists.get(key)?.died(c);
     }
   }
 
@@ -342,35 +348,54 @@ class ClauseList {
       }
       return { list: sub.clauses, start: 0, key: null, keyAt: null };
     }
-    if (ci.varList !== null) return { list: ci.varList.clauses, start: 0, key: null, keyAt: null };
     return NO_CLAUSES;
   }
 
-  /** pl-index.c fill_clause_index: put every live clause in its bucket, in clause order. */
-  private realise(ci: ClauseIndex): void {
+  /**
+   * pl-index.c fill_clause_index: put every live clause in its bucket, in clause order, and set the sizes it is
+   * resized at; false, with the index gone, when a clause cannot enter it.
+   * am[implements a-petta-speed-1105.outliers.spaces]
+   */
+  private realise(ci: ClauseIndex): boolean {
     ci.buckets = new Map();
     ci.varClauses = [];
     ci.lists = new Map();
-    ci.varList = null;
-    for (const c of this.clauses) if (c.died === Infinity) this.addToIndex(ci, c, true);
+    ci.size = 0;
+    for (const c of this.clauses)
+      if (c.died === Infinity && !this.addToIndex(ci, c, true)) {
+        this.dropIndex(ci);
+        return false;
+      }
     ci.realised = true;
+    ci.resizeAbove = ci.size * 2;
+    ci.resizeBelow = Math.floor(ci.size / 4);
     ci.good = !this.considerBetterIndex(ci.speedup, this.liveCount());
+    return true;
   }
 
-  /** pl-index.c addClauseToIndex: a clause with a variable there goes to every bucket. */
-  addToIndex(ci: ClauseIndex, c: Clause, atEnd: boolean): void {
+  /** pl-index.c deleteIndexP and replaceIndex: the index is gone and its arguments' assessments with it, so a later call assesses them anew. */
+  private dropIndex(ci: ClauseIndex): void {
+    this.indexes = this.indexes.filter((x) => x !== ci);
+    for (const a of ci.args) this.argInfo[a]!.assessed = false;
+  }
+
+  /**
+   * pl-index.c addClauseToIndex and addClauseBucket: a clause with a variable there goes to every bucket of a hash
+   * index, and cannot enter a list index (false); `size` grows by one per keyed clause of a hash index and per new
+   * key of a list index.
+   */
+  addToIndex(ci: ClauseIndex, c: Clause, atEnd: boolean): boolean {
     if (ci.list) {
       const a = ci.args[0]!;
       const key = this.keyOf(c, a);
-      let sub: ClauseList;
-      if (key === null) sub = ci.varList ??= new ClauseList(this.root, [...this.path, a], 0, []);
-      else {
-        let s = ci.lists.get(key);
-        if (s === undefined) ci.lists.set(key, (s = new ClauseList(this.root, [...this.path, a], functorArity(key), [])));
-        sub = s;
+      if (key === null) return false;
+      let sub = ci.lists.get(key);
+      if (sub === undefined) {
+        ci.lists.set(key, (sub = new ClauseList(this.root, [...this.path, a], functorArity(key), [])));
+        ci.size++;
       }
       sub.insert(c, atEnd);
-      return;
+      return true;
     }
     const key = this.indexKeyOf(c, ci.args);
     if (key === null) {
@@ -386,7 +411,9 @@ class ClauseList {
       if (b === undefined) ci.buckets.set(key, (b = ci.varClauses.slice()));
       if (atEnd) b.push(c);
       else b.unshift(c);
+      ci.size++;
     }
+    return true;
   }
 
   /** A clause added to this deep bucket: its own realised indexes follow, and its assessments are redone. */
@@ -394,12 +421,20 @@ class ClauseList {
     if (atEnd) this.ownClauses.push(c);
     else this.ownClauses.unshift(c);
     if (c.died === Infinity) this.live++;
-    for (const ci of this.indexes) if (ci.realised) this.addToIndex(ci, c, atEnd);
+    this.added(c, atEnd);
   }
 
-  /** Every realised index takes a new clause (pl-index.c addClauseToIndexes). */
+  /** Every realised index takes a new clause, or goes when it has doubled or cannot take it (pl-index.c addClauseToListIndexes). */
   added(c: Clause, atEnd: boolean): void {
-    for (const ci of this.indexes) if (ci.realised) this.addToIndex(ci, c, atEnd);
+    for (const ci of this.indexes) {
+      if (!ci.realised) continue;
+      if (ci.size >= ci.resizeAbove || !this.addToIndex(ci, c, atEnd)) this.dropIndex(ci);
+    }
+  }
+
+  /** A dynamic predicate lost a clause: an index of more than four times its live clauses goes (deleteActiveClauseFromIndexes). */
+  shrunk(live: number): void {
+    for (const ci of this.indexes) if (ci.realised && live < ci.resizeBelow) this.dropIndex(ci);
   }
 
   dropRealised(): void {
@@ -474,7 +509,7 @@ class ClauseList {
       ci = new ClauseIndex(hint.args, hint.list, hint.speedup);
       this.indexes.push(ci);
     }
-    if (!ci.realised) this.realise(ci);
+    if (!ci.realised && !this.realise(ci)) return null;
     return ci;
   }
 
@@ -749,6 +784,7 @@ export class SwiIndex implements ClauseObserver {
       this.top = new ClauseList(this, [], this.pred.arity, null);
       return;
     }
+    this.top.shrunk(this.pred.live);
     const nc = this.pred.live;
     if (!this.shrunkPow2 && nc > 0 && (nc & (nc - 1)) === 0) this.shrunkPow2 = true;
   }
