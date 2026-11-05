@@ -201,6 +201,9 @@ function shareHead(h: Term): Term {
 export class Machine {
   readonly db = new Database();
   readonly builtins = new Map<string, Builtin>();
+  /** The arities of each builtin name in the order their keys entered `builtins`, kept with it by defBuiltin and addClause. */
+  // am[implements a-petta-speed-1105.scans]
+  readonly builtinArities = new Map<string, number[]>();
   /** With PETTA_PROFILE set: calls per predicate key, and clause candidates examined under "#key" (profileReport). */
   readonly profile: Map<string, number> | null = process.env.PETTA_PROFILE ? new Map() : null;
   /** The file whose clauses a consult is adding now; clauses added meanwhile are static and record it. */
@@ -513,7 +516,11 @@ export class Machine {
     const key = name + "/" + arity;
     // SWI protects ISO and boot-defined predicates; a user definition of any other builtin (plus/3, succ/2)
     // replaces it in the user module.
-    if (this.builtins.has(key) && !PROTECTED.has(key)) this.builtins.delete(key);
+    if (this.builtins.has(key) && !PROTECTED.has(key)) {
+      this.builtins.delete(key);
+      const ar = this.builtinArities.get(name)!;
+      ar.splice(ar.indexOf(arity), 1);
+    }
     if (this.builtins.has(key) || this.libraryPreds.has(key))
       throw new PrologError(
         mkStruct("error", mkStruct("permission_error", "modify", "static_procedure", mkStruct("/", name, arity)), mkVar()),
@@ -558,7 +565,13 @@ export class Machine {
   }
 
   defBuiltin(name: string, arity: number, b: Builtin): void {
-    this.builtins.set(name + "/" + arity, b);
+    const key = name + "/" + arity;
+    if (!this.builtins.has(key)) {
+      const ar = this.builtinArities.get(name);
+      if (ar === undefined) this.builtinArities.set(name, [arity]);
+      else ar.push(arity);
+    }
+    this.builtins.set(key, b);
   }
 
   // ---- solving ----

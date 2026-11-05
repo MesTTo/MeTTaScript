@@ -89,6 +89,9 @@ interface TxLog {
 
 export class Database {
   readonly preds = new Map<string, Pred>();
+  /** The predicates of each name in creation order, so a name's arities are found without scanning every predicate. */
+  // am[implements a-petta-speed-1105.scans]
+  readonly byName = new Map<string, Pred[]>();
   generation = 0;
   private seq = 0;
   private readonly tx: TxLog[] = [];
@@ -134,6 +137,9 @@ export class Database {
     if (p === undefined) {
       p = new Pred(name, arity);
       this.preds.set(key, p);
+      const same = this.byName.get(name);
+      if (same === undefined) this.byName.set(name, [p]);
+      else same.push(p);
     }
     return p;
   }

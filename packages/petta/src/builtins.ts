@@ -1263,6 +1263,25 @@ export function installBuiltins(m: Machine): void {
       const p = m2.db.get(nd, ad);
       return (p !== undefined && (p.live > 0 || p.dynamic)) || m2.libraryPreds.has(nd + "/" + ad) || m2.builtins.has(nd + "/" + ad);
     }
+    // A bound name: its arities in the order the enumeration below meets them (user predicates, builtins, library),
+    // found through the per-name tables instead of every predicate's key. Time: the name's arities.
+    // am[implements a-petta-speed-1105.scans]
+    if (typeof nd === "string") {
+      const arities: number[] = [];
+      for (const p of m2.db.byName.get(nd) ?? []) if (p.live > 0 || p.dynamic) arities.push(p.arity);
+      for (const a of m2.builtinArities.get(nd) ?? []) if (!arities.includes(a)) arities.push(a);
+      for (const k of m2.libraryPreds) {
+        const i = k.lastIndexOf("/");
+        const a = Number(k.slice(i + 1));
+        if (k.slice(0, i) === nd && !arities.includes(a)) arities.push(a);
+      }
+      for (const a of arities) {
+        const mark = m2.trailMark();
+        if (m2.unify(arT, a)) yield;
+        m2.undoTo(mark);
+      }
+      return;
+    }
     // An enumeration leaves a choicepoint after its last solution, as SWI's does.
     const keys = new Set<string>();
     for (const p of m2.db.preds.values()) if (p.live > 0 || p.dynamic) keys.add(p.name + "/" + p.arity);
@@ -1313,9 +1332,15 @@ export function installBuiltins(m: Machine): void {
     const nd = deref(n!);
     const td = deref(t!);
     const defs: [string, string, number][] = [];
-    for (const map of [m2.ops.infix, m2.ops.prefix, m2.ops.postfix])
-      for (const [name, def2] of map)
-        if ((typeof nd !== "string" || nd === name) && (typeof td !== "string" || td === def2.type)) defs.push([name, def2.type, def2.pri]);
+    // am[implements a-petta-speed-1105.scans]
+    for (const map of [m2.ops.infix, m2.ops.prefix, m2.ops.postfix]) {
+      if (typeof nd === "string") {
+        const def2 = map.get(nd);
+        if (def2 !== undefined && (typeof td !== "string" || td === def2.type)) defs.push([nd, def2.type, def2.pri]);
+        continue;
+      }
+      for (const [name, def2] of map) if (typeof td !== "string" || td === def2.type) defs.push([name, def2.type, def2.pri]);
+    }
     return yield* eachCandidate(m2, defs, ([name, type, pri]) => m2.unify(n!, name) && m2.unify(t!, type) && m2.unify(p!, pri));
   }));
   def("op", 3, det((m2, [p, t, n]) => {
