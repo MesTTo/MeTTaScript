@@ -12,7 +12,7 @@
 import { readSync } from "node:fs";
 import { evalArith } from "./arith";
 import { Resume, compileClauseCode, type Runtime } from "./compile";
-import { Clause, Database, Ground, Pred, Slot, argHashIndex, clauseArgHashes, compileClause, groundHash } from "./db";
+import { Clause, Database, Ground, Pred, Slot, argHashIndex, clauseArgHash, compileClause, groundHash } from "./db";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "./swi-index";
 import { OpTable, PrologSyntaxError } from "./prolog-reader";
 import {
@@ -1320,7 +1320,8 @@ export class Machine {
         const hp = callHashes[p];
         if (hp === null || hp === undefined) continue;
         const ix = argHashIndex(cands, p);
-        const a = ix.byHash.get(hp) ?? EMPTY_POS;
+        const b = ix.byHash.get(hp);
+        const a = b === undefined ? EMPTY_POS : typeof b === "number" ? [b] : b;
         const n = a.length + ix.open.length;
         if (n < best) {
           best = n;
@@ -1352,7 +1353,7 @@ export class Machine {
         const k = keyAt(c);
         if (k !== null && k !== key) continue;
       }
-      if (callHashes !== null && hashesDiffer(callHashes, clauseArgHashes(c))) continue;
+      if (callHashes !== null && hashesDiffer(callHashes, c)) continue;
       let j = i + 1;
       for (let budget = MAX_LOOKAHEAD; j < len; j++) {
         const d = cands[j]!;
@@ -1796,11 +1797,12 @@ function groundArgHashes(args: Term[]): (number | null)[] | null {
 }
 
 /** Whether some argument is ground on both sides with different hashes, so the head cannot unify. */
-function hashesDiffer(call: (number | null)[], head: (number | null)[]): boolean {
+function hashesDiffer(call: (number | null)[], c: Clause): boolean {
   for (let k = 0; k < call.length; k++) {
     const a = call[k];
-    const b = head[k];
-    if (a !== null && a !== undefined && b !== null && b !== undefined && a !== b) return true;
+    if (a === null || a === undefined) continue;
+    const b = clauseArgHash(c, k);
+    if (b !== null && a !== b) return true;
   }
   return false;
 }

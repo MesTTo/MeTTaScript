@@ -20,10 +20,14 @@ export class Clause {
   died = Infinity;
   /** The file a consult loaded the clause from (clause_property/2 file(F)); null for asserted clauses. */
   file: string | null = null;
-  /** groundHash of each head argument (null where it has a variable), computed on first use. */
-  argHashes: (number | null)[] | null = null;
-  /** The index key of each head argument (swi-index.ts), computed on first use. */
-  topKeys: (string | number | bigint | null | undefined)[] | null = null;
+  /**
+   * groundHash of each head argument (null where it has a variable), computed on first use (clauseArgHash); a head of
+   * one argument holds its hash directly, so a predicate of a million one-argument facts keeps no array per clause.
+   * am[implements a-petta-speed-1105.memory.per-clause]
+   */
+  argHashes: (number | null)[] | number | null | undefined = undefined;
+  /** The index key of the first head argument (swi-index.ts ClauseList.keyOf), computed on first use. */
+  key0: string | number | bigint | null | undefined = undefined;
   /** The compiled body (compile.ts), made once the clause has been entered COMPILE_AFTER times; null until then. */
   // am[implements a-petta-speed-1105.goal]
   code: Code | null = null;
@@ -251,9 +255,15 @@ export function groundHash(t0: Term): number | null {
 }
 
 /** The hashes of a clause's head arguments (cached on the clause). */
-export function clauseArgHashes(c: Clause): (number | null)[] {
-  if (c.argHashes === null) c.argHashes = c.head instanceof Struct ? c.head.args.map(groundHash) : [];
-  return c.argHashes;
+/** groundHash of head argument `i` of `c`, null where it has a variable. */
+export function clauseArgHash(c: Clause, i: number): number | null {
+  let h = c.argHashes;
+  if (h === undefined) {
+    const args = c.head instanceof Struct ? c.head.args : [];
+    h = c.argHashes = args.length === 1 ? groundHash(args[0]!) : args.map(groundHash);
+  }
+  if (typeof h === "number" || h === null) return i === 0 ? h : null;
+  return h[i] ?? null;
 }
 
 /**
@@ -265,7 +275,9 @@ export function clauseArgHashes(c: Clause): (number | null)[] {
  * am[implements a-petta-speed-1105.outliers.spaces]
  */
 export class ArgHashIndex {
-  readonly byHash = new Map<number, number[]>();
+  /** Positions by hash; a hash at one position holds that position as a number (most hashes, in a space of distinct atoms). */
+  // am[implements a-petta-speed-1105.memory.per-clause]
+  readonly byHash = new Map<number, number | number[]>();
   readonly open: number[] = [];
   indexed = 0;
   constructor(readonly first: Clause | undefined) {}
@@ -280,11 +292,12 @@ export function argHashIndex(list: readonly Clause[], arg: number): ArgHashIndex
   let ix = per[arg];
   if (ix === undefined || ix.first !== list[0]) per[arg] = ix = new ArgHashIndex(list[0]);
   for (let i = ix.indexed; i < list.length; i++) {
-    const h = clauseArgHashes(list[i]!)[arg];
+    const h = clauseArgHash(list[i]!, arg);
     if (h === null || h === undefined) ix.open.push(i);
     else {
       const b = ix.byHash.get(h);
-      if (b === undefined) ix.byHash.set(h, [i]);
+      if (b === undefined) ix.byHash.set(h, i);
+      else if (typeof b === "number") ix.byHash.set(h, [b, i]);
       else b.push(i);
     }
   }

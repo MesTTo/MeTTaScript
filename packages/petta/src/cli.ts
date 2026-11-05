@@ -41,10 +41,14 @@ async function run(args: string[]): Promise<number> {
 }
 
 if (isMainThread) {
-  // Stack and heap limits for the engine thread: deep MeTTa terms recurse in printing, copying and comparing.
+  // Stack and heap limits for the engine thread: deep MeTTa terms recurse in printing, copying and comparing. The young
+  // generation is capped at V8's size for an 8 MB semi-space, half its default: small runs peak about 25 MB lower
+  // (fib 190 to 164 MB, hyperpose_primes 203 to 178 MB) at no measured cost in time, where a 4 MB one cost roman_test
+  // 42% (c-young-gen-cap).
+  // am[implements a-petta-speed-1105.memory.young-gen]
   const worker = new Worker(new URL(import.meta.url), {
     workerData: process.argv.slice(2),
-    resourceLimits: { stackSizeMb: 1024, maxOldGenerationSizeMb: 16384 },
+    resourceLimits: { stackSizeMb: 1024, maxOldGenerationSizeMb: 16384, maxYoungGenerationSizeMb: 24 },
   });
   worker.on("message", (status: number) => {
     process.exitCode = status;

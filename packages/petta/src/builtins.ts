@@ -103,16 +103,27 @@ export function compareTerms(a: Term, b: Term): number {
   }
 }
 
+/**
+ * Compare by code point, as SWI compares atom text, returning a number of that sign. UTF-16 units order as code
+ * points do except where a surrogate meets a unit from U+E000 up, so only a first difference at a surrogate reads
+ * the code points; a string that is a prefix of the other in units is shorter in code points too. Allocates nothing,
+ * where spreading both strings into arrays allocated a string per character (2.6% of strict_tuple_types).
+ * am[implements a-petta-speed-1105.goal]
+ */
 function cmpStr(x: string, y: string): number {
-  // Compare by code point, as SWI compares atom text.
-  const ax = [...x];
-  const ay = [...y];
-  const n = Math.min(ax.length, ay.length);
-  for (let i = 0; i < n; i++) {
-    const d = ax[i]!.codePointAt(0)! - ay[i]!.codePointAt(0)!;
-    if (d !== 0) return d;
-  }
-  return ax.length - ay.length;
+  if (x === y) return 0;
+  const n = Math.min(x.length, y.length);
+  let i = 0;
+  while (i < n && x.charCodeAt(i) === y.charCodeAt(i)) i++;
+  if (i === n) return x.length - y.length;
+  const a = x.charCodeAt(i);
+  const b = y.charCodeAt(i);
+  if ((a & 0xf800) !== 0xd800 && (b & 0xf800) !== 0xd800) return a - b;
+  // At a surrogate, compare whole code points from where the one holding unit i starts: one unit back when the
+  // shared unit before is a high surrogate that a low one at i pairs with in either string.
+  const low = (c: number): boolean => (c & 0xfc00) === 0xdc00;
+  const j = i > 0 && (x.charCodeAt(i - 1) & 0xfc00) === 0xd800 && (low(a) || low(b)) ? i - 1 : i;
+  return x.codePointAt(j)! - y.codePointAt(j)!;
 }
 
 /** Structural equality (==/2). */
@@ -1722,77 +1733,43 @@ export function installBuiltins(m: Machine): void {
 
 // ---- helpers used by the table ----
 
+const walkStack: Term[] = [];
 /**
- * Compounds setarg/nb_setarg changed in place. A compound is otherwise never changed after it is built, and refers
- * only to terms that existed before it (a list built cell by cell links each cell to a newer one, in a chain), so a
- * cycle can close only through a bound variable or one of these.
- */
-const mutatedCompounds = new WeakSet<object>();
-let anyMutated = false;
-
-const EXIT = {};
-/**
- * Whether a term is a rational tree: some compound contains itself. An iterative DFS that keeps on its path only the
- * bound variables and changed compounds it passes (mutatedCompounds), each explored once, so a fresh tree costs one
- * visit per node and no set operation. Time: the term's size.
+ * Whether a term is a rational tree: some compound contains itself. A walk that follows bindings and tracks nothing
+ * ends within its budget on any finite term whose shared parts it does not revisit too often, and on a cyclic term
+ * it never ends, so a walk past the budget hands the term to isCyclicTracked, which decides exactly. A sound answer
+ * needs no set, map or allocation per call on the acyclic terms PeTTa checks (permutations spent 11% in the sets).
+ * Time: the term's size; for a cyclic or heavily shared term, a million visits plus the tracked walk.
  * am[implements a-petta-speed-1105.outliers.spaces]
  */
 export function isCyclic(t: Term): boolean {
-  let onPath: Set<object> | null = null;
-  let done: Set<object> | null = null;
-  const stack: unknown[] = [t];
-  // Untracked compounds shared many times over are walked once per path to them; past a million visits the
-  // walk starts over tracking every compound, which is linear in the distinct ones.
+  const stack = walkStack;
+  stack.push(t);
   let budget = 1 << 20;
-  // Enter a tracked node: false when it is already explored; throws Cyclic when it is on the path.
-  const enter = (x: object): boolean => {
-    onPath ??= new Set();
-    done ??= new Set();
-    if (onPath.has(x)) throw CYCLIC;
-    if (done.has(x)) return false;
-    onPath.add(x);
-    stack.push(x, EXIT);
-    return true;
-  };
-  try {
-    while (stack.length > 0) {
-      let x = stack.pop();
-      if (x === EXIT) {
-        const n = stack.pop() as object;
-        onPath!.delete(n);
-        done!.add(n);
+  while (stack.length > 0) {
+    let x = stack.pop()!;
+    for (;;) {
+      while (x instanceof Var && x.ref !== null) x = x.ref;
+      if (--budget === 0) {
+        while (stack.length > 0) stack.pop();
+        return isCyclicTracked(t);
+      }
+      if (x instanceof Cons) {
+        stack.push(x.head);
+        x = x.tail;
         continue;
       }
-      for (;;) {
-        while (x instanceof Var && x.ref !== null) {
-          if (!enter(x)) {
-            x = null;
-            break;
-          }
-          x = x.ref;
-        }
-        if (x instanceof Cons) {
-          if (--budget === 0) return isCyclicTracked(t);
-          if (anyMutated && mutatedCompounds.has(x) && !enter(x)) break;
-          stack.push(x.head);
-          x = x.tail;
-          continue;
-        }
-        if (x instanceof Struct) {
-          if (--budget === 0) return isCyclicTracked(t);
-          if (anyMutated && mutatedCompounds.has(x) && !enter(x)) break;
-          for (let i = x.args.length - 1; i >= 0; i--) stack.push(x.args[i]!);
-        }
-        break;
+      if (x instanceof Struct && x.args.length > 0) {
+        const a = x.args;
+        for (let i = a.length - 1; i > 0; i--) stack.push(a[i]!);
+        x = a[0]!;
+        continue;
       }
+      break;
     }
-  } catch (e) {
-    if (e === CYCLIC) return true;
-    throw e;
   }
   return false;
 }
-const CYCLIC = {};
 
 /** isCyclic tracking every compound on the path and every one explored: linear in the distinct compounds. */
 function isCyclicTracked(t: Term): boolean {
@@ -1856,10 +1833,6 @@ export function collectVars(t: Term): Var[] {
 function setArg(m: Machine, n: Term, t: Term, v: Term, backtrackable: boolean): boolean {
   const i = intArg(n);
   const d = deref(t);
-  if (d instanceof Struct || d instanceof Cons) {
-    mutatedCompounds.add(d);
-    anyMutated = true;
-  }
   if (d instanceof Struct) {
     if (i < 1 || i > d.args.length) return false;
     const old = d.args[i - 1]!;

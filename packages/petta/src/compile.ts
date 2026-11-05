@@ -79,6 +79,13 @@ const TESTS = new Set([
 const ARITH_TESTS = new Set(["=:=", "=\\=", "<", ">", "=<", ">="]);
 /** Compound nodes of an argument built by generated constructor code; larger arguments go through inst or copyLiteral. */
 const BUILD_NODES = 24;
+/**
+ * Generated characters in one part of a clause body. V8 leaves a function in its baseline tier when its bytecode
+ * exceeds 61440 bytes (--max-optimized-bytecode-size), as translate_expr/4's 1309-line body did
+ * (c-big-body-unoptimized); a part this size compiles to a fraction of that.
+ * am[implements a-petta-speed-1105.goal.body-chunks]
+ */
+const PART_CHARS = 12000;
 
 /** Compound nodes of a stored ground term, counted up to BUILD_NODES + 1. */
 function size(t: Term): number {
@@ -381,14 +388,59 @@ class BodyCompiler {
     return `RS[${t}]`;
   }
 
-  source(): string {
+  /**
+   * The body as functions `(m, f, pc)`, each a loop-switch over a run of consecutive steps of at most PART_CHARS of
+   * code, and the part holding each step. Control within a body only moves forward (every label is placed after the
+   * step that targets it) and backtracking resumes through RS, so control reaching a step of a later part calls that
+   * part, `B[k]`, which nests at most one call per part. Time: linear in the steps.
+   * am[implements a-petta-speed-1105.goal.body-chunks]
+   */
+  sources(): { parts: string[]; partOf: number[] } {
     this.steps.push({ k: "succeed" });
-    const out: string[] = ["const v = f.vars;", "for (;;) switch (pc) {"];
-    this.steps.forEach((s, pc) => {
-      out.push(`case ${pc}:`);
+    const n = this.steps.length;
+    const partOf: number[] = new Array<number>(n).fill(0);
+    // Sizes as if every target were local, which differs from the final code by a few characters a jump.
+    let part = 0;
+    let used = 0;
+    for (let pc = 0; pc < n; pc++) {
+      const size = this.stepLines(this.steps[pc]!, pc, partOf, -1).join("\n").length + 12;
+      if (used > 0 && used + size > PART_CHARS) {
+        part++;
+        used = 0;
+      }
+      partOf[pc] = part;
+      used += size;
+    }
+    const parts: string[] = [];
+    for (let k = 0; k <= part; k++) {
+      const out: string[] = ["const v = f.vars;", "for (;;) {", "switch (pc) {"];
+      let last = -1;
+      for (let pc = 0; pc < n; pc++)
+        if (partOf[pc] === k) {
+          out.push(`case ${pc}:`, ...this.stepLines(this.steps[pc]!, pc, partOf, k));
+          last = pc;
+        }
+      out.push("}");
+      // Falling past this part's last step goes on at the next part's first.
+      if (last + 1 < n) out.push(`return B[${k + 1}](m, f, ${last + 1});`);
+      out.push("}");
+      parts.push(out.join("\n"));
+    }
+    return { parts, partOf };
+  }
+
+  /** Go to step `t` from part `k`: a jump within the part, a call of the part holding `t` otherwise (k < 0: local). */
+  private goto(t: number, partOf: number[], k: number): string {
+    return k < 0 || partOf[t] === k ? `pc = ${t}; continue;` : `return B[${partOf[t]}](m, f, ${t});`;
+  }
+
+  /** The code of step `s` at `pc` in part `k` (k < 0 while sizing). */
+  private stepLines(s: Step, pc: number, partOf: number[], k: number): string[] {
+    const out: string[] = [];
+    {
       switch (s.k) {
         case "test":
-          out.push(`if (!(${s.js})) ${s.else === null ? "return false;" : `{ pc = ${s.else.pc}; continue; }`}`);
+          out.push(`if (!(${s.js})) ${s.else === null ? "return false;" : `{ ${this.goto(s.else.pc, partOf, k)} }`}`);
           break;
         case "exec":
           out.push(`if (!(${s.js})) return false;`, `if (m.wakeups.length !== 0) return m.suspend(f, ${this.cont(pc + 1)});`);
@@ -411,7 +463,7 @@ class BodyCompiler {
           out.push(`m.cutTo(${s.cb});`);
           break;
         case "jump":
-          out.push(`pc = ${s.to.pc}; continue;`);
+          out.push(this.goto(s.to.pc, partOf, k));
           break;
         case "cp":
           out.push(`${s.h >= 0 ? `v[${s.h}] = ` : ""}m.pushResumeCP(${JSON.stringify(s.kind)}, ${this.cont(s.alt.pc)}, f);`);
@@ -444,9 +496,8 @@ class BodyCompiler {
           out.push("return false;");
           break;
       }
-    });
-    out.push("}");
-    return out.join("\n");
+    }
+    return out;
   }
 }
 
@@ -473,22 +524,20 @@ export interface Runtime {
  * variables for slots not yet set (with bind, as unifyHead does), or matches a call term of its shape argument by
  * argument. Compound templates beyond BUILD_NODES nodes go through unifyHead itself.
  *
- * In a head whose arguments are distinct slots, atomic constants and ground literals only, a call argument that is a
- * variable without attributes is bound to its compound literal's copy only after every other argument matched, so a
- * head failing on a later argument copies nothing. Such a binding wakes no hook, and with no slot repeated the head
- * cannot alias the variable to one that has attributes, so the hooks woken and their order are unifyHead's; the
- * deferred binding re-reads the variable, so a call naming it twice still sees the first binding.
- * am[implements a-petta-speed-1105.goal.head-defer]
+ * The head starts with a check that binds nothing: each argument after the first one whose template builds a term of
+ * three or more compound nodes for a call variable is compared with the call's argument for a clash of functor, arity
+ * or constant, so a candidate that fails on a later argument is rejected before that term is built. A failed head leaves nothing observable
+ * (c-head-failure-invisible), and a call's arguments only gain structure while the head unifies, so the check
+ * rejects exactly heads that would fail anyway.
+ * am[implements a-petta-speed-1105.goal.head-precheck]
  */
 class HeadCompiler {
   readonly lines: string[] = [];
+  /** The binding-free check run before the arguments (precheck). */
+  readonly pre: string[] = [];
   readonly set = new Set<number>();
   private temps = 0;
-  private readonly deferred: { t: Term; p: string }[] = [];
-  constructor(
-    private readonly body: BodyCompiler,
-    private readonly defer: boolean,
-  ) {}
+  constructor(private readonly body: BodyCompiler) {}
 
   /** Code unifying template `t` with the JS expression `a` (not yet dereferenced). */
   arg(t: Term, a: string): void {
@@ -502,14 +551,7 @@ class HeadCompiler {
     }
     if (t instanceof Ground) {
       if (size(t.t) > BUILD_NODES) this.lines.push(`if (!m.unifyLiteral(${this.body.konst(t.t)}, ${a})) return false;`);
-      else if (this.defer) {
-        const p = `p${this.deferred.length}`;
-        const d = `d${this.temps++}`;
-        this.deferred.push({ t: t.t, p });
-        this.lines.push(`{ const ${d} = deref(${a}); if (${d} instanceof Var && ${d}.attrs === null) ${p} = ${d}; else {`);
-        this.literal(t.t, d);
-        this.lines.push("} }");
-      } else this.literal(t.t, a);
+      else this.literal(t.t, a);
       return;
     }
     const d = `d${this.temps++}`;
@@ -540,15 +582,43 @@ class HeadCompiler {
     for (const i of slotsOf(t)) this.set.add(i);
   }
 
-  /** The head function's statements: the deferred bindings' holders, the arguments, then the deferred bindings. */
+  /** The head function's statements: the check, then the arguments. */
   source(): string {
-    const decl = this.deferred.length === 0 ? [] : [`let ${this.deferred.map((x) => `${x.p} = null`).join(", ")};`];
-    for (const { t, p } of this.deferred) {
-      this.lines.push(`if (${p} !== null) {`);
-      this.literal(t, p);
-      this.lines.push("}");
+    return [...this.pre, ...this.lines].join("\n");
+  }
+
+  /**
+   * Check code returning false when call argument `a` is bound to a term that cannot match template `t`: a clash of
+   * functor, arity or constant, looked for through at most `budget.n` compound nodes, binding nothing.
+   */
+  precheck(t: Term, a: string, budget: { n: number }): void {
+    if (t instanceof Slot) return;
+    if (t instanceof Ground) {
+      this.precheck(t.t, a, budget);
+      return;
     }
-    return [...decl, ...this.lines].join("\n");
+    const d = `d${this.temps++}`;
+    if (typeof t === "string" || typeof t === "number") {
+      const lit = typeof t === "string" ? JSON.stringify(t) : Object.is(t, -0) ? "-0" : String(t);
+      this.pre.push(`{ const ${d} = deref(${a}); if (!(${d} instanceof Var) && ${d} !== ${lit}) return false; }`);
+      return;
+    }
+    if (t === NIL) {
+      this.pre.push(`{ const ${d} = deref(${a}); if (!(${d} instanceof Var) && ${d} !== NIL) return false; }`);
+      return;
+    }
+    if (t instanceof Struct || t instanceof Cons) {
+      if (--budget.n < 0) return;
+      const shape = t instanceof Cons ? `${d} instanceof L` : `${d} instanceof S && ${d}.name === ${JSON.stringify(t.name)} && ${d}.args.length === ${t.args.length}`;
+      this.pre.push(`{ const ${d} = deref(${a}); if (!(${d} instanceof Var)) { if (!(${shape})) return false;`);
+      if (t instanceof Cons) {
+        this.precheck(t.head, `${d}.head`, budget);
+        this.precheck(t.tail, `${d}.tail`, budget);
+      } else t.args.forEach((x, i) => this.precheck(x, `${d}.args[${i}]`, budget));
+      this.pre.push("} }");
+      return;
+    }
+    this.pre.push(`{ const ${d} = deref(${a}); if (!(${d} instanceof Var) && !atomicEq(${this.body.konst(t)}, ${d})) return false; }`);
   }
 
   /**
@@ -621,20 +691,6 @@ function slotsOf(t: Term): number[] {
   return out;
 }
 
-/** Whether a head's arguments are all distinct slots, atomic constants or ground literals (HeadCompiler's deferral). */
-// am[implements a-petta-speed-1105.goal.head-defer]
-function deferrable(head: Term): boolean {
-  if (!(head instanceof Struct)) return false;
-  const seen = new Set<number>();
-  for (const a of head.args) {
-    if (a instanceof Slot) {
-      if (seen.has(a.i)) return false;
-      seen.add(a.i);
-    } else if (a instanceof Struct || a instanceof Cons) return false;
-  }
-  return true;
-}
-
 /**
  * The goals of the body's top conjunction that assign a slot instead of unifying, with the slot: an is/2 whose left
  * side, or an =/2 one of whose sides, is a slot first occurring there, as the whole side, the other side not naming
@@ -672,8 +728,15 @@ function freshOutputs(body: Term, seen: Set<number>): Map<Term, number> {
 export function compileClauseCode(m: Machine, c: Clause, rt: Runtime): Code {
   const bc = new BodyCompiler(m, c.nvars);
   const head = c.head;
-  const hc = new HeadCompiler(bc, deferrable(head));
-  if (head instanceof Struct) head.args.forEach((t, i) => hc.arg(t, `args[${i}]`));
+  const hc = new HeadCompiler(bc);
+  if (head instanceof Struct) {
+    // The arguments after the first whose term for a call variable takes three or more compound nodes to build are
+    // checked before any argument binds; smaller builds cost less than checking a head that succeeds twice.
+    // am[implements a-petta-speed-1105.goal.head-precheck]
+    const first = head.args.findIndex((t) => size(t instanceof Ground ? t.t : t) >= 3);
+    if (first >= 0) for (let i = first + 1; i < head.args.length; i++) hc.precheck(head.args[i]!, `args[${i}]`, { n: BUILD_NODES });
+    head.args.forEach((t, i) => hc.arg(t, `args[${i}]`));
+  }
   const fact = c.body === "true";
   let make = "";
   if (!fact) {
@@ -683,13 +746,16 @@ export function compileClauseCode(m: Machine, c: Clause, rt: Runtime): Code {
     for (let k = 0; k < c.nvars; k++) if (!hc.set.has(k) && !assigned.has(k)) make += `v[${k}] = V();\n`;
   }
   const RS: Resume[] = [];
+  const B: BodyFn[] = [];
+  const body = fact ? null : bc.sources();
   // The head and body are parenthesized so V8 compiles them along with the factory rather than preparsing them and
   // parsing them again at their first call: 4% fewer instructions on strict_tuple_types and roman_test.
   const factory = new Function(
-    "Frame", "E", "C", "cmp", "EMPTY", "NIL", "throwBall", "K", "RS", "S", "L", "deref", "Var", "V", "atomicEq",
-    `return [(function head(m, args, v) {\n${hc.source()}\n${make}return true;\n}), ${fact ? "null" : `(function body(m, f, pc) {\n${bc.source()}\n})`}];`,
-  ) as (...a: unknown[]) => [HeadFn, BodyFn | null];
-  const [headFn, fn] = factory(rt.Frame, rt.E, rt.C, numCompare, [], NIL, (b: Term) => throwBall(b, rt.copy), bc.consts, RS, Struct, Cons, deref, Var, mkVar, rt.atomicEq);
-  if (fn !== null) for (let pc = 0; pc < bc.steps.length; pc++) RS.push(new Resume(fn, pc));
-  return { head: headFn, entry: fn === null ? null : RS[0]!, nslots: bc.nslots };
+    "Frame", "E", "C", "cmp", "EMPTY", "NIL", "throwBall", "K", "RS", "S", "L", "deref", "Var", "V", "atomicEq", "B",
+    `return [(function head(m, args, v) {\n${hc.source()}\n${make}return true;\n}), [${(body?.parts ?? []).map((p) => `(function body(m, f, pc) {\n${p}\n})`).join(", ")}]];`,
+  ) as (...a: unknown[]) => [HeadFn, BodyFn[]];
+  const [headFn, parts] = factory(rt.Frame, rt.E, rt.C, numCompare, [], NIL, (b: Term) => throwBall(b, rt.copy), bc.consts, RS, Struct, Cons, deref, Var, mkVar, rt.atomicEq, B);
+  B.push(...parts);
+  if (body !== null) for (let pc = 0; pc < bc.steps.length; pc++) RS.push(new Resume(B[body.partOf[pc]!]!, pc));
+  return { head: headFn, entry: body === null ? null : RS[0]!, nslots: bc.nslots };
 }

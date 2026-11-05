@@ -20,7 +20,8 @@
 // With --petta each example runs on PeTTa (`sh run.sh`, as the oracle ran it) and on ours, alternating, --repeat
 // times in the same worker, each under GNU time for its peak resident set; a row keeps the fastest wall time and
 // the largest peak of each engine. PeTTa's own output is judged against the oracle too: the first disagreement
-// means the swipl on PATH is not the setup the oracle ran on, so the sweep stops there and writes nothing.
+// means this host's setup is not the oracle's (the swipl on PATH, or a library PeTTa loads), so the sweep stops there
+// and writes nothing.
 // The examples PeTTa itself runs unbounded run to a 10 s cap on both and stay out of the totals.
 
 import { spawn, spawnSync } from "node:child_process";
@@ -202,8 +203,8 @@ await Promise.all(Array.from({ length: JOBS }, worker));
 if (pettaBroken !== null) {
   const swipl = spawnSync("swipl", ["--version"], { encoding: "utf8" }).stdout.trim();
   process.stderr.write(
-    `PeTTa's own run of ${pettaBroken.name} gives ${pettaBroken.verdict} against its oracle on ${swipl}: ` +
-      `this is not the SWI setup the oracle ran on, so no rows are written\n${pettaBroken.stderr}\n`,
+    `PeTTa's own run of ${pettaBroken.name} gives ${pettaBroken.verdict} against its oracle (${swipl}): this host's ` +
+      `setup differs from the oracle's (its SWI, or a library PeTTa loads, such as a Python module), so no rows are written\n${pettaBroken.stderr}\n`,
   );
   process.exit(1);
 }

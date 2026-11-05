@@ -34,10 +34,20 @@ type Key = string | number | bigint;
 const NIL_KEY = "\u0001n";
 const LIST_KEY = "\u0001c[|]/2";
 const functorKeys = new Map<string, string[]>();
+// The last functor asked for, since consecutive calls of one predicate usually carry the same one.
+// am[implements a-petta-speed-1105.goal.select-once]
+let lastName = "";
+let lastArity = -1;
+let lastKey = "";
 function functorKey(name: string, arity: number): string {
+  if (name === lastName && arity === lastArity) return lastKey;
   let byArity = functorKeys.get(name);
   if (byArity === undefined) functorKeys.set(name, (byArity = []));
-  return (byArity[arity] ??= "\u0001c" + name + "/" + arity);
+  const k = (byArity[arity] ??= "\u0001c" + name + "/" + arity);
+  lastName = name;
+  lastArity = arity;
+  lastKey = k;
+  return k;
 }
 
 /** The key of a term, null for a variable (pl-index.c indexOfWord on a call argument, pl-comp.c argKey on a stored head). */
@@ -57,6 +67,52 @@ const isFunctorKey = (k: Key): boolean => typeof k === "string" && k.charCodeAt(
 
 /** A key as a string with its type tagged, for ordering assessments and joining the keys of a multi-argument index. */
 const keyString = (k: Key): string => (typeof k === "string" ? (k.charCodeAt(0) === 1 ? k : "a" + k) : "i" + k.toString());
+
+const POW10 = Array.from({ length: 16 }, (_, i) => 10 ** i);
+
+/** Decimal digits of a non-negative safe integer. */
+function digits(x: number): number {
+  let d = 1;
+  while (d < 16 && x >= POW10[d]!) d++;
+  return d;
+}
+
+/** The order of the decimal strings of non-negative safe integers x and y: a shorter one that prefixes the longer comes first. */
+function cmpDecimal(x: number, y: number): number {
+  if (x === y) return 0;
+  const dx = digits(x);
+  const dy = digits(y);
+  if (dx < dy) {
+    const head = Math.floor(y / POW10[dy - dx]!);
+    return x === head ? -1 : x < head ? -1 : 1;
+  }
+  if (dx > dy) {
+    const head = Math.floor(x / POW10[dx - dy]!);
+    return head === y ? 1 : head < y ? -1 : 1;
+  }
+  return x < y ? -1 : 1;
+}
+
+/**
+ * The sign of comparing keyString(a) with keyString(b), computed without building either string: tagged keys
+ * ("\u0001...") come before atoms ("a..."), atoms before integers ("i..."), and integers order as their decimal
+ * strings do. Bigints, rare as keys, compare through their strings.
+ * am[implements a-petta-speed-1105.memory.per-clause]
+ */
+function cmpKeyOrder(a: Key, b: Key): number {
+  const ta = typeof a === "string" ? (a.charCodeAt(0) === 1 ? 0 : 1) : 2;
+  const tb = typeof b === "string" ? (b.charCodeAt(0) === 1 ? 0 : 1) : 2;
+  if (ta !== tb) return ta < tb ? -1 : 1;
+  if (ta < 2) return a < b ? -1 : a > b ? 1 : 0;
+  if (typeof a === "number" && typeof b === "number" && Number.isSafeInteger(a) && Number.isSafeInteger(b)) {
+    // "-" sorts before every digit; two negatives compare by their digits after it.
+    if (a < 0 !== b < 0) return a < 0 ? -1 : 1;
+    return a < 0 ? cmpDecimal(-a, -b) : cmpDecimal(a, b);
+  }
+  const sa = a.toString();
+  const sb = b.toString();
+  return sa < sb ? -1 : sa > sb ? 1 : 0;
+}
 
 /** The arguments of a stored or live compound: a structure's arguments, a list cell's head and tail. */
 function compoundArgs(t: Term): Term[] | null {
@@ -112,13 +168,21 @@ interface Assessment {
 class ClauseIndex {
   realised = false;
   good = false;
-  buckets = new Map<Key, Clause[]>();
+  /**
+   * Each key's clauses in clause order, a bucket of one held as the clause itself: an index on an argument whose
+   * values are mostly distinct (scale's million atoms) has a bucket per clause.
+   * am[implements a-petta-speed-1105.memory.per-clause]
+   */
+  buckets = new Map<Key, Clause | Clause[]>();
   varClauses: Clause[] = [];
   lists = new Map<Key, ClauseList>();
   /** A hash index's scan of each bucket and of the variable clauses, made on first use; bucket arrays grow in place. */
   // am[implements a-petta-speed-1105.goal.select-once]
   scans = new Map<Key, Scan>();
   varScan: Scan | null = null;
+  /** A list index's last looked-up key with its sub-list (bucketScan), cleared when the index is filled again. */
+  lastKey: Key | undefined = undefined;
+  lastSub: ClauseList | undefined = undefined;
   size = 0;
   resizeAbove = 0;
   resizeBelow = 0;
@@ -141,7 +205,6 @@ class ClauseList {
   jitiTried = 0;
   indexes: ClauseIndex[] = [];
   argInfo: ArgInfo[];
-  private readonly keyCache = new Map<Clause, (Key | null | undefined)[]>();
   private readonly ownClauses: Clause[];
   /** The scan of every clause, kept while the clause array is the same one. */
   private all: Scan | null = null;
@@ -200,20 +263,22 @@ class ClauseList {
     return args[a] ?? null;
   }
 
+  /**
+   * The key of argument `a` of this list's argument vector in clause `c`; the first argument's key at the top
+   * level is cached in the clause, the rest are read from the stored head each time, which costs a few loads.
+   * am[implements a-petta-speed-1105.memory.per-clause]
+   */
   keyOf(c: Clause, a: number): Key | null {
-    let ks = this.path.length === 0 ? c.topKeys : this.keyCache.get(c);
-    if (ks === undefined || ks === null) {
-      ks = new Array(this.arity);
-      if (this.path.length === 0) c.topKeys = ks;
-      else this.keyCache.set(c, ks);
+    if (a === 0 && this.path.length === 0) {
+      let k = c.key0;
+      if (k === undefined) {
+        const t = this.argTerm(c, 0);
+        k = c.key0 = t === null ? null : termKey(t);
+      }
+      return k;
     }
-    let k = ks[a];
-    if (k === undefined) {
-      const t = this.argTerm(c, a);
-      k = t === null ? null : termKey(t);
-      ks[a] = k;
-    }
-    return k;
+    const t = this.argTerm(c, a);
+    return t === null ? null : termKey(t);
   }
 
   private nvcompOf(c: Clause, a: number): boolean {
@@ -231,10 +296,6 @@ class ClauseList {
       parts.push(keyString(k));
     }
     return parts.join("\u0000");
-  }
-
-  forget(c: Clause): void {
-    this.keyCache.delete(c);
   }
 
   /** One bound key function per argument position, so a call allocates none. */
@@ -359,7 +420,7 @@ class ClauseList {
   }
 
   /** The scan of every clause. */
-  private allScan(): Scan {
+  allScan(): Scan {
     const list = this.clauses;
     let s = this.all;
     if (s === null || s.list !== list) this.all = s = { list, start: 0, key: null, keyAt: null };
@@ -423,17 +484,23 @@ class ClauseList {
       if (s === undefined) {
         const b = ci.buckets.get(key);
         if (b === undefined) return (ci.varScan ??= { list: ci.varClauses, start: 0, key: null, keyAt: null });
-        ci.scans.set(key, (s = { list: b, start: 0, key: null, keyAt: null }));
+        ci.scans.set(key, (s = { list: Array.isArray(b) ? b : [b], start: 0, key: null, keyAt: null }));
       }
       return s;
     }
-    const sub = ci.lists.get(key);
+    // A list index's last key and its sub-list, held while realised: consecutive calls usually share the key.
+    let sub: ClauseList | undefined;
+    if (ci.lastKey === key) sub = ci.lastSub;
+    else if ((sub = ci.lists.get(key)) !== undefined) {
+      ci.lastKey = key;
+      ci.lastSub = sub;
+    }
     if (sub !== undefined) {
       if (isFunctorKey(key) && depth < MAXINDEXDEPTH) {
         const inner = compoundArgs(deref(args[ci.args[0]!]!))!;
         return sub.select(inner, depth + 1);
       }
-      return { list: sub.clauses, start: 0, key: null, keyAt: null };
+      return sub.allScan();
     }
     return NO_CLAUSES;
   }
@@ -449,6 +516,8 @@ class ClauseList {
     ci.lists = new Map();
     ci.scans = new Map();
     ci.varScan = null;
+    ci.lastKey = undefined;
+    ci.lastSub = undefined;
     ci.size = 0;
     for (const c of this.clauses)
       if (c.died === Infinity && !this.addToIndex(ci, c, true)) {
@@ -488,18 +557,35 @@ class ClauseList {
     }
     const key = this.indexKeyOf(c, ci.args);
     if (key === null) {
-      if (atEnd) {
-        ci.varClauses.push(c);
-        for (const b of ci.buckets.values()) b.push(c);
-      } else {
-        ci.varClauses.unshift(c);
-        for (const b of ci.buckets.values()) b.unshift(c);
+      if (atEnd) ci.varClauses.push(c);
+      else ci.varClauses.unshift(c);
+      for (const [k, b] of ci.buckets) {
+        if (Array.isArray(b)) {
+          if (atEnd) b.push(c);
+          else b.unshift(c);
+        } else {
+          ci.buckets.set(k, atEnd ? [b, c] : [c, b]);
+          // A scan made from the one-clause bucket holds its own array.
+          ci.scans.delete(k);
+        }
       }
     } else {
-      let b = ci.buckets.get(key);
-      if (b === undefined) ci.buckets.set(key, (b = ci.varClauses.slice()));
-      if (atEnd) b.push(c);
-      else b.unshift(c);
+      const b = ci.buckets.get(key);
+      if (b === undefined) {
+        if (ci.varClauses.length === 0) ci.buckets.set(key, c);
+        else {
+          const fresh = ci.varClauses.slice();
+          if (atEnd) fresh.push(c);
+          else fresh.unshift(c);
+          ci.buckets.set(key, fresh);
+        }
+      } else if (Array.isArray(b)) {
+        if (atEnd) b.push(c);
+        else b.unshift(c);
+      } else {
+        ci.buckets.set(key, atEnd ? [b, c] : [c, b]);
+        ci.scans.delete(key);
+      }
       ci.size++;
     }
     return true;
@@ -555,6 +641,11 @@ class ClauseList {
 
   /** pl-index.c assess_candidate_indexes over single arguments not yet assessed. */
   private assessArgs(argsToAssess: number[]): void {
+    // A dynamic predicate with no good index asks on every call; once all are assessed this allocates nothing.
+    // am[implements a-petta-speed-1105.goal]
+    let all = true;
+    for (const a of argsToAssess) if (!this.argInfo[a]!.assessed) all = false;
+    if (all) return;
     const as = argsToAssess.filter((a) => !this.argInfo[a]!.assessed).map((a) => newAssessment([a]));
     if (as.length === 0) return;
     this.scanAssessments(as);
@@ -604,6 +695,10 @@ class ClauseList {
 
   /** pl-index.c find_multi_argument_hash: the best pair of good bound arguments, if it beats MIN_SPEEDUP. */
   private multiArgumentHint(inst: number[], betterThan: ClauseIndex | null): { args: number[]; list: boolean; speedup: number } | null {
+    // Past the retry limit the answer is null whatever the sort finds, so the sort, which allocates, is skipped: a
+    // dynamic predicate with no good index asks this on every call (permutations spent 4% sorting).
+    // am[implements a-petta-speed-1105.goal]
+    if (this.jitiTried > this.arity) return null;
     const sorted = this.sortBySpeedup(inst);
     let ok = 0;
     while (ok < sorted.length && this.argInfo[sorted[ok]!]!.speedup > MIN_SPEEDUP) ok++;
@@ -626,8 +721,9 @@ class ClauseList {
     return null;
   }
 
+  /** The arguments by falling speedup, ties in their order (Array.prototype.sort is stable). */
   private sortBySpeedup(args: number[]): number[] {
-    return args.map((a, i) => ({ a, i })).sort((x, y) => this.argInfo[y.a]!.speedup - this.argInfo[x.a]!.speedup || x.i - y.i).map((x) => x.a);
+    return args.slice().sort((x, y) => this.argInfo[y]!.speedup - this.argInfo[x]!.speedup);
   }
 
   /** pl-index.c candidate_indexes and set_candidate_indexes: every meaningful index, best first, unrealised. */
@@ -784,17 +880,20 @@ function removeDuplicates(a: Assessment, n: number): boolean {
   a.speedup = 0;
   a.list = false;
   if (a.keys.length === 0 && a.allocated === 0) return false;
-  const sorted = a.keys
-    .map((k, i) => ({ k, s: keyString(k.key), i }))
-    .sort((x, y) => (x.s < y.s ? -1 : x.s > y.s ? 1 : x.i - y.i))
-    .map((x) => x.k);
+  // Key order (cmpKeyOrder, keyString's), then position; each run's first entry takes the run's counts in place.
+  // am[implements a-petta-speed-1105.memory.per-clause]
+  const keys = a.keys;
+  const order = new Int32Array(keys.length);
+  for (let j = 0; j < order.length; j++) order[j] = j;
+  order.sort((x, y) => cmpKeyOrder(keys[x]!.key, keys[y]!.key) || x - y);
   const out: { key: Key; count: number; nvcomp: number }[] = [];
   let fc = 0;
   let i = 0;
   let A = 0;
   let Q = 0;
   let o: { key: Key; count: number; nvcomp: number } | null = null;
-  for (const s of sorted) {
+  for (let j = 0; j < order.length; j++) {
+    const s = keys[order[j]!]!;
     if (o === null || s.key !== o.key) {
       if (i++ > 0 && n) {
         const A0 = A;
@@ -802,7 +901,7 @@ function removeDuplicates(a: Assessment, n: number): boolean {
         Q = f32(Q + f32(f32(o!.count - A0) * f32(o!.count - A)));
         if (o!.nvcomp) fc += o!.nvcomp - 1;
       }
-      o = { ...s };
+      o = s;
       out.push(o);
     } else o.count += s.count;
   }
@@ -868,7 +967,6 @@ export class SwiIndex implements ClauseObserver {
 
   removed(c: Clause): void {
     this.top.died(c);
-    this.top.forget(c);
     if (this.staticLike()) {
       this.top = new ClauseList(this, [], this.pred.arity, null);
       return;
