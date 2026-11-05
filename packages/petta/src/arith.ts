@@ -66,6 +66,30 @@ export function compareNum(a: Num, b: Num): number {
   return cmpNum(a, b);
 }
 
+/**
+ * The arithmetic comparison `op` (=:=, =\=, <, >, =<, >=) on evaluated operands: a NaN operand makes every
+ * comparison false except =\=, as IEEE comparison does in SWI. The builtins and compiled clause bodies both use it.
+ * am[implements a-petta-speed-1105.goal]
+ */
+export function numCompare(op: string, x: Num, y: Num): boolean {
+  if ((x instanceof Float && Number.isNaN(x.v)) || (y instanceof Float && Number.isNaN(y.v))) return op === "=\\=";
+  const c = cmpNum(x, y);
+  switch (op) {
+    case "=:=":
+      return c === 0;
+    case "=\\=":
+      return c !== 0;
+    case "<":
+      return c < 0;
+    case ">":
+      return c > 0;
+    case "=<":
+      return c <= 0;
+    default:
+      return c >= 0;
+  }
+}
+
 function floorDiv(a: bigint, b: bigint): bigint {
   const q = a / b;
   return (a % b !== 0n && (a < 0n) !== (b < 0n)) ? q - 1n : q;
@@ -93,11 +117,42 @@ function floatToInt(x: number): Int {
   return normInt(BigInt(x));
 }
 
+// Integers are JS numbers while safe (terms.ts normInt), and these fast paths keep them there: a safe sum,
+// difference or product is exact in double arithmetic exactly when its result is safe, and % on two safe integers
+// is exact, so x - x % y is an exact multiple of y and dividing it by y is exact.
+// am[implements a-petta-speed-1105.goal]
+const isN = (x: Num): x is number => typeof x === "number";
+const isI32 = (x: Num): x is number => typeof x === "number" && (x | 0) === x;
+
 const BINARY: Record<string, (a: Num, b: Num) => Num> = {
-  "+": (a, b) => (isF(a) || isF(b) ? checkFloat(toF(a) + toF(b)) : intOp(a, b, (x, y) => x + y, (x, y) => x + y)),
-  "-": (a, b) => (isF(a) || isF(b) ? checkFloat(toF(a) - toF(b)) : intOp(a, b, (x, y) => x - y, (x, y) => x - y)),
-  "*": (a, b) => (isF(a) || isF(b) ? checkFloat(toF(a) * toF(b)) : intOp(a, b, (x, y) => x * y, (x, y) => x * y)),
+  "+": (a, b) => {
+    if (isN(a) && isN(b)) {
+      const r = a + b;
+      if (Number.isSafeInteger(r)) return r;
+    }
+    return isF(a) || isF(b) ? checkFloat(toF(a) + toF(b)) : intOp(a, b, (x, y) => x + y, (x, y) => x + y);
+  },
+  "-": (a, b) => {
+    if (isN(a) && isN(b)) {
+      const r = a - b;
+      if (Number.isSafeInteger(r)) return r;
+    }
+    return isF(a) || isF(b) ? checkFloat(toF(a) - toF(b)) : intOp(a, b, (x, y) => x - y, (x, y) => x - y);
+  },
+  "*": (a, b) => {
+    if (isN(a) && isN(b)) {
+      const r = a * b;
+      // -0 is no integer: 0 * -5 is 0.
+      if (Number.isSafeInteger(r)) return r === 0 ? 0 : r;
+    }
+    return isF(a) || isF(b) ? checkFloat(toF(a) * toF(b)) : intOp(a, b, (x, y) => x * y, (x, y) => x * y);
+  },
   "/": (a, b) => {
+    if (isN(a) && isN(b)) {
+      if (b === 0) throw evaluationError("zero_divisor");
+      const r = a % b;
+      return r === 0 ? (a - r) / b + 0 : checkFloat(a / b);
+    }
     if (!isF(a) && !isF(b)) {
       const y = big(b);
       if (y === 0n) throw evaluationError("zero_divisor");
@@ -109,12 +164,21 @@ const BINARY: Record<string, (a: Num, b: Num) => Num> = {
     return checkFloat(toF(a) / toF(b));
   },
   "//": (a, b) => {
+    if (isN(a) && isN(b)) {
+      if (b === 0) throw evaluationError("zero_divisor");
+      return (a - (a % b)) / b + 0;
+    }
     const x = big(needInt(a));
     const y = big(needInt(b));
     if (y === 0n) throw evaluationError("zero_divisor");
     return normInt(x / y);
   },
   mod: (a, b) => {
+    if (isN(a) && isN(b)) {
+      if (b === 0) throw evaluationError("zero_divisor");
+      const m = a % b;
+      return m !== 0 && m < 0 !== b < 0 ? m + b : m + 0;
+    }
     const x = big(needInt(a));
     const y = big(needInt(b));
     if (y === 0n) throw evaluationError("zero_divisor");
@@ -122,12 +186,22 @@ const BINARY: Record<string, (a: Num, b: Num) => Num> = {
     return normInt(m !== 0n && (m < 0n) !== (y < 0n) ? m + y : m);
   },
   rem: (a, b) => {
+    if (isN(a) && isN(b)) {
+      if (b === 0) throw evaluationError("zero_divisor");
+      return (a % b) + 0;
+    }
     const x = big(needInt(a));
     const y = big(needInt(b));
     if (y === 0n) throw evaluationError("zero_divisor");
     return normInt(x % y);
   },
   div: (a, b) => {
+    if (isN(a) && isN(b)) {
+      if (b === 0) throw evaluationError("zero_divisor");
+      const m = a % b;
+      const mf = m !== 0 && m < 0 !== b < 0 ? m + b : m;
+      return (a - mf) / b + 0;
+    }
     const x = big(needInt(a));
     const y = big(needInt(b));
     if (y === 0n) throw evaluationError("zero_divisor");
@@ -152,12 +226,24 @@ const BINARY: Record<string, (a: Num, b: Num) => Num> = {
     const neg = toF(b) < 0 || Object.is(toF(b), -0);
     return isF(a) ? new Float(neg ? -x : x) : neg ? (typeof a === "bigint" ? -(a < 0n ? -a : a) : -Math.abs(a)) : typeof a === "bigint" ? (a < 0n ? -a : a) : Math.abs(a);
   },
-  ">>": (a, b) => normInt(big(needInt(a)) >> big(needInt(b))),
-  "<<": (a, b) => normInt(big(needInt(a)) << big(needInt(b))),
-  "/\\": (a, b) => normInt(big(needInt(a)) & big(needInt(b))),
-  "\\/": (a, b) => normInt(big(needInt(a)) | big(needInt(b))),
-  xor: (a, b) => normInt(big(needInt(a)) ^ big(needInt(b))),
+  ">>": (a, b) => (isI32(a) && isN(b) && b >= 0 && b < 32 ? a >> b : normInt(big(needInt(a)) >> big(needInt(b)))),
+  "<<": (a, b) => {
+    if (isN(a) && isN(b) && b >= 0 && b < 53) {
+      const r = a * 2 ** b;
+      if (Number.isSafeInteger(r)) return r + 0;
+    }
+    return normInt(big(needInt(a)) << big(needInt(b)));
+  },
+  "/\\": (a, b) => (isI32(a) && isI32(b) ? a & b : normInt(big(needInt(a)) & big(needInt(b)))),
+  "\\/": (a, b) => (isI32(a) && isI32(b) ? a | b : normInt(big(needInt(a)) | big(needInt(b)))),
+  xor: (a, b) => (isI32(a) && isI32(b) ? a ^ b : normInt(big(needInt(a)) ^ big(needInt(b)))),
   gcd: (a, b) => {
+    if (isN(a) && isN(b)) {
+      let x = Math.abs(a);
+      let y = Math.abs(b);
+      while (y !== 0) [x, y] = [y, x % y];
+      return x;
+    }
     let x = big(needInt(a));
     let y = big(needInt(b));
     if (x < 0n) x = -x;
@@ -225,8 +311,8 @@ const UNARY: Record<string, (a: Num) => Num> = {
   ceiling: (a) => (isF(a) ? floatToInt(Math.ceil(a.v)) : a),
   ceil: (a) => (isF(a) ? floatToInt(Math.ceil(a.v)) : a),
   floor: (a) => (isF(a) ? floatToInt(Math.floor(a.v)) : a),
-  "\\": (a) => normInt(~big(needInt(a))),
-  msb: (a) => big(needInt(a)).toString(2).length - 1,
+  "\\": (a) => (isI32(a) ? ~a : normInt(~big(needInt(a)))),
+  msb: (a) => (isI32(a) && a > 0 ? 31 - Math.clz32(a) : big(needInt(a)).toString(2).length - 1),
   succ: (a) => BINARY["+"]!(a, 1),
   plus: (a) => a,
   random: (a) => Math.floor(Math.random() * Number(needInt(a))),
@@ -248,6 +334,11 @@ const CONSTANTS: Record<string, () => Num> = {
   max_integer: () => 9223372036854775807n,
   min_integer: () => -9223372036854775808n,
 };
+
+/** The evaluable functions of one and two arguments by name, for compiled is/2 and comparisons (compile.ts). */
+// am[implements a-petta-speed-1105.goal]
+export const UNARY_FNS: Readonly<Record<string, (a: Num) => Num>> = UNARY;
+export const BINARY_FNS: Readonly<Record<string, (a: Num, b: Num) => Num>> = BINARY;
 
 /** Every evaluable functor as [name, arity] (current_arithmetic_function/1). */
 export function evaluableFunctors(): [string, number][] {
