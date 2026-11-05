@@ -8,6 +8,7 @@
 // am[implements a-pe-runtime]
 
 import { Cons, Float, NIL, Str, Struct, Var, deref, type Term } from "./terms";
+import type { Code } from "./compile";
 
 /** A clause variable slot in a stored clause; renaming replaces slot i by the call's i-th fresh variable. */
 export class Slot {
@@ -23,6 +24,11 @@ export class Clause {
   argHashes: (number | null)[] | null = null;
   /** The index key of each head argument (swi-index.ts), computed on first use. */
   topKeys: (string | number | bigint | null | undefined)[] | null = null;
+  /** The compiled body (compile.ts), made once the clause has been entered COMPILE_AFTER times; null until then. */
+  // am[implements a-petta-speed-1105.goal]
+  code: Code | null = null;
+  /** How often the clause's body was entered while it had no compiled body. */
+  entries = 0;
   constructor(
     public readonly pred: Pred,
     public readonly head: Term,
@@ -98,6 +104,18 @@ export class Database {
 
   beginTransaction(): void {
     this.tx.push({ added: [], removed: [] });
+  }
+
+  /** The next clause sequence number, which an image saves with the generation. */
+  // am[implements a-petta-speed-1105.startup.image]
+  get seqCounter(): number {
+    return this.seq;
+  }
+
+  /** Set the generation and sequence counters of a database an image rebuilt. */
+  restoreCounters(generation: number, seq: number): void {
+    this.generation = generation;
+    this.seq = seq;
   }
 
   /** Commit the innermost transaction into its parent, or drop its log at top level. */
@@ -236,4 +254,40 @@ export function groundHash(t0: Term): number | null {
 export function clauseArgHashes(c: Clause): (number | null)[] {
   if (c.argHashes === null) c.argHashes = c.head instanceof Struct ? c.head.args.map(groundHash) : [];
   return c.argHashes;
+}
+
+/**
+ * Where in a clause list each ground value of one head argument sits: positions by the argument's groundHash, and
+ * the positions whose argument is not ground (`open`), both ascending. A clause whose argument is ground with another
+ * hash than a ground call argument cannot unify with the call, so a scan with that argument ground need only try
+ * `byHash.get(h)` and `open`. Kept for a list as it grows at the end; a list whose first clause changed (asserta,
+ * a compacted copy) is indexed anew.
+ * am[implements a-petta-speed-1105.outliers.spaces]
+ */
+export class ArgHashIndex {
+  readonly byHash = new Map<number, number[]>();
+  readonly open: number[] = [];
+  indexed = 0;
+  constructor(readonly first: Clause | undefined) {}
+}
+
+const argHashIndexes = new WeakMap<readonly Clause[], (ArgHashIndex | undefined)[]>();
+
+/** The ArgHashIndex of `list` at argument `arg`, extended to the list's current end. Time: the clauses added since. */
+export function argHashIndex(list: readonly Clause[], arg: number): ArgHashIndex {
+  let per = argHashIndexes.get(list);
+  if (per === undefined) argHashIndexes.set(list, (per = []));
+  let ix = per[arg];
+  if (ix === undefined || ix.first !== list[0]) per[arg] = ix = new ArgHashIndex(list[0]);
+  for (let i = ix.indexed; i < list.length; i++) {
+    const h = clauseArgHashes(list[i]!)[arg];
+    if (h === null || h === undefined) ix.open.push(i);
+    else {
+      const b = ix.byHash.get(h);
+      if (b === undefined) ix.byHash.set(h, [i]);
+      else b.push(i);
+    }
+  }
+  ix.indexed = list.length;
+  return ix;
 }

@@ -9,7 +9,7 @@
 // defines in Prolog libraries live in library.ts as Prolog text; char_type/2 and code_type/2 in ctype.ts.
 // am[implements a-pe-swi-builtins]
 
-import { compareNum, evalArith, evaluableFunctors, type Num } from "./arith";
+import { compareNum, evalArith, evaluableFunctors, numCompare, type Num } from "./arith";
 import { Slot, type Clause } from "./db";
 import { Machine, atomicEq, copyTerm, resolve, type Builtin } from "./machine";
 import { candidateClauses as swiCandidates } from "./swi-index";
@@ -635,21 +635,7 @@ export function installBuiltins(m: Machine): void {
 
   // arithmetic
   def("is", 2, det((m2, [r, e]) => m2.unify(r!, evalArith(e!))));
-  // A NaN operand makes every comparison false except =\=, as IEEE comparison does in SWI.
-  const isNaNNum = (x: Term): boolean => x instanceof Float && Number.isNaN(x.v);
-  const cmp = (name: string, ok: (c: number) => boolean): void =>
-    def(name, 2, det((_, [a, b]) => {
-      const x = evalArith(a!);
-      const y = evalArith(b!);
-      if (isNaNNum(x) || isNaNNum(y)) return name === "=\\=";
-      return ok(compareNum(x, y));
-    }));
-  cmp("=:=", (c) => c === 0);
-  cmp("=\\=", (c) => c !== 0);
-  cmp("<", (c) => c < 0);
-  cmp(">", (c) => c > 0);
-  cmp("=<", (c) => c <= 0);
-  cmp(">=", (c) => c >= 0);
+  for (const op of ["=:=", "=\\=", "<", ">", "=<", ">="]) def(op, 2, det((_, [a, b]) => numCompare(op, evalArith(a!), evalArith(b!))));
   def("succ", 2, det((m2, [a, b]) => {
     const x = deref(a!);
     if (typeof x === "number" || typeof x === "bigint") {
@@ -1365,7 +1351,12 @@ export function installBuiltins(m: Machine): void {
   };
   def("nb_getval", 2, det((m2, [k, v]) => getval(m2, k!, v!)));
   def("b_getval", 2, det((m2, [k, v]) => getval(m2, k!, v!)));
-  def("nb_current", 2, nondet(function* (m2, [k, v]) {
+  def("nb_current", 2, { detMode: (m2, [k, v]) => {
+    const kd = deref(k!);
+    if (typeof kd !== "string") return null;
+    const val = m2.globals.get(kd);
+    return val !== undefined && m2.unify(v!, val);
+  }, nondet: nondet(function* (m2, [k, v]) {
     const kd = deref(k!);
     if (typeof kd === "string") {
       const val = m2.globals.get(kd);
@@ -1377,7 +1368,7 @@ export function installBuiltins(m: Machine): void {
       if (m2.unify(k!, key) && m2.unify(v!, val)) yield;
       m2.undoTo(mark);
     }
-  }));
+  }).nondet! });
   def("nb_delete", 1, det((m2, [k]) => (m2.globals.delete(atomArg(k!)), true)));
   def("flag", 3, det((m2, [k, old, nw]) => {
     const key = "$flag:" + writeTerm(k!, { quoted: true });
@@ -1388,7 +1379,9 @@ export function installBuiltins(m: Machine): void {
   }));
   def("set_prolog_flag", 2, det((m2, [k, v]) => (m2.flags.set(atomArg(k!), copyTerm(v!)), true)));
   def("current_prolog_flag", 2, det((m2, [k, v]) => {
-    const val = m2.flags.get(atomArg(k!));
+    const key = atomArg(k!);
+    if (m2.flagReads !== null) m2.flagReads.set(key, (m2.flagReads.get(key) ?? 0) + 1);
+    const val = m2.flags.get(key);
     return val !== undefined && m2.unify(v!, val);
   }));
 
@@ -1424,7 +1417,18 @@ export function installBuiltins(m: Machine): void {
     for (const t of sorted) if (out.length === 0 || cmpGoal(out[out.length - 1]!, t) !== 0) out.push(t);
     return m2.unify(s!, mkList(out));
   }));
-  def("length", 2, nondet(function* (m2, [l, n]) {
+  // A proper list's length is deterministic.
+  // am[implements a-petta-speed-1105.goal]
+  const lengthDet = (m2: Machine, [l, n]: Term[]): boolean | null => {
+    let t = deref(l!);
+    let count = 0;
+    while (t instanceof Cons) {
+      count++;
+      t = deref(t.tail);
+    }
+    return t === NIL ? m2.unify(n!, count) : null;
+  };
+  def("length", 2, { detMode: lengthDet, nondet: nondet(function* (m2, [l, n]) {
     let t = deref(l!);
     let count = 0;
     while (t instanceof Cons) {
@@ -1450,7 +1454,7 @@ export function installBuiltins(m: Machine): void {
       if (m2.unify(tailVar, mkList(extra)) && m2.unify(n!, k)) yield;
       m2.undoTo(mark);
     }
-  }));
+  }).nondet! });
 
   // control helpers
   def("halt", 1, det((_, [s]) => {
@@ -1718,8 +1722,80 @@ export function installBuiltins(m: Machine): void {
 
 // ---- helpers used by the table ----
 
-/** Whether a term is a rational tree: some compound contains itself. Time: term size, iterative DFS. */
+/**
+ * Compounds setarg/nb_setarg changed in place. A compound is otherwise never changed after it is built, and refers
+ * only to terms that existed before it (a list built cell by cell links each cell to a newer one, in a chain), so a
+ * cycle can close only through a bound variable or one of these.
+ */
+const mutatedCompounds = new WeakSet<object>();
+let anyMutated = false;
+
+const EXIT = {};
+/**
+ * Whether a term is a rational tree: some compound contains itself. An iterative DFS that keeps on its path only the
+ * bound variables and changed compounds it passes (mutatedCompounds), each explored once, so a fresh tree costs one
+ * visit per node and no set operation. Time: the term's size.
+ * am[implements a-petta-speed-1105.outliers.spaces]
+ */
 export function isCyclic(t: Term): boolean {
+  let onPath: Set<object> | null = null;
+  let done: Set<object> | null = null;
+  const stack: unknown[] = [t];
+  // Untracked compounds shared many times over are walked once per path to them; past a million visits the
+  // walk starts over tracking every compound, which is linear in the distinct ones.
+  let budget = 1 << 20;
+  // Enter a tracked node: false when it is already explored; throws Cyclic when it is on the path.
+  const enter = (x: object): boolean => {
+    onPath ??= new Set();
+    done ??= new Set();
+    if (onPath.has(x)) throw CYCLIC;
+    if (done.has(x)) return false;
+    onPath.add(x);
+    stack.push(x, EXIT);
+    return true;
+  };
+  try {
+    while (stack.length > 0) {
+      let x = stack.pop();
+      if (x === EXIT) {
+        const n = stack.pop() as object;
+        onPath!.delete(n);
+        done!.add(n);
+        continue;
+      }
+      for (;;) {
+        while (x instanceof Var && x.ref !== null) {
+          if (!enter(x)) {
+            x = null;
+            break;
+          }
+          x = x.ref;
+        }
+        if (x instanceof Cons) {
+          if (--budget === 0) return isCyclicTracked(t);
+          if (anyMutated && mutatedCompounds.has(x) && !enter(x)) break;
+          stack.push(x.head);
+          x = x.tail;
+          continue;
+        }
+        if (x instanceof Struct) {
+          if (--budget === 0) return isCyclicTracked(t);
+          if (anyMutated && mutatedCompounds.has(x) && !enter(x)) break;
+          for (let i = x.args.length - 1; i >= 0; i--) stack.push(x.args[i]!);
+        }
+        break;
+      }
+    }
+  } catch (e) {
+    if (e === CYCLIC) return true;
+    throw e;
+  }
+  return false;
+}
+const CYCLIC = {};
+
+/** isCyclic tracking every compound on the path and every one explored: linear in the distinct compounds. */
+function isCyclicTracked(t: Term): boolean {
   const onPath = new Set<object>();
   const done = new Set<object>();
   const stack: [Term, boolean][] = [[t, false]];
@@ -1780,6 +1856,10 @@ export function collectVars(t: Term): Var[] {
 function setArg(m: Machine, n: Term, t: Term, v: Term, backtrackable: boolean): boolean {
   const i = intArg(n);
   const d = deref(t);
+  if (d instanceof Struct || d instanceof Cons) {
+    mutatedCompounds.add(d);
+    anyMutated = true;
+  }
   if (d instanceof Struct) {
     if (i < 1 || i > d.args.length) return false;
     const old = d.args[i - 1]!;

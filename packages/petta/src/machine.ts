@@ -10,7 +10,9 @@
 // am[implements a-pe-runtime]
 
 import { readSync } from "node:fs";
-import { Clause, Database, Ground, Slot, clauseArgHashes, compileClause, groundHash } from "./db";
+import { evalArith } from "./arith";
+import { Resume, compileClauseCode, type Runtime } from "./compile";
+import { Clause, Database, Ground, Pred, Slot, argHashIndex, clauseArgHashes, compileClause, groundHash } from "./db";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "./swi-index";
 import { OpTable, PrologSyntaxError } from "./prolog-reader";
 import {
@@ -44,13 +46,37 @@ export type Vars = (Term | undefined)[] | null;
  */
 export class Frame {
   constructor(
-    public readonly goal: Term,
+    /** A goal template, or where a compiled body resumes (compile.ts Resume). */
+    public readonly goal: Term | Resume,
     public readonly next: Frame | null,
     public readonly cb: number,
     public readonly cc: number,
     public readonly vars: Vars = null,
   ) {}
 }
+
+/**
+ * A predicate as compiled bodies call it: its builtin, kept current by defBuiltin and by a clause replacing a
+ * builtin, and its clause set once one exists (a Pred, once made, stays in the database).
+ * am[implements a-petta-speed-1105.goal]
+ */
+export class ProcCell {
+  builtin: Builtin | undefined = undefined;
+  pred: Pred | undefined = undefined;
+  constructor(
+    readonly name: string,
+    readonly arity: number,
+    readonly key: string,
+  ) {}
+}
+
+/**
+ * A clause body is compiled on its COMPILE_AFTER-th entry; PETTA_COMPILE=off keeps every body interpreted, the
+ * baseline the compiled engine is checked against.
+ * am[implements a-petta-speed-1105.goal]
+ */
+const COMPILE_AFTER = process.env.PETTA_COMPILE === "off" ? Infinity : Number(process.env.PETTA_COMPILE_AFTER ?? 32);
+const RUNTIME: Runtime = { Frame, E: evalArith, C: copyLiteral, copy: (t) => copyTerm(t), atomicEq: (x, y) => atomicEq(x, y) };
 
 const enum K {
   Clauses,
@@ -64,29 +90,59 @@ const enum K {
   Cleanup,
 }
 
+/**
+ * A choicepoint. Every kind has one shape, so the stack stays monomorphic, and three untyped fields serve each kind's
+ * own data through the named accessors below, so a choicepoint is eleven fields rather than one per role.
+ * am[implements a-petta-speed-1105.goal]
+ */
 class CP {
-  // Fields of every kind, set in one shape so the stack stays monomorphic.
-  scan: Scan | null = null;
+  private a: unknown = null;
+  private b: unknown = null;
+  private c: unknown = null;
+  /** Clauses: the next candidate; Soft: 1 once its else branch is gone. */
   idx = 0;
+  /** Clauses: the generation the call sees. */
   gen = 0;
-  args: Term[] | null = null;
-  alt: Frame | null = null;
-  iter: Iterator<unknown> | null = null;
-  catcher: Term = NIL;
-  recovery: Term = NIL;
-  recVars: Vars = null;
-  results: Term[] | null = null;
-  template: Term = NIL;
-  list: Term = NIL;
-  disabled = false;
+  /** Trail entries below this index, above trailTop, were already tidied against this choicepoint (tidyTrail). */
+  tidied = 0;
   constructor(
     public readonly kind: K,
     public readonly trailTop: number,
-    public readonly varMark: number,
+    /** Variables numbered from here on are newer than the choicepoint; a clause retry moves it to the retry's start. */
+    public varMark: number,
     public readonly next: Frame | null,
     public readonly cb: number,
     public readonly cc: number,
   ) {}
+  // Clauses: the scan, the call's arguments, and its ground argument hashes for a long scan (tryClauses).
+  get scan(): Scan | null { return this.a as Scan | null; }
+  set scan(v: Scan | null) { this.a = v; }
+  get args(): Term[] | null { return this.b as Term[] | null; }
+  set args(v: Term[] | null) { this.b = v; }
+  get hashes(): (number | null)[] | null { return this.c as (number | null)[] | null; }
+  set hashes(v: (number | null)[] | null) { this.c = v; }
+  // Alt and Soft: the alternative; Soft: whether it is disabled.
+  get alt(): Frame | null { return this.a as Frame | null; }
+  set alt(v: Frame | null) { this.a = v; }
+  get disabled(): boolean { return this.idx === 1; }
+  set disabled(v: boolean) { this.idx = v ? 1 : 0; }
+  // Redo: the builtin's iterator.
+  get iter(): Iterator<unknown> | null { return this.a as Iterator<unknown> | null; }
+  set iter(v: Iterator<unknown> | null) { this.a = v; }
+  // Catch: catcher, recovery and the recovery's variables; Cleanup: the cleanup goal as `recovery`.
+  get catcher(): Term { return (this.a ?? NIL) as Term; }
+  set catcher(v: Term) { this.a = v; }
+  get recovery(): Term { return (this.b ?? NIL) as Term; }
+  set recovery(v: Term) { this.b = v; }
+  get recVars(): Vars { return this.c as Vars; }
+  set recVars(v: Vars) { this.c = v; }
+  // Findall: the results so far, the template and the list to unify with them.
+  get results(): Term[] | null { return this.a as Term[] | null; }
+  set results(v: Term[] | null) { this.a = v; }
+  get template(): Term { return (this.b ?? NIL) as Term; }
+  set template(v: Term) { this.b = v; }
+  get list(): Term { return (this.c ?? NIL) as Term; }
+  set list(v: Term) { this.c = v; }
 }
 
 export type DetBuiltin = (m: Machine, args: Term[]) => boolean;
@@ -100,10 +156,38 @@ export type NondetBuiltin = (m: Machine, args: Term[]) => Iterator<unknown>;
 export interface Builtin {
   readonly det?: DetBuiltin;
   readonly nondet?: NondetBuiltin;
+  /**
+   * For a nondeterministic builtin, its answer when the call's mode makes it deterministic, decided by looking at the
+   * arguments only: true or false as a det builtin returns, null when the generator must run. The generator's last
+   * solution would leave no choicepoint there, so taking this answer instead changes nothing but the cost.
+   * am[implements a-petta-speed-1105.goal]
+   */
+  readonly detMode?: (m: Machine, args: Term[]) => boolean | null;
 }
 
 type TrailEntry = Var | (() => void);
 const EMPTY: Term[] = [];
+const EMPTY_POS: number[] = [];
+
+/** The first index of ascending `a` whose value is at least `x`. Time: log of a's length. */
+function lowerBound(a: number[], x: number): number {
+  let lo = 0;
+  let hi = a.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (a[mid]! < x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+/** The goals step() runs itself rather than through a builtin or the clause database. */
+const STEP_CONTROL = new Set([
+  "true/0", "fail/0", "false/0", "!/0", "halt/0", "$cut/1", "$softcut/1", "$nafail/1", "$scc_exit/1", "$fa_collect/1",
+  "$catch_exit/1", "\\+/1", "call/1", "once/1", "ignore/1", "throw/1", "halt/1", ",/2", ";/2", "->/2", "*->/2",
+  "call_cleanup/2", "forall/2", "findall/3", "setup_call_cleanup/3", "catch/3",
+]);
+/** The variable array of a clause activation with no slots; nothing writes into it. */
+const NO_VARS: (Term | undefined)[] = [];
 
 /** What one thread of control owns: its goals, choicepoints, trail, pending wakeups and global variables. */
 interface SolverState {
@@ -199,11 +283,13 @@ function shareHead(h: Term): Term {
 }
 
 export class Machine {
-  readonly db = new Database();
+  /** The clause database; replaceDatabase swaps in one an image rebuilt. */
+  db = new Database();
   readonly builtins = new Map<string, Builtin>();
   /** The arities of each builtin name in the order their keys entered `builtins`, kept with it by defBuiltin and addClause. */
   // am[implements a-petta-speed-1105.scans]
   readonly builtinArities = new Map<string, number[]>();
+  private readonly cells = new Map<string, ProcCell>();
   /** With PETTA_PROFILE set: calls per predicate key, and clause candidates examined under "#key" (profileReport). */
   readonly profile: Map<string, number> | null = process.env.PETTA_PROFILE ? new Map() : null;
   /** The file whose clauses a consult is adding now; clauses added meanwhile are static and record it. */
@@ -217,14 +303,18 @@ export class Machine {
   /** flag/3 values, shared by every thread of control as SWI's flags are. */
   readonly flagValues = new Map<string, Term>();
   readonly flags = new Map<string, Term>();
-  private goals: Frame | null = null;
+  /** When set, current_prolog_flag/2 counts its reads per flag here (the image builder finds argv's readers so). */
+  // am[implements a-petta-speed-1105.startup.image]
+  flagReads: Map<string, number> | null = null;
+  /** The continuation: the goal to run next and, through `next`, the rest. Compiled bodies set it at a call. */
+  goals: Frame | null = null;
   private cps: CP[] = [];
   private trail: TrailEntry[] = [];
   /** Variables created at or after the newest choicepoint need no trail entry. */
   private trailBoundary = 0;
   private curCC = -1;
   /** Attribute hooks woken by binding attributed variables: [module, value, other], run before the next goal. */
-  private wakeups: Term[] = [];
+  wakeups: Term[] = [];
   readonly ops = new OpTable();
   /** Predicates declared with `:- table`, as Name/Arity keys, and their completed answer tables by variant. */
   readonly tabled = new Set<string>();
@@ -311,12 +401,40 @@ export class Machine {
 
   undoTo(mark: number): void {
     const tr = this.trail;
-    for (let i = tr.length - 1; i >= mark; i--) {
-      const e = tr[i]!;
+    // Popping, not assigning length: shrinking an array through its length costs tens of nanoseconds in V8.
+    // am[implements a-petta-speed-1105.goal] am[rests-on c-js-length-shrink-cost]
+    while (tr.length > mark) {
+      const e = tr.pop()!;
       if (e instanceof Var) e.ref = null;
       else e();
     }
-    tr.length = mark;
+  }
+
+  /**
+   * After choicepoints went without backtracking (a cut, a determinate exit), drop the trail entries above the
+   * choicepoint now on top that record bindings of variables made after it: backtracking to it never meets those
+   * variables again, so the entries only kept them and their values alive. Undo actions stay. As WAM systems tidy the
+   * trail on cut; a deterministic loop with if-then-else otherwise grows the trail by every binding it makes.
+   * Time: the entries above the top choicepoint's mark.
+   * am[implements a-petta-speed-1105.memory]
+   */
+  private tidyTrail(): void {
+    const n = this.cps.length;
+    if (n === 0) return;
+    const top = this.cps[n - 1]!;
+    const tr = this.trail;
+    // What an earlier tidy against this choicepoint kept stays kept, so only newer entries are scanned: the entries
+    // a tidy keeps (undo actions, older variables) are otherwise rescanned by every later cut.
+    const from = Math.max(top.trailTop, Math.min(top.tidied, tr.length));
+    const mark = top.varMark;
+    let w = from;
+    for (let r = from; r < tr.length; r++) {
+      const e = tr[r]!;
+      if (e instanceof Var && e.id >= mark) continue;
+      tr[w++] = e;
+    }
+    while (tr.length > w) tr.pop();
+    top.tidied = w;
   }
 
   private pushCP(kind: K, next: Frame | null, cb: number, cc: number): CP {
@@ -334,8 +452,9 @@ export class Machine {
         const cp = this.cps[i]!;
         if (cp.kind === K.Cleanup) (cleanups ??= []).push(cp.recovery);
       }
-      this.cps.length = h;
+      while (this.cps.length > h) this.cps.pop();
       this.trailBoundary = h > 0 ? this.cps[h - 1]!.varMark : 0;
+      this.tidyTrail();
       if (cleanups !== null) for (const c of cleanups) this.runCleanup(c);
     }
   }
@@ -383,6 +502,11 @@ export class Machine {
     return true;
   }
 
+  /** bindAttr for compiled heads (compile.ts). */
+  bindVar(v: Var, t: Term): void {
+    this.bindAttr(v, t);
+  }
+
   /** Bind, waking each attribute's attr_unify_hook(Value, Other) as SWI does after the unification. */
   private bindAttr(v: Var, t: Term): void {
     this.bind(v, t);
@@ -419,7 +543,8 @@ export class Machine {
 
   // ---- clause renaming ----
 
-  private inst(t: Term, vars: (Term | undefined)[]): Term {
+  /** A stored template with its slots read from `vars` (a fresh variable for a slot not yet set) and its ground parts copied. */
+  inst(t: Term, vars: (Term | undefined)[]): Term {
     if (t instanceof Slot) {
       const v = vars[t.i];
       if (v !== undefined) return v;
@@ -478,8 +603,13 @@ export class Machine {
     return atomicEq(tpl, act);
   }
 
+  /** unifyHead for one argument, for compiled heads whose template is too large to inline (compile.ts). */
+  unifyHeadArg(tpl: Term, act: Term, vars: (Term | undefined)[]): boolean {
+    return this.unifyHead(tpl, act, vars);
+  }
+
   /** Unify a stored ground literal with a call argument; a call variable is bound to a copy of the literal's part. */
-  private unifyLiteral(lit: Term, act: Term): boolean {
+  unifyLiteral(lit: Term, act: Term): boolean {
     act = deref(act);
     if (act instanceof Var) {
       this.bindAttr(act, copyLiteral(lit));
@@ -516,11 +646,7 @@ export class Machine {
     const key = name + "/" + arity;
     // SWI protects ISO and boot-defined predicates; a user definition of any other builtin (plus/3, succ/2)
     // replaces it in the user module.
-    if (this.builtins.has(key) && !PROTECTED.has(key)) {
-      this.builtins.delete(key);
-      const ar = this.builtinArities.get(name)!;
-      ar.splice(ar.indexOf(arity), 1);
-    }
+    if (this.builtins.has(key) && !PROTECTED.has(key)) this.removeBuiltin(key);
     if (this.builtins.has(key) || this.libraryPreds.has(key))
       throw new PrologError(
         mkStruct("error", mkStruct("permission_error", "modify", "static_procedure", mkStruct("/", name, arity)), mkVar()),
@@ -572,6 +698,190 @@ export class Machine {
       else ar.push(arity);
     }
     this.builtins.set(key, b);
+    const cell = this.cells.get(key);
+    if (cell !== undefined) cell.builtin = b;
+  }
+
+  /** Remove a builtin, as a clause defining its name and arity does and as an image of such a state restores. */
+  removeBuiltin(key: string): void {
+    if (!this.builtins.delete(key)) return;
+    const i = key.lastIndexOf("/");
+    const ar = this.builtinArities.get(key.slice(0, i))!;
+    ar.splice(ar.indexOf(Number(key.slice(i + 1))), 1);
+    const cell = this.cells.get(key);
+    if (cell !== undefined) cell.builtin = undefined;
+  }
+
+  /** Install a database an image rebuilt; procedure cells forget the predicates of the old one. */
+  // am[implements a-petta-speed-1105.startup.image]
+  replaceDatabase(db: Database): void {
+    this.db = db;
+    for (const c of this.cells.values()) c.pred = undefined;
+  }
+
+  /** How many host objects (streams) are registered. */
+  objectCount(): number {
+    return this.objects.length;
+  }
+
+  /** The cell compiled bodies call Name/Arity through. */
+  procCell(name: string, arity: number): ProcCell {
+    const key = predKey(name, arity);
+    let c = this.cells.get(key);
+    if (c === undefined) {
+      c = new ProcCell(name, arity, key);
+      c.builtin = this.builtins.get(key);
+      this.cells.set(key, c);
+    }
+    return c;
+  }
+
+  // ---- the interface of compiled bodies (compile.ts) ----
+
+  /** The choicepoint height now, which a cut back to it restores. */
+  cpHeight(): number {
+    return this.cps.length;
+  }
+
+  /**
+   * Push the choicepoint an if-then-else (Alt), soft-cut (Soft) or negation (Not) pushes, its alternative the
+   * body resuming at `r` (the activation's continuation when null); returns the height before it.
+   */
+  pushResumeCP(kind: "Alt" | "Soft" | "Not", r: Resume | null, f: Frame): number {
+    const h = this.cps.length;
+    const alt = r === null ? f.next : new Frame(r, f.next, f.cb, f.cc, f.vars);
+    if (kind === "Not") this.pushCP(K.Not, alt, f.cb, f.cc);
+    else this.pushCP(kind === "Alt" ? K.Alt : K.Soft, f.next, f.cb, f.cc).alt = alt;
+    return h;
+  }
+
+  /** The commit of a soft-cut whose choicepoint is at `i` ($softcut). */
+  // am[implements a-hp-cp-parity]
+  softCut(i: number): void {
+    const cp = this.cps[i];
+    if (cp !== undefined && cp.kind === K.Soft) {
+      // A condition that left no choicepoint has no more solutions, so the else branch goes now, as in SWI.
+      if (i === this.cps.length - 1) this.cutTo(i);
+      else cp.disabled = true;
+    }
+  }
+
+  /** Return to the run loop before the step at `r`, so attribute hooks woken by a binding run first. */
+  suspend(f: Frame, r: Resume | null): boolean {
+    if (r !== null) this.goals = new Frame(r, f.next, f.cb, f.cc, f.vars);
+    return true;
+  }
+
+  /**
+   * findall/3 in a compiled body: the choicepoint that collects the goal's solutions and, once the goal has none
+   * left, unifies the list and resumes the body at `r`; returns its height. As step's findall/3.
+   */
+  pushFindall(template: Term, list: Term, r: Resume | null, f: Frame): number {
+    const h = this.cps.length;
+    const cp = this.pushCP(K.Findall, r === null ? f.next : new Frame(r, f.next, f.cb, f.cc, f.vars), f.cb, f.cc);
+    cp.results = [];
+    cp.template = template;
+    cp.list = list;
+    return h;
+  }
+
+  /** One solution of a findall goal: a copy of the template joins the results ($fa_collect). */
+  faCollect(h: number): void {
+    const cp = this.cps[h]!;
+    cp.results!.push(copyTerm(cp.template));
+  }
+
+  /**
+   * call/N in a compiled body, as step runs it: the closure with the extra arguments added; a control construct goes
+   * to step as an interpreted goal whose cut is local to it, anything else through callCell.
+   */
+  callN(g: Term, extra: Term[], f: Frame, r: Resume | null): 0 | 1 | 2 {
+    const goal = addArgs(unqualify(g), extra);
+    const name = typeof goal === "string" ? goal : (goal as Struct).name;
+    const args = typeof goal === "string" ? EMPTY : (goal as Struct).args;
+    if (STEP_CONTROL.has(predKey(name, args.length)) || (name === "call" && args.length > 1)) {
+      this.goals = new Frame(goal, r === null ? f.next : new Frame(r, f.next, f.cb, f.cc, f.vars), this.cps.length, f.cc);
+      return 2;
+    }
+    return this.callCell(this.procCell(name, args.length), args, f, r);
+  }
+
+  /**
+   * Call `cell` from a compiled body as step() calls a resolved goal, the body to resume at `r` after it (its own
+   * continuation when null): 1 when a det builtin succeeded and the body goes on inline, 2 when the continuation is
+   * in `goals` and the body returns, 0 on failure.
+   */
+  callCell(cell: ProcCell, args: Term[], f: Frame, r: Resume | null): 0 | 1 | 2 {
+    const key = cell.key;
+    if (this.profile !== null) this.profile.set(key, (this.profile.get(key) ?? 0) + 1);
+    const b = cell.builtin;
+    if (b !== undefined) {
+      if (b.det !== undefined) {
+        const before = this.goals;
+        if (!b.det(this, args)) return 0;
+        if (this.goals !== before) {
+          // The builtin pushed goals (call-like builtins do): the rest of this body runs after them.
+          if (r !== null) this.goals = this.splice(this.goals, before, new Frame(r, f.next, f.cb, f.cc, f.vars));
+          return 2;
+        }
+        if (this.wakeups.length !== 0) {
+          this.suspend(f, r);
+          return 2;
+        }
+        return 1;
+      }
+      if (b.detMode !== undefined) {
+        const d = b.detMode(this, args);
+        if (d !== null) {
+          if (!d) return 0;
+          if (this.wakeups.length !== 0) {
+            this.suspend(f, r);
+            return 2;
+          }
+          return 1;
+        }
+      }
+      const next = r === null ? f.next : new Frame(r, f.next, f.cb, f.cc, f.vars);
+      const h = this.cps.length;
+      const cp = this.pushCP(K.Redo, next, f.cb, f.cc);
+      cp.iter = b.nondet!(this, args);
+      const res = cp.iter.next();
+      if (res.done) {
+        this.cutTo(h);
+        if (res.value !== true) return 0;
+      }
+      this.goals = next;
+      return 2;
+    }
+    const next = r === null ? f.next : new Frame(r, f.next, f.cb, f.cc, f.vars);
+    if (this.tabled.size > 0 && this.tabled.has(key)) {
+      if (!this.callTabled(cell.name, args, next, f.cb, f.cc)) return 0;
+      this.goals = next;
+      return 2;
+    }
+    let p = cell.pred ?? (cell.pred = this.db.preds.get(key));
+    if (p === undefined && this.autoload !== null && this.autoload(cell.name, cell.arity)) p = cell.pred = this.db.preds.get(key);
+    if (p !== undefined) {
+      const scan = clauseScan(p, args);
+      return this.tryClauses(scan, scan.start, this.db.generation, args, next, f.cc) ? 2 : 0;
+    }
+    if (this.flags.get("unknown") === "fail") return 0;
+    throw existenceError("procedure", mkStruct("/", cell.name, cell.arity));
+  }
+
+  /** `top` with the frames it has before reaching `old` rebuilt to end in `tail` instead: they are fresh, so nothing else holds them. */
+  private splice(top: Frame | null, old: Frame | null, tail: Frame): Frame {
+    const pushed: Frame[] = [];
+    for (let x = top; x !== old; x = x.next) {
+      if (x === null) throw new Error("internal: pushed goals do not end in the continuation");
+      pushed.push(x);
+    }
+    let out = tail;
+    for (let i = pushed.length - 1; i >= 0; i--) {
+      const x = pushed[i]!;
+      out = new Frame(x.goal, out, x.cb, x.cc, x.vars);
+    }
+    return out;
   }
 
   // ---- solving ----
@@ -642,7 +952,7 @@ export class Machine {
             if (this.step(f)) {
               if (this.wakeups.length > 0) this.flushWakeups();
             } else {
-              this.wakeups.length = 0;
+              if (this.wakeups.length !== 0) this.wakeups.length = 0;
               if (!this.backtrack(1)) return "failed";
               if (this.wakeups.length > 0) this.flushWakeups();
             }
@@ -717,7 +1027,7 @@ export class Machine {
           if (this.step(f)) {
             if (this.wakeups.length > 0) this.flushWakeups();
           } else {
-            this.wakeups.length = 0;
+            if (this.wakeups.length !== 0) this.wakeups.length = 0;
             if (!this.backtrack(base)) return false;
             if (this.wakeups.length > 0) this.flushWakeups();
           }
@@ -742,9 +1052,8 @@ export class Machine {
       this.undoTo(cp.trailTop);
       switch (cp.kind) {
         case K.Clauses: {
-          cps.pop();
-          this.trailBoundary = cps.length > 0 ? cps[cps.length - 1]!.varMark : 0;
-          if (this.tryClauses(cp.scan!, cp.idx, cp.gen, cp.args!, cp.next, cp.cc)) return true;
+          // The choicepoint stays for the retry, which moves it on or pops it at the last candidate.
+          if (this.tryClauses(cp.scan!, cp.idx, cp.gen, cp.args!, cp.next, cp.cc, cp)) return true;
           break;
         }
         case K.Alt:
@@ -816,8 +1125,8 @@ export class Machine {
     while (c >= base) {
       const cp = this.cps[c];
       if (cp === undefined || cp.kind !== K.Catch) break;
+      this.unwindTo(c);
       this.undoTo(cp.trailTop);
-      this.cutTo(c);
       const mark = this.trail.length;
       if (this.unify(cp.catcher, ball)) {
         this.goals = new Frame(cp.recovery, cp.next, cp.cb, cp.cc, cp.recVars);
@@ -828,17 +1137,36 @@ export class Machine {
     }
     // Not ours: unwind this run to its barrier so the caller resumes from a clean state.
     const bar = this.cps[base - 1];
+    this.unwindTo(base);
     if (bar !== undefined) this.undoTo(bar.trailTop);
-    this.cutTo(base);
     // Rethrow the copied ball so bindings undone here cannot change it.
     if (ball !== e.ball) throw new PrologError(ball);
     return false;
   }
 
   /**
+   * Pop the choicepoints from height `h` up as an exception passes them: each setup_call_cleanup cleanup on the way
+   * runs with the bindings undone to its own setup, so it sees what its setup left and nothing its goal bound, as in
+   * SWI, so setup_call_cleanup keeps its cleanup goal as it is instead of copying it.
+   * am[implements a-petta-speed-1105.goal] am[rests-on c-scc-cleanup-bindings]
+   */
+  private unwindTo(h: number): void {
+    while (this.cps.length > h) {
+      const cp = this.cps.pop()!;
+      this.trailBoundary = this.cps.length > 0 ? this.cps[this.cps.length - 1]!.varMark : 0;
+      if (cp.kind === K.Cleanup) {
+        this.undoTo(cp.trailTop);
+        this.runCleanup(cp.recovery);
+      }
+    }
+  }
+
+  /**
    * Try the clauses of `scan` from `start` that are visible at `gen` and that its key admits; after a match a
    * choicepoint stays only if another admitted clause follows within SWI's lookahead (pl-index.c
    * next_clause_primary_index), so the last candidate leaves none, as in SWI.
+   * A retry passes the call's choicepoint, on top of the stack: it is moved on to the next alternative in place, as
+   * the WAM's retry instruction does, or popped before the last candidate is tried.
    * am[implements a-hp-swi-clause-select]
    */
   private tryClauses(
@@ -848,16 +1176,54 @@ export class Machine {
     args: Term[],
     next: Frame | null,
     cc: number,
+    retry: CP | null = null,
   ): boolean {
-    const h = this.cps.length;
+    let cp = retry;
+    const h = cp === null ? this.cps.length : this.cps.length - 1;
     const cands = scan.list;
     const len = cands.length;
     const key = scan.key;
     const keyAt = key === null ? null : scan.keyAt;
     // On a long scan, ground call arguments are hashed once so a clause whose ground head argument hashes apart is
     // passed over without a unification. The lookahead below still counts it, so choicepoints stay where SWI's do.
-    const callHashes = len - start > 8 ? groundArgHashes(args) : null;
+    const callHashes = cp !== null ? cp.hashes : len - start > 8 ? groundArgHashes(args) : null;
+    const wl = this.wakeups.length;
+    // With a ground call argument, the scan visits only the positions where that argument can match: those holding
+    // its hash or a non-ground argument, from the argument with the fewest (db.ts ArgHashIndex). Positions are
+    // skipped exactly when hashesDiffer would skip them, so the lookahead below sees what it saw before.
+    // am[implements a-petta-speed-1105.outliers.spaces]
+    let posA: number[] | null = null;
+    let posB: number[] = EMPTY_POS;
+    let ia = 0;
+    let ib = 0;
+    if (callHashes !== null) {
+      let best = Infinity;
+      for (let p = 0; p < callHashes.length; p++) {
+        const hp = callHashes[p];
+        if (hp === null || hp === undefined) continue;
+        const ix = argHashIndex(cands, p);
+        const a = ix.byHash.get(hp) ?? EMPTY_POS;
+        const n = a.length + ix.open.length;
+        if (n < best) {
+          best = n;
+          posA = a;
+          posB = ix.open;
+        }
+      }
+      if (posA !== null) {
+        ia = lowerBound(posA, start);
+        ib = lowerBound(posB, start);
+      }
+    }
     for (let i = start; i < len; i++) {
+      if (posA !== null) {
+        while (ia < posA.length && posA[ia]! < i) ia++;
+        while (ib < posB.length && posB[ib]! < i) ib++;
+        const na = ia < posA.length ? posA[ia]! : len;
+        const nb = ib < posB.length ? posB[ib]! : len;
+        i = na < nb ? na : nb;
+        if (i >= len) break;
+      }
       const c = cands[i]!;
       if (this.profile !== null) {
         const pk = "#" + c.pred.name + "/" + c.pred.arity;
@@ -879,48 +1245,69 @@ export class Machine {
         }
         if (--budget === 0) break;
       }
-      let cp: CP | null = null;
       if (j < len) {
-        cp = this.pushCP(K.Clauses, next, h, cc);
-        cp.scan = scan;
+        if (cp === null) {
+          cp = this.pushCP(K.Clauses, next, h, cc);
+          cp.scan = scan;
+          cp.gen = gen;
+          cp.args = args;
+          cp.hashes = callHashes;
+        } else this.trailBoundary = cp.varMark = varCount();
         cp.idx = j;
-        cp.gen = gen;
-        cp.args = args;
+      } else if (cp !== null) {
+        // The last candidate leaves no choicepoint.
+        this.cps.pop();
+        this.trailBoundary = this.cps.length > 0 ? this.cps[this.cps.length - 1]!.varMark : 0;
+        cp = null;
       }
       const mark = this.trail.length;
-      const vars: (Term | undefined)[] = new Array(c.nvars);
-      const head = c.head;
+      // am[implements a-petta-speed-1105.goal]
+      let code = c.code;
+      if (code === null && ++c.entries >= COMPILE_AFTER) code = c.code = compileClauseCode(this, c, RUNTIME);
+      const nv = code !== null ? code.nslots : c.nvars;
+      const vars: (Term | undefined)[] = nv === 0 ? NO_VARS : new Array(nv);
       let ok = true;
-      if (head instanceof Struct)
-        for (let k = 0; k < args.length; k++)
-          if (!this.unifyHead(head.args[k]!, args[k]!, vars)) {
-            ok = false;
-            break;
-          }
+      if (code !== null) ok = code.head(this, args, vars);
+      else {
+        const head = c.head;
+        if (head instanceof Struct)
+          for (let k = 0; k < args.length; k++)
+            if (!this.unifyHead(head.args[k]!, args[k]!, vars)) {
+              ok = false;
+              break;
+            }
+      }
       if (ok) {
         const body = c.body;
         if (body !== "true") {
           // Every body variable exists before the body runs, so its bindings are trailed against the
           // body's own choicepoints and a shared frame never meets a variable from a failed branch.
-          for (let k = 0; k < vars.length; k++) if (vars[k] === undefined) vars[k] = mkVar();
-          this.goals = new Frame(body, next, h, cc, vars);
+          for (let k = 0; k < c.nvars; k++) if (vars[k] === undefined) vars[k] = mkVar();
+          this.goals = new Frame(code !== null ? code.entry! : body, next, h, cc, vars);
         } else this.goals = next;
         return true;
       }
       this.undoTo(mark);
-      if (cp !== null) {
-        this.cps.pop();
-        this.trailBoundary = this.cps.length > 0 ? this.cps[this.cps.length - 1]!.varMark : 0;
-      }
+      // Hooks a failed head unification woke belong to bindings it undid.
+      if (this.wakeups.length !== wl) this.wakeups.length = wl;
       i = j - 1;
+    }
+    if (cp !== null) {
+      this.cps.pop();
+      this.trailBoundary = this.cps.length > 0 ? this.cps[this.cps.length - 1]!.varMark : 0;
     }
     return false;
   }
 
   /** Execute one goal. Returns false on failure; may replace the continuation and push choicepoints. */
   private step(f: Frame): boolean {
+    const g0 = f.goal;
+    if (g0 instanceof Resume) {
+      this.curCC = f.cc;
+      return g0.fn(this, f, g0.pc);
+    }
     this.curCC = f.cc;
-    let g: Term = f.goal;
+    let g = g0;
     let vars = f.vars;
     if (vars !== null) {
       if (g instanceof Slot) {
@@ -961,14 +1348,7 @@ export class Machine {
           return true;
         }
         if (name === "$softcut") {
-          // am[implements a-hp-cp-parity]
-          const i = deref(args[0]!) as number;
-          const cp = this.cps[i];
-          if (cp !== undefined && cp.kind === K.Soft) {
-            // A condition that left no choicepoint has no more solutions, so the else branch goes now, as in SWI.
-            if (i === this.cps.length - 1) this.cutTo(i);
-            else cp.disabled = true;
-          }
+          this.softCut(deref(args[0]!) as number);
           return true;
         }
         if (name === "$nafail") {
@@ -982,6 +1362,7 @@ export class Machine {
           if (cp !== undefined && cp.kind === K.Cleanup && this.cps.length === h + 1) {
             this.cps.pop();
             this.trailBoundary = this.cps.length > 0 ? this.cps[this.cps.length - 1]!.varMark : 0;
+            this.tidyTrail();
             this.runCleanup(cp.recovery);
           }
           return true;
@@ -998,6 +1379,7 @@ export class Machine {
           if (cp !== undefined && cp.kind === K.Catch && this.cps.length === h + 1) {
             this.cps.pop();
             this.trailBoundary = this.cps.length > 0 ? this.cps[this.cps.length - 1]!.varMark : 0;
+            this.tidyTrail();
           }
           return true;
         }
@@ -1099,6 +1481,10 @@ export class Machine {
         // A det builtin may have replaced the continuation (e.g. by pushing goals); keep it if so.
         return true;
       }
+      if (b.detMode !== undefined) {
+        const r = b.detMode(this, args);
+        if (r !== null) return r;
+      }
       const h = this.cps.length;
       const cp = this.pushCP(K.Redo, f.next, f.cb, f.cc);
       cp.iter = b.nondet!(this, args);
@@ -1109,7 +1495,7 @@ export class Machine {
       }
       return true;
     }
-    if (this.tabled.size > 0 && this.tabled.has(key)) return this.callTabled(name, args, f);
+    if (this.tabled.size > 0 && this.tabled.has(key)) return this.callTabled(name, args, f.next, f.cb, f.cc);
     const p = this.db.preds.get(key);
     if (p !== undefined) {
       const scan = clauseScan(p, args);
@@ -1132,7 +1518,7 @@ export class Machine {
    * variance) by solving the clauses directly; later calls, and a recursive call while the first is running,
    * answer from the table. Time: one full evaluation per distinct variant.
    */
-  private callTabled(name: string, args: Term[], f: Frame): boolean {
+  private callTabled(name: string, args: Term[], next: Frame | null, cb: number, cc: number): boolean {
     const goal = new Struct(name, args);
     const vkey = variantKeyOf(goal);
     let answers = this.tables.get(vkey);
@@ -1158,7 +1544,7 @@ export class Machine {
     const h = this.cps.length;
     const list = answers.slice();
     const self = this;
-    const cp = this.pushCP(K.Redo, f.next, f.cb, f.cc);
+    const cp = this.pushCP(K.Redo, next, cb, cc);
     cp.iter = (function* () {
       for (const a of list) {
         if (self.unify(goal, copyTerm(a))) yield;
@@ -1178,7 +1564,8 @@ export class Machine {
     if (!this.solveOnce(setup)) return false;
     const h = this.cps.length;
     const cp = this.pushCP(K.Cleanup, f.next, f.cb, f.cc);
-    cp.recovery = copyTerm(cleanup, new Map(collectVarsOf(cleanup).map((v) => [v, v])));
+    // The cleanup runs on the goal as it stands: an exception undoes the goal's bindings before running it (unwindTo).
+    cp.recovery = cleanup;
     this.goals = new Frame(goal, new Frame(mkStruct("$scc_exit", h), f.next, f.cb, f.cc), h + 1, f.cc);
     return true;
   }
@@ -1220,21 +1607,6 @@ export class Machine {
   pushGoal(goal: Term): void {
     this.goals = new Frame(goal, this.goals, this.cps.length, this.curCC);
   }
-}
-
-function collectVarsOf(t: Term): Var[] {
-  const out: Var[] = [];
-  const go = (x: Term): void => {
-    x = deref(x);
-    if (x instanceof Var) {
-      if (!out.includes(x)) out.push(x);
-    } else if (x instanceof Cons) {
-      go(x.head);
-      go(x.tail);
-    } else if (x instanceof Struct) x.args.forEach(go);
-  };
-  go(t);
-  return out;
 }
 
 /** A string identifying a term up to variable renaming, for table keys. */
