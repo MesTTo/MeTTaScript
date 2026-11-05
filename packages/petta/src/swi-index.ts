@@ -82,6 +82,8 @@ export interface Scan {
 }
 
 const NO_CLAUSES: Scan = { list: [], start: 0, key: null, keyAt: null };
+/** A key no clause carries: the scan for a call key matching no clause key of a static list (ClauseList.primaryScan). */
+const NO_KEY = Symbol("no clause key") as unknown as Key;
 
 interface ArgInfo {
   assessed: boolean;
@@ -113,6 +115,10 @@ class ClauseIndex {
   buckets = new Map<Key, Clause[]>();
   varClauses: Clause[] = [];
   lists = new Map<Key, ClauseList>();
+  /** A hash index's scan of each bucket and of the variable clauses, made on first use; bucket arrays grow in place. */
+  // am[implements a-petta-speed-1105.goal.select-once]
+  scans = new Map<Key, Scan>();
+  varScan: Scan | null = null;
   size = 0;
   resizeAbove = 0;
   resizeBelow = 0;
@@ -137,6 +143,17 @@ class ClauseList {
   argInfo: ArgInfo[];
   private readonly keyCache = new Map<Clause, (Key | null | undefined)[]>();
   private readonly ownClauses: Clause[];
+  /** The scan of every clause, kept while the clause array is the same one. */
+  private all: Scan | null = null;
+  /**
+   * A static list's primary-key scans by call key, null where an index is looked for first, made on first use: its
+   * clauses never change, since a change to a static predicate replaces its lists. Keys no clause carries share
+   * `primaryOther`, and `headKeys` says which keys clauses carry.
+   */
+  // am[implements a-petta-speed-1105.goal.select-once]
+  private primaryScans: Map<Key, Scan | null> | null = null;
+  private primaryOther: Scan | null = null;
+  private headKeys: Set<Key> | null = null;
 
   constructor(
     private readonly root: SwiIndex,
@@ -284,62 +301,132 @@ class ClauseList {
   /** pl-index.c first_clause_guarded: the scan for a call with argument vector `args` at index depth `depth`. */
   select(args: readonly Term[], depth: number): Scan {
     if (depth === 0) this.updatePrimary();
-    if (this.unindexed || this.arity === 0) return { list: this.clauses, start: 0, key: null, keyAt: null };
+    if (this.unindexed || this.arity === 0) return this.allScan();
     const n = this.liveCount();
     if (n === 0) return NO_CLAUSES;
     for (;;) {
       const pindex = this.primary;
-      const pkey = termKey(deref(args[pindex]!));
-      const pkeyAt = this.keyAtFn(pindex);
       let fast: Scan | null = null;
-      if (pkey !== null && depth === 0 && n <= MIN_CLAUSES_FOR_INDEX) {
+      if (depth === 0 && n <= MIN_CLAUSES_FOR_INDEX) {
         // The primary key scan, unless its first two candidates both carry exactly the call's key.
-        const list = this.clauses;
-        let i = 0;
-        while (i < list.length && !(list[i]!.died === Infinity && matches(pkeyAt(list[i]!), pkey))) i++;
-        if (i === list.length) return NO_CLAUSES;
-        let j = i + 1;
-        while (j < list.length && !(list[j]!.died === Infinity && matches(pkeyAt(list[j]!), pkey))) j++;
-        fast = { list, start: i, key: pkey, keyAt: pkeyAt };
-        if (!(j < list.length && pkeyAt(list[j]!) === pkey && pkeyAt(list[i]!) === pkey)) return fast;
+        const pkey = termKey(deref(args[pindex]!));
+        if (pkey !== null) {
+          if (this.root.staticLike()) {
+            const s = this.cachedPrimaryScan(pkey);
+            if (s !== null) return s;
+          } else {
+            fast = this.primaryScan(pkey);
+            if (fast === NO_CLAUSES || !this.bothExact(fast)) return fast;
+          }
+        }
       }
-      let best = this.existingIndex(args);
+      // pl-index.c existing_hash: the first index whose arguments are all bound in the call, with the call's key.
+      let best: ClauseIndex | null = null;
+      let bestKey: Key | null = null;
+      for (const ci of this.indexes) {
+        bestKey = callIndexKey(ci, args);
+        if (bestKey !== null) {
+          best = ci;
+          break;
+        }
+      }
       if (best !== null) {
         if (!best.good) {
           if (!this.fixedIndexes && this.considerBetterIndex(best.speedup, n)) {
             const ci = this.createIndex(args, best);
-            if (ci !== null) best = ci;
+            if (ci !== null) {
+              best = ci;
+              bestKey = callIndexKey(ci, args);
+            }
           }
           if (!best.realised) {
             this.realise(best);
             continue;
           }
         }
-        return this.bucketScan(best, args, depth);
+        return this.bucketScan(best, bestKey!, args, depth);
       }
-      if (this.fixedIndexes) return { list: this.clauses, start: 0, key: pkey, keyAt: pkey === null ? null : pkeyAt };
+      if (this.fixedIndexes) return this.keyScan(pindex, args);
       if (this.root.staticLike() && depth === 0) {
         this.setCandidateIndexes();
         continue;
       }
       const ci = this.createIndex(args, null);
-      if (ci !== null) return this.bucketScan(ci, args, depth);
+      if (ci !== null) return this.bucketScan(ci, callIndexKey(ci, args)!, args, depth);
       if (fast !== null) return fast;
-      return { list: this.clauses, start: 0, key: pkey, keyAt: pkey === null ? null : pkeyAt };
+      return this.keyScan(pindex, args);
     }
   }
 
-  /** pl-index.c existing_hash: the first index whose arguments are all bound in the call. */
-  private existingIndex(args: readonly Term[]): ClauseIndex | null {
-    for (const ci of this.indexes) if (callIndexKey(ci, args) !== null) return ci;
-    return null;
+  /** The scan of every clause. */
+  private allScan(): Scan {
+    const list = this.clauses;
+    let s = this.all;
+    if (s === null || s.list !== list) this.all = s = { list, start: 0, key: null, keyAt: null };
+    return s;
+  }
+
+  /** The scan of every clause filtered by the call's key at argument `pindex`, or of every clause when it is unbound. */
+  private keyScan(pindex: number, args: readonly Term[]): Scan {
+    const pkey = termKey(deref(args[pindex]!));
+    return pkey === null ? this.allScan() : { list: this.clauses, start: 0, key: pkey, keyAt: this.keyAtFn(pindex) };
+  }
+
+  /** The primary-key scan for `pkey` from its first candidate, NO_CLAUSES when no clause can match. */
+  private primaryScan(pkey: Key): Scan {
+    const list = this.clauses;
+    const keyAt = this.keyAtFn(this.primary);
+    let i = 0;
+    while (i < list.length && !(list[i]!.died === Infinity && matches(keyAt(list[i]!), pkey))) i++;
+    return i === list.length ? NO_CLAUSES : { list, start: i, key: pkey, keyAt };
+  }
+
+  /** Whether a primary-key scan's first two candidates both carry exactly its key, so an index is looked for first. */
+  private bothExact(s: Scan): boolean {
+    const list = s.list;
+    const keyAt = s.keyAt!;
+    const key = s.key;
+    let j = s.start + 1;
+    while (j < list.length && !(list[j]!.died === Infinity && matches(keyAt(list[j]!), key!))) j++;
+    return j < list.length && keyAt(list[j]!) === key && keyAt(list[s.start]!) === key;
+  }
+
+  /**
+   * A static list's primary-key scan for `pkey`, or null when an index is looked for first, as primaryScan and
+   * bothExact decide it; a key no clause carries gets the scan of the variable-key clauses, with a key none carries.
+   */
+  private cachedPrimaryScan(pkey: Key): Scan | null {
+    let cache = this.primaryScans;
+    if (cache === null) {
+      cache = this.primaryScans = new Map();
+      const keyAt = this.keyAtFn(this.primary);
+      this.headKeys = new Set();
+      for (const c of this.clauses) {
+        const k = keyAt(c);
+        if (k !== null) this.headKeys.add(k);
+      }
+    }
+    let s = cache.get(pkey);
+    if (s === undefined) {
+      if (!this.headKeys!.has(pkey)) return (this.primaryOther ??= this.primaryScan(NO_KEY));
+      const p = this.primaryScan(pkey);
+      cache.set(pkey, (s = p === NO_CLAUSES || !this.bothExact(p) ? p : null));
+    }
+    return s;
   }
 
   /** pl-index.c nextClauseFromBucket and nextClauseFromList. */
-  private bucketScan(ci: ClauseIndex, args: readonly Term[], depth: number): Scan {
+  private bucketScan(ci: ClauseIndex, key: Key, args: readonly Term[], depth: number): Scan {
     if (!ci.realised) this.realise(ci);
-    const key = callIndexKey(ci, args)!;
-    if (!ci.list) return { list: ci.buckets.get(key) ?? ci.varClauses, start: 0, key: null, keyAt: null };
+    if (!ci.list) {
+      let s = ci.scans.get(key);
+      if (s === undefined) {
+        const b = ci.buckets.get(key);
+        if (b === undefined) return (ci.varScan ??= { list: ci.varClauses, start: 0, key: null, keyAt: null });
+        ci.scans.set(key, (s = { list: b, start: 0, key: null, keyAt: null }));
+      }
+      return s;
+    }
     const sub = ci.lists.get(key);
     if (sub !== undefined) {
       if (isFunctorKey(key) && depth < MAXINDEXDEPTH) {
@@ -360,6 +447,8 @@ class ClauseList {
     ci.buckets = new Map();
     ci.varClauses = [];
     ci.lists = new Map();
+    ci.scans = new Map();
+    ci.varScan = null;
     ci.size = 0;
     for (const c of this.clauses)
       if (c.died === Infinity && !this.addToIndex(ci, c, true)) {

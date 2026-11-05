@@ -112,9 +112,10 @@ export interface ArgvDirective {
 }
 
 /**
- * How the consulted state depends on argv: `preds` differ between consults with different argv and are defined
- * only by `directives`, which run again at load; `branchAtoms` are the atoms of the other directives that read argv
- * (they loaded files or defined more), so a run whose argv holds one of them consults instead.
+ * How the consulted state depends on argv: `directives` read argv and are the only source of `preds`' clauses, so
+ * they run again at load over emptied `preds`; `branchAtoms` are the atoms argv-reading directives test whose
+ * consult changed more than `preds` (or could not finish), so a run whose argv holds one of them consults instead.
+ * am[implements a-petta-speed-1105.startup.image-modes]
  */
 export interface ArgvDependence {
   readonly directives: ArgvDirective[];

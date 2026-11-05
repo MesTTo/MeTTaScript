@@ -5,8 +5,8 @@
 // Purpose: compile a stored clause's body into a JavaScript function the machine runs in place of interpreting its
 // goal terms. The body becomes a flat run of steps in a loop-switch, so a run can resume at any step: control
 // constructs become jumps and the same choicepoints the interpreter pushes, tests and arithmetic run inline, every
-// other goal goes through the machine's call path (Machine.callCell), and the constructs the interpreter keeps
-// (catch/3, findall/3, call/N, setup_call_cleanup/3, a variable goal) run as interpreted frames over the same
+// other goal goes through the machine's call path (Machine.callCell or callN), and the constructs the interpreter
+// keeps (catch/3, call/1, the cleanup forms, halt, a variable goal) run as interpreted frames over the same
 // variables. A step that binds returns to the machine before the next goal when it woke an attribute hook, so
 // hooks run where they do under the interpreter. Choicepoints stay exactly where the interpreter leaves them:
 // an if-then-else or negation whose condition is a pure test pushes none, and the interpreter's own pushes one
@@ -29,7 +29,10 @@ export class Resume {
 /** Runs a body from step `pc` with `f` as its activation (f.vars, f.next, f.cb, f.cc); false means failure. */
 export type BodyFn = (m: Machine, f: Frame, pc: number) => boolean;
 
-/** Unifies a clause head's arguments with a call's, filling the activation's variable slots, as Machine.unifyHead does. */
+/**
+ * Unifies a clause head's arguments with a call's, filling the activation's variable slots, as Machine.unifyHead does;
+ * once they unify, it also makes the fresh variables of the body's slots, so the activation is ready to run.
+ */
 export type HeadFn = (m: Machine, args: Term[], v: (Term | undefined)[]) => boolean;
 
 /**
@@ -47,6 +50,7 @@ type Label = { pc: number };
 type Step =
   | { k: "test"; js: string; else: Label | null }
   | { k: "exec"; js: string }
+  | { k: "set"; slot: number; js: string }
   | { k: "call"; cell: string; args: string }
   | { k: "calln"; goal: string; args: string }
   | { k: "fallback"; tpl: string; cb: string }
@@ -123,6 +127,8 @@ class BodyCompiler {
   readonly steps: Step[] = [];
   readonly consts: unknown[] = [];
   nslots: number;
+  /** The goals that assign their output slot directly, with the slot (freshOutputs). */
+  fresh = new Map<Term, number>();
 
   constructor(
     private readonly m: Machine,
@@ -295,11 +301,17 @@ class BodyCompiler {
         this.steps.push({ k: "throw", js: this.arg(args[0]!) });
         return;
       case "is/2":
-        this.steps.push({ k: "exec", js: `m.unify(${this.arg(args[0]!)}, ${this.expr(args[1]!)})` });
+        if (this.fresh.has(t)) this.steps.push({ k: "set", slot: this.fresh.get(t)!, js: this.expr(args[1]!) });
+        else this.steps.push({ k: "exec", js: `m.unify(${this.arg(args[0]!)}, ${this.expr(args[1]!)})` });
         return;
-      case "=/2":
-        this.steps.push({ k: "exec", js: `m.unify(${this.arg(args[0]!)}, ${this.arg(args[1]!)})` });
+      case "=/2": {
+        const s = this.fresh.get(t);
+        if (s !== undefined) {
+          const other = args[0] instanceof Slot && args[0].i === s ? args[1]! : args[0]!;
+          this.steps.push({ k: "set", slot: s, js: this.arg(other) });
+        } else this.steps.push({ k: "exec", js: `m.unify(${this.arg(args[0]!)}, ${this.arg(args[1]!)})` });
         return;
+      }
     }
     if (name === "call" && args.length > 1) {
       this.steps.push({ k: "calln", goal: this.arg(args[0]!), args: this.args(args.slice(1)) });
@@ -381,6 +393,9 @@ class BodyCompiler {
         case "exec":
           out.push(`if (!(${s.js})) return false;`, `if (m.wakeups.length !== 0) return m.suspend(f, ${this.cont(pc + 1)});`);
           break;
+        case "set":
+          out.push(`v[${s.slot}] = ${s.js};`);
+          break;
         case "call":
           out.push(`{ const r = m.callCell(${s.cell}, ${s.args}, f, ${this.cont(pc + 1)}); if (r !== 1) return r === 2; }`);
           break;
@@ -457,12 +472,23 @@ export interface Runtime {
  * unifyLiteral (which copies on binding); any other term binds a call variable to the template built with fresh
  * variables for slots not yet set (with bind, as unifyHead does), or matches a call term of its shape argument by
  * argument. Compound templates beyond BUILD_NODES nodes go through unifyHead itself.
+ *
+ * In a head whose arguments are distinct slots, atomic constants and ground literals only, a call argument that is a
+ * variable without attributes is bound to its compound literal's copy only after every other argument matched, so a
+ * head failing on a later argument copies nothing. Such a binding wakes no hook, and with no slot repeated the head
+ * cannot alias the variable to one that has attributes, so the hooks woken and their order are unifyHead's; the
+ * deferred binding re-reads the variable, so a call naming it twice still sees the first binding.
+ * am[implements a-petta-speed-1105.goal.head-defer]
  */
 class HeadCompiler {
   readonly lines: string[] = [];
-  private readonly set = new Set<number>();
+  readonly set = new Set<number>();
   private temps = 0;
-  constructor(private readonly body: BodyCompiler) {}
+  private readonly deferred: { t: Term; p: string }[] = [];
+  constructor(
+    private readonly body: BodyCompiler,
+    private readonly defer: boolean,
+  ) {}
 
   /** Code unifying template `t` with the JS expression `a` (not yet dereferenced). */
   arg(t: Term, a: string): void {
@@ -475,8 +501,15 @@ class HeadCompiler {
       return;
     }
     if (t instanceof Ground) {
-      if (size(t.t) <= BUILD_NODES) this.literal(t.t, a);
-      else this.lines.push(`if (!m.unifyLiteral(${this.body.konst(t.t)}, ${a})) return false;`);
+      if (size(t.t) > BUILD_NODES) this.lines.push(`if (!m.unifyLiteral(${this.body.konst(t.t)}, ${a})) return false;`);
+      else if (this.defer) {
+        const p = `p${this.deferred.length}`;
+        const d = `d${this.temps++}`;
+        this.deferred.push({ t: t.t, p });
+        this.lines.push(`{ const ${d} = deref(${a}); if (${d} instanceof Var && ${d}.attrs === null) ${p} = ${d}; else {`);
+        this.literal(t.t, d);
+        this.lines.push("} }");
+      } else this.literal(t.t, a);
       return;
     }
     const d = `d${this.temps++}`;
@@ -505,6 +538,17 @@ class HeadCompiler {
     this.lines.push("} else return false; }");
     // Both branches leave every slot of the template set.
     for (const i of slotsOf(t)) this.set.add(i);
+  }
+
+  /** The head function's statements: the deferred bindings' holders, the arguments, then the deferred bindings. */
+  source(): string {
+    const decl = this.deferred.length === 0 ? [] : [`let ${this.deferred.map((x) => `${x.p} = null`).join(", ")};`];
+    for (const { t, p } of this.deferred) {
+      this.lines.push(`if (${p} !== null) {`);
+      this.literal(t, p);
+      this.lines.push("}");
+    }
+    return [...decl, ...this.lines].join("\n");
   }
 
   /**
@@ -577,21 +621,71 @@ function slotsOf(t: Term): number[] {
   return out;
 }
 
+/** Whether a head's arguments are all distinct slots, atomic constants or ground literals (HeadCompiler's deferral). */
+// am[implements a-petta-speed-1105.goal.head-defer]
+function deferrable(head: Term): boolean {
+  if (!(head instanceof Struct)) return false;
+  const seen = new Set<number>();
+  for (const a of head.args) {
+    if (a instanceof Slot) {
+      if (seen.has(a.i)) return false;
+      seen.add(a.i);
+    } else if (a instanceof Struct || a instanceof Cons) return false;
+  }
+  return true;
+}
+
 /**
- * Compile clause `c`: its head unification and, unless it is a fact, its body. Time: linear in the clause, plus
- * V8 compiling the source on its first run.
+ * The goals of the body's top conjunction that assign a slot instead of unifying, with the slot: an is/2 whose left
+ * side, or an =/2 one of whose sides, is a slot first occurring there, as the whole side, the other side not naming
+ * it. Every run of the body passes that goal before any step can read the slot, and a choicepoint pushed before it
+ * resumes at a step that passes it again, so the slot needs no variable of its own: the goal stores the value.
+ * `seen` holds the head's slots. Time: linear in the body.
+ * am[implements a-petta-speed-1105.goal.fresh-out]
+ */
+function freshOutputs(body: Term, seen: Set<number>): Map<Term, number> {
+  const out = new Map<Term, number>();
+  const fresh = (x: Term, other: Term): boolean => x instanceof Slot && !seen.has(x.i) && !slotsOf(other).includes(x.i);
+  const walk = (g: Term): void => {
+    const v = view(g);
+    if (v !== null && v.name === "," && v.args.length === 2) {
+      walk(v.args[0]!);
+      walk(v.args[1]!);
+      return;
+    }
+    if (v !== null && v.args.length === 2 && (v.name === "is" || v.name === "=")) {
+      const [l, r] = v.args as [Term, Term];
+      if (fresh(l, r) && !(v.name === "=" && fresh(r, l))) out.set(g, (l as unknown as Slot).i);
+      else if (v.name === "=" && fresh(r, l) && !fresh(l, r)) out.set(g, (r as unknown as Slot).i);
+    }
+    for (const i of slotsOf(g)) seen.add(i);
+  };
+  walk(body);
+  return out;
+}
+
+/**
+ * Compile clause `c`: its head unification and, unless it is a fact, its body; the head ends by making a fresh
+ * variable for each body slot no goal assigns. Time: linear in the clause, plus V8 compiling the source on its first
+ * run.
  */
 export function compileClauseCode(m: Machine, c: Clause, rt: Runtime): Code {
   const bc = new BodyCompiler(m, c.nvars);
-  const hc = new HeadCompiler(bc);
   const head = c.head;
+  const hc = new HeadCompiler(bc, deferrable(head));
   if (head instanceof Struct) head.args.forEach((t, i) => hc.arg(t, `args[${i}]`));
   const fact = c.body === "true";
-  if (!fact) bc.goal(c.body, "f.cb");
+  let make = "";
+  if (!fact) {
+    bc.fresh = freshOutputs(c.body, new Set(hc.set));
+    bc.goal(c.body, "f.cb");
+    const assigned = new Set(bc.fresh.values());
+    for (let k = 0; k < c.nvars; k++) if (!hc.set.has(k) && !assigned.has(k)) make += `v[${k}] = V();\n`;
+  }
   const RS: Resume[] = [];
   const factory = new Function(
     "Frame", "E", "C", "cmp", "EMPTY", "NIL", "throwBall", "K", "RS", "S", "L", "deref", "Var", "V", "atomicEq",
-    `return [function head(m, args, v) {\n${hc.lines.join("\n")}\nreturn true;\n}, ${fact ? "null" : `function body(m, f, pc) {\n${bc.source()}\n}`}];`,
+    `return [function head(m, args, v) {\n${hc.source()}\n${make}return true;\n}, ${fact ? "null" : `function body(m, f, pc) {\n${bc.source()}\n}`}];`,
   ) as (...a: unknown[]) => [HeadFn, BodyFn | null];
   const [headFn, fn] = factory(rt.Frame, rt.E, rt.C, numCompare, [], NIL, (b: Term) => throwBall(b, rt.copy), bc.consts, RS, Struct, Cons, deref, Var, mkVar, rt.atomicEq);
   if (fn !== null) for (let pc = 0; pc < bc.steps.length; pc++) RS.push(new Resume(fn, pc));

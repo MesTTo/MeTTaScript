@@ -853,8 +853,8 @@ export class Machine {
       this.goals = next;
       return 2;
     }
-    const next = r === null ? f.next : new Frame(r, f.next, f.cb, f.cc, f.vars);
     if (this.tabled.size > 0 && this.tabled.has(key)) {
+      const next = r === null ? f.next : new Frame(r, f.next, f.cb, f.cc, f.vars);
       if (!this.callTabled(cell.name, args, next, f.cb, f.cc)) return 0;
       this.goals = next;
       return 2;
@@ -863,7 +863,7 @@ export class Machine {
     if (p === undefined && this.autoload !== null && this.autoload(cell.name, cell.arity)) p = cell.pred = this.db.preds.get(key);
     if (p !== undefined) {
       const scan = clauseScan(p, args);
-      return this.tryClauses(scan, scan.start, this.db.generation, args, next, f.cc) ? 2 : 0;
+      return this.tryClauses(scan, scan.start, this.db.generation, args, null, f.cc, null, f, r);
     }
     if (this.flags.get("unknown") === "fail") return 0;
     throw existenceError("procedure", mkStruct("/", cell.name, cell.arity));
@@ -1024,7 +1024,15 @@ export class Machine {
             continue;
           }
           this.goals = f.next;
-          if (this.step(f)) {
+          // A compiled body resumes here directly; step, the interpreter, takes every other goal.
+          // am[implements a-petta-speed-1105.goal]
+          const g = f.goal;
+          let ok: boolean;
+          if (g instanceof Resume) {
+            this.curCC = f.cc;
+            ok = g.fn(this, f, g.pc);
+          } else ok = this.step(f);
+          if (ok) {
             if (this.wakeups.length > 0) this.flushWakeups();
           } else {
             if (this.wakeups.length !== 0) this.wakeups.length = 0;
@@ -1053,7 +1061,7 @@ export class Machine {
       switch (cp.kind) {
         case K.Clauses: {
           // The choicepoint stays for the retry, which moves it on or pops it at the last candidate.
-          if (this.tryClauses(cp.scan!, cp.idx, cp.gen, cp.args!, cp.next, cp.cc, cp)) return true;
+          if (this.tryClauses(cp.scan!, cp.idx, cp.gen, cp.args!, cp.next, cp.cc, cp) !== 0) return true;
           break;
         }
         case K.Alt:
@@ -1167,6 +1175,11 @@ export class Machine {
    * next_clause_primary_index), so the last candidate leaves none, as in SWI.
    * A retry passes the call's choicepoint, on top of the stack: it is moved on to the next alternative in place, as
    * the WAM's retry instruction does, or popped before the last candidate is tried.
+   *
+   * A call from a compiled body passes its activation `caller` and resume point `r` instead of `next`: the
+   * continuation is then built only when a choicepoint or the clause's body keeps it, and a fact's success returns 1,
+   * so the body goes on inline as after a deterministic builtin; a choicepoint left behind holds the built
+   * continuation, which a retry resumes. Returns 0 on failure, 2 when `goals` holds the continuation.
    * am[implements a-hp-swi-clause-select]
    */
   private tryClauses(
@@ -1177,8 +1190,12 @@ export class Machine {
     next: Frame | null,
     cc: number,
     retry: CP | null = null,
-  ): boolean {
+    caller: Frame | null = null,
+    r: Resume | null = null,
+  ): 0 | 1 | 2 {
     let cp = retry;
+    // am[implements a-petta-speed-1105.goal.lazy-cont]
+    let built = caller === null;
     const h = cp === null ? this.cps.length : this.cps.length - 1;
     const cands = scan.list;
     const len = cands.length;
@@ -1247,6 +1264,10 @@ export class Machine {
       }
       if (j < len) {
         if (cp === null) {
+          if (!built) {
+            next = r === null ? caller!.next : new Frame(r, caller!.next, caller!.cb, caller!.cc, caller!.vars);
+            built = true;
+          }
           cp = this.pushCP(K.Clauses, next, h, cc);
           cp.scan = scan;
           cp.gen = gen;
@@ -1281,11 +1302,24 @@ export class Machine {
         const body = c.body;
         if (body !== "true") {
           // Every body variable exists before the body runs, so its bindings are trailed against the
-          // body's own choicepoints and a shared frame never meets a variable from a failed branch.
-          for (let k = 0; k < c.nvars; k++) if (vars[k] === undefined) vars[k] = mkVar();
+          // body's own choicepoints and a shared frame never meets a variable from a failed branch; a compiled
+          // head has made them already, all but the slots its body assigns a value to directly (compile.ts
+          // freshOutputs), which are never variables.
+          if (code === null) for (let k = 0; k < c.nvars; k++) if (vars[k] === undefined) vars[k] = mkVar();
+          if (!built) next = r === null ? caller!.next : new Frame(r, caller!.next, caller!.cb, caller!.cc, caller!.vars);
           this.goals = new Frame(code !== null ? code.entry! : body, next, h, cc, vars);
-        } else this.goals = next;
-        return true;
+          return 2;
+        }
+        if (caller === null) {
+          this.goals = next;
+          return 2;
+        }
+        // Hooks the head woke run before the body goes on (callCell does the same after a builtin).
+        if (this.wakeups.length !== 0) {
+          this.suspend(caller, r);
+          return 2;
+        }
+        return 1;
       }
       this.undoTo(mark);
       // Hooks a failed head unification woke belong to bindings it undid.
@@ -1296,7 +1330,7 @@ export class Machine {
       this.cps.pop();
       this.trailBoundary = this.cps.length > 0 ? this.cps[this.cps.length - 1]!.varMark : 0;
     }
-    return false;
+    return 0;
   }
 
   /** Execute one goal. Returns false on failure; may replace the continuation and push choicepoints. */
@@ -1499,14 +1533,14 @@ export class Machine {
     const p = this.db.preds.get(key);
     if (p !== undefined) {
       const scan = clauseScan(p, args);
-      return this.tryClauses(scan, scan.start, this.db.generation, args, f.next, f.cc);
+      return this.tryClauses(scan, scan.start, this.db.generation, args, f.next, f.cc) !== 0;
     }
     // An undefined predicate a library exports loads that library and is called (SWI's autoloader).
     if (this.autoload !== null && this.autoload(name, args.length)) {
       const p2 = this.db.preds.get(key);
       if (p2 !== undefined) {
         const scan = clauseScan(p2, args);
-        return this.tryClauses(scan, scan.start, this.db.generation, args, f.next, f.cc);
+        return this.tryClauses(scan, scan.start, this.db.generation, args, f.next, f.cc) !== 0;
       }
     }
     if (this.flags.get("unknown") === "fail") return false;
