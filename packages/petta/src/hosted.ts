@@ -16,6 +16,7 @@ import { installClpfd } from "./clpfd";
 import { installProcess } from "./process";
 import { installJanus } from "./janus";
 import { consultFile, installConsult, mainGoalOf, markLoaded } from "./consult";
+import { engineHash, loadImage, readImage } from "./image";
 import { installLibrary } from "./library";
 import { Machine, profileReport } from "./machine";
 import { errorMessage } from "./messages";
@@ -31,6 +32,11 @@ export interface HostedOptions {
   readonly readLine?: () => string | null;
   /** PeTTa's src directory; the vendored petta-src by default. */
   readonly srcDir?: string;
+  /**
+   * How PeTTa's source gets loaded: "auto" (the default) loads the package's image when it applies (image.ts) and
+   * consults the source otherwise, "consult" always consults, "none" leaves it to the caller (consultSource).
+   */
+  readonly load?: "auto" | "consult" | "none";
 }
 
 /** The vendored PeTTa src directory (petta-src beside dist or src). */
@@ -38,6 +44,14 @@ function defaultSrcDir(): string {
   const here = dirname(fileURLToPath(import.meta.url));
   for (const c of [join(here, "..", "petta-src"), join(here, "..", "..", "petta-src")]) if (existsSync(c)) return c;
   return join(here, "..", "petta-src");
+}
+
+/** The image the package build writes beside the bundle (image-build.ts), its paths relative to the package directory. */
+// am[implements a-petta-speed-1105.startup.image]
+export const IMAGE_FILE = "petta.image.json";
+export function imagePaths(): { bundle: string; image: string; root: string } {
+  const bundle = dirname(fileURLToPath(import.meta.url));
+  return { bundle, image: join(bundle, IMAGE_FILE), root: dirname(bundle) };
 }
 
 /**
@@ -83,9 +97,25 @@ export class HostedPetta {
     installClpfd(m);
     installProcess(m);
     installJanus(m);
-    markLoaded(m, join(this.srcDir, "load_cache.pl"));
-    for (const c of readClauses(UNCACHED_LOAD_PL)) m.addClause(c, true);
-    consultFile(m, join(this.srcDir, "main.pl"));
+    const load = opts.load ?? "auto";
+    if (load === "none") return;
+    if (load === "auto" && opts.srcDir === undefined) {
+      // am[implements a-petta-speed-1105.startup.image]
+      const p = imagePaths();
+      const image = readImage(p.image, p.root, engineHash(p.bundle), opts.argv);
+      if (image !== null) {
+        loadImage(m, image, p.root);
+        return;
+      }
+    }
+    this.consultSource();
+  }
+
+  /** Consult PeTTa's main.pl and everything it loads, as SWI does when run.sh starts it. */
+  consultSource(): void {
+    markLoaded(this.m, join(this.srcDir, "load_cache.pl"));
+    for (const c of readClauses(UNCACHED_LOAD_PL)) this.m.addClause(c, true);
+    consultFile(this.m, join(this.srcDir, "main.pl"));
   }
 
   /**

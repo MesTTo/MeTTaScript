@@ -74,6 +74,54 @@ function stateOf(m: Machine): LoaderState {
   return s;
 }
 
+/** What a finished load leaves in the loader (image.ts saves it): files loaded, modules declared, the main goal. */
+export interface LoaderSnapshot {
+  readonly loaded: string[];
+  readonly files: string[];
+  readonly modules: [string, string, Term][];
+  readonly mainGoal: Term | null;
+}
+
+// am[implements a-petta-speed-1105.startup.image]
+export function loaderSnapshot(m: Machine): LoaderSnapshot {
+  const s = stateOf(m);
+  if (s.stack.length > 0) throw new Error("internal: loader snapshot taken while a file is loading");
+  return { loaded: [...s.loaded], files: [...s.files], modules: [...s.modules].map(([k, v]) => [k, v.file, v.exports]), mainGoal: s.mainGoal };
+}
+
+// am[implements a-petta-speed-1105.startup.image]
+export function restoreLoader(m: Machine, snap: LoaderSnapshot): void {
+  states.set(m, {
+    stack: [],
+    loaded: new Set(snap.loaded),
+    files: [...snap.files],
+    modules: new Map(snap.modules.map(([k, file, exports]) => [k, { file, exports }])),
+    mainGoal: snap.mainGoal,
+  });
+}
+
+/**
+ * Runs every load-time directive when set: `run` runs it. The image builder uses it to find the directives that
+ * read the argv flag (image.ts), whose effects differ between runs.
+ */
+let directiveHook: ((m: Machine, g: Term, file: string, run: () => void) => void) | null = null;
+export function setDirectiveHook(h: typeof directiveHook): void {
+  directiveHook = h;
+}
+
+/** Run a directive goal as consult does while loading `file`: in that file's load context, warning on failure or error. */
+// am[implements a-petta-speed-1105.startup.image]
+export function runFileDirective(m: Machine, file: string, g: Term): void {
+  const st = stateOf(m);
+  const ctx = freshCtx(file);
+  st.stack.push(ctx);
+  try {
+    runDirective(m, ctx, g);
+  } finally {
+    st.stack.pop();
+  }
+}
+
 function freshCtx(file: string): LoadCtx {
   return { file, directory: file ? dirname(file) : process.cwd(), module: "user", inTests: false, inits: [], conds: [], ssu: new Set() };
 }
@@ -461,12 +509,16 @@ function warnRedefinition(m: Machine, clause: Term, file: string): void {
 
 /** A directive goal: run once; failure and errors are reported as SWI's loader warns, and loading goes on. */
 function runDirective(m: Machine, ctx: LoadCtx, g: Term): void {
-  try {
-    if (!m.solveOnce(g)) m.err(`Warning: ${ctx.file}:\nWarning:    Goal (directive) failed\n`);
-  } catch (e) {
-    if (!(e instanceof PrologError)) throw e;
-    m.err(`Warning: ${ctx.file}:\nWarning:    Goal (directive) raised ${writeTerm(e.ball, { quoted: true })}\n`);
-  }
+  const run = (): void => {
+    try {
+      if (!m.solveOnce(g)) m.err(`Warning: ${ctx.file}:\nWarning:    Goal (directive) failed\n`);
+    } catch (e) {
+      if (!(e instanceof PrologError)) throw e;
+      m.err(`Warning: ${ctx.file}:\nWarning:    Goal (directive) raised ${writeTerm(e.ball, { quoted: true })}\n`);
+    }
+  };
+  if (directiveHook === null) run();
+  else directiveHook(m, g, ctx.file, run);
 }
 
 function directive(m: Machine, ctx: LoadCtx, g: Term): void {

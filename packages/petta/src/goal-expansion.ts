@@ -84,6 +84,18 @@ export function enableYallExpansion(m: Machine): void {
   stateOf(m).yall = true;
 }
 
+/** The goal-expansion state a load leaves (image.ts saves it): meta-predicate declarations and whether yall expands. */
+// am[implements a-petta-speed-1105.startup.image]
+export function expansionSnapshot(m: Machine): { meta: [string, MetaArg[]][]; yall: boolean } {
+  const s = stateOf(m);
+  return { meta: [...s.meta], yall: s.yall };
+}
+
+// am[implements a-petta-speed-1105.startup.image]
+export function restoreExpansion(m: Machine, snap: { meta: [string, MetaArg[]][]; yall: boolean }): void {
+  states.set(m, { meta: new Map(snap.meta), yall: snap.yall });
+}
+
 /** Record a meta_predicate declaration's heads (a comma list of Name(Spec...) terms, possibly module-qualified). */
 export function declareMetaPredicates(m: Machine, decl: Term): void {
   const st = stateOf(m);
