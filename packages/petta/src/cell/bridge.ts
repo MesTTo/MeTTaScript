@@ -4,15 +4,18 @@
 
 // Purpose: run an object machine builtin on the cell machine's argument registers. The bridge decodes each argument
 // cell to an object term, unbound cells to variables keyed by their heap address, runs the builtin deterministically
-// (det, or detMode where the call's mode makes it so), then gives each variable the builtin bound the encoding of its
-// value at its own cell, those still unbound standing for their own cells; the object machine's trail is cut back to
-// where it was; goals it pushed come back as one goal cell to run next. A builtin that wakes attributes, or whose
-// effect a decoded copy cannot carry (setarg/3, attributes, b_setval/2), is refused as not built yet. The frequent builtins run natively
-// instead (builtins.ts, c-builtin-calls-1106); the text builtins stay here, their text work outweighing the bridge's.
+// (det, or detMode where the call's mode makes it so), then gives each variable whose attributes it changed its new
+// att/3 list and each variable it bound the encoding of its value, at their own cells, those still unbound standing
+// for their own cells; binding an attributed cell wakes its hooks on the cells, the object machine's own wakeups being
+// dropped; the object machine's trail is cut back to where it was; goals it pushed come back as one goal cell to run
+// next. A builtin whose effect a decoded copy cannot carry (setarg/3, b_setval/2) is refused as not built yet. The
+// frequent builtins run natively instead (builtins.ts, c-builtin-calls-1106); the text builtins stay here, their text
+// work outweighing the bridge's.
 // am[implements a-petta-cell-store.gate2]
 
-import type { Builtin, Machine } from "../machine";
+import { AttrUndo, type Builtin, type Machine } from "../machine";
 import { Struct, type Term, type Var } from "../terms";
+import { STR } from "./heap";
 import type { CellMachine } from "./machine";
 
 /** The object machine's state a bridged call must leave as it found it, read through its private fields. */
@@ -28,9 +31,9 @@ interface ObjectState {
 
 /**
  * Builtins whose effect a decoded copy cannot carry back: changing a compound in place (setarg/3, nb_setarg/3),
- * changing a variable's attributes, or binding a backtrackable global the bridge's trail cut would undo at once.
+ * or binding a backtrackable global the bridge's trail cut would undo at once.
  */
-const REFUSED = new Set(["setarg/3", "nb_setarg/3", "nb_linkarg/3", "put_attr/3", "del_attr/2", "del_attrs/1", "b_setval/2"]);
+const REFUSED = new Set(["setarg/3", "nb_setarg/3", "nb_linkarg/3", "b_setval/2"]);
 
 /**
  * The det function a CellProc runs for builtin `b` named `key`. Time: the arguments' size to decode, the bound
@@ -57,13 +60,12 @@ export function bridgeBuiltin(key: string, b: Builtin): (cm: CellMachine, n: num
         if (r === null) throw new Error(`cell engine: ${key} in this mode needs its generator, which is not built yet`);
         ok = r;
       } else throw new Error(`cell engine: the nondeterministic builtin ${key} reached the det bridge`);
-      if (om.wakeups.length !== woken) throw new Error(`cell engine: ${key} woke attributes, which is not built yet`);
       // Goals the builtin pushed (phrase/2, :/2 and other call-like builtins) run next on the cell machine, the newest
       // pushed first, as one conjunction encoded over the same variables.
       const pushed: Term[] = [];
       for (let f = om.goals; f !== goals && f !== null; f = f.next as typeof f) pushed.push(f.goal as Term);
       if (!ok) return false;
-      if (!bindBack(cm, back)) return false;
+      if (!bindBack(cm, back, mark)) return false;
       if (pushed.length === 0) return true;
       const vars = new Map<Var, number>();
       for (const [a2, v2] of back) if (v2.ref === null) vars.set(v2, cm.hp.h[a2]!);
@@ -79,20 +81,54 @@ export function bridgeBuiltin(key: string, b: Builtin): (cm: CellMachine, n: num
 }
 
 /**
- * A builtin acts on its arguments only by binding their variables (the destructive ones are refused), so each
+ * A builtin acts on its arguments only by binding their variables and changing their attributes (the destructive ones
+ * are refused), so each variable whose attributes it changed has its cell take its new att/3 list, and then each
  * variable it bound has its own cell take the encoding of its value, those left unbound standing for their own cells
- * (decode keys them by heap address, the cell there being the variable's own). Returns whether the cells unify.
+ * (decode keys them by heap address, the cell there being the variable's own). Attributes go first, so a binding
+ * wakes the hooks the variable has after the builtin, as the object machine's would. Returns whether the cells unify.
+ * Time: the object trail since `mark`, plus the encoding of what changed.
+ * am[implements a-petta-cell-store.runtime.attrs.bridge]
  */
-function bindBack(cm: CellMachine, back: Map<number, Var>): boolean {
+function bindBack(cm: CellMachine, back: Map<number, Var>, mark: number): boolean {
   const hp = cm.hp;
   let vars: Map<Var, number> | null = null;
-  for (const [a, v] of back) {
-    if (v.ref === null) continue;
+  const varsOf = (): Map<Var, number> => {
     if (vars === null) {
       vars = new Map<Var, number>();
       for (const [a2, v2] of back) if (v2.ref === null) vars.set(v2, hp.h[a2]!);
     }
-    if (!hp.unify(hp.h[a]!, hp.encode(v.ref, vars))) return false;
+    return vars;
+  };
+  // Machine.putAttr and delAttr leave an AttrUndo on the object trail for a variable that had attributes (the bridge
+  // trails everything); one that had none is bound to a fresh attributed variable instead, which its encoding carries.
+  const trail = (cm.om as unknown as ObjectState).trail;
+  let addrOf: Map<Var, number> | null = null;
+  for (let i = mark; i < trail.length; i++) {
+    const e = trail[i];
+    if (!(e instanceof AttrUndo)) continue;
+    if (addrOf === null) {
+      addrOf = new Map<Var, number>();
+      for (const [a2, v2] of back) addrOf.set(v2, a2);
+    }
+    const a = addrOf.get(e.v);
+    if (a === undefined) continue;
+    addrOf.delete(e.v);
+    let list = hp.NIL;
+    const entries = e.v.attrs === null ? [] : [...e.v.attrs];
+    for (let j = entries.length - 1; j >= 0; j--) {
+      const [mod, val] = entries[j]!;
+      const q = hp.alloc(4);
+      hp.h[q] = hp.functor("att", 3);
+      hp.h[q + 1] = hp.atom(mod);
+      hp.h[q + 2] = hp.encode(val, varsOf());
+      hp.h[q + 3] = list;
+      list = (q << 3) | STR;
+    }
+    hp.bind(a + 1, list);
+  }
+  for (const [a, v] of back) {
+    if (v.ref === null) continue;
+    if (!hp.unify(hp.h[a]!, hp.encode(v.ref, varsOf()))) return false;
   }
   return true;
 }
@@ -121,7 +157,7 @@ export function startNondet(cm: CellMachine, key: string, b: Builtin, n: number)
     try {
       // detMode looks at the arguments only, binding nothing when it leaves the call to the generator (null).
       const r = b.detMode(cm.om, args);
-      if (r !== null) return r && bindBack(cm, back);
+      if (r !== null) return r && bindBack(cm, back, mark);
     } finally {
       om.undoTo(mark);
       om.trailBoundary = boundary;
@@ -144,9 +180,10 @@ export function nextSolution(cm: CellMachine, run: BridgeRun): 0 | 1 | 2 {
     r = run.gen.next();
   } finally {
     om.trailBoundary = boundary;
+    // The cells wake their own hooks when takeSolution binds them.
+    om.wakeups.length = woken;
   }
   if (om.goals !== goals) throw new Error(`cell engine: ${run.key} pushed goals, which is not built yet`);
-  if (om.wakeups.length !== woken) throw new Error(`cell engine: ${run.key} woke attributes, which is not built yet`);
   if (r.done === true) return r.value ? 1 : 0;
   return 2;
 }
@@ -158,7 +195,7 @@ export function nextSolution(cm: CellMachine, run: BridgeRun): 0 | 1 | 2 {
  */
 export function takeSolution(cm: CellMachine, run: BridgeRun, mark: number): boolean {
   try {
-    return bindBack(cm, run.back);
+    return bindBack(cm, run.back, mark);
   } finally {
     (cm.om as unknown as ObjectState).undoTo(mark);
   }

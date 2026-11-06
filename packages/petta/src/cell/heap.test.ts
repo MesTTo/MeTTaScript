@@ -15,25 +15,32 @@ import { Cons, Float, NIL, Str, Struct, Var, deref, mkVar, type Term } from "../
 import { Heap } from "./heap";
 
 /** A canonical text of a term with its variables numbered in first-occurrence order, so variants print equal. */
-function canon(t0: Term, names = new Map<Var, number>(), depth = 0): string {
-  // Unification without an occurs check can make cyclic terms; both sides print them cut at the same depth.
-  if (depth > 40) return "…";
-  const t = deref(t0);
-  if (t instanceof Var) {
-    let n = names.get(t);
-    if (n === undefined) names.set(t, (n = names.size));
-    const attrs = t.attrs !== null && t.attrs.size > 0 ? `{${[...t.attrs].map(([k, v]) => `${k}=${canon(v, names, depth + 1)}`).join(",")}}` : "";
-    return `_${n}${attrs}`;
-  }
-  if (typeof t === "string") return JSON.stringify(t);
-  if (typeof t === "number") return `i${t}`;
-  if (typeof t === "bigint") return `b${t}`;
-  if (t instanceof Float) return `f${t.v}`;
-  if (t instanceof Str) return `s${JSON.stringify(t.s)}`;
-  if (t === NIL) return "[]";
-  if (t instanceof Cons) return `[${canon(t.head, names, depth + 1)}|${canon(t.tail, names, depth + 1)}]`;
-  if (t instanceof Struct) return `${JSON.stringify(t.name)}(${t.args.map((a) => canon(a, names, depth + 1)).join(",")})`;
-  return "?";
+function canon(t0: Term): string {
+  const names = new Map<Var, number>();
+  // Unification without an occurs check can make cyclic terms, and one with sharing, X = g(X, X), doubles at every
+  // level: a depth and a node budget print it cut short, the same prefix on both sides, where depth alone ran a
+  // worker out of memory (cell/builtins.test.ts bounds its printer the same way).
+  let budget = 2000;
+  const one = (t1: Term, depth: number): string => {
+    if (depth > 40 || --budget < 0) return "…";
+    const t = deref(t1);
+    if (t instanceof Var) {
+      let n = names.get(t);
+      if (n === undefined) names.set(t, (n = names.size));
+      const attrs = t.attrs !== null && t.attrs.size > 0 ? `{${[...t.attrs].map(([k, v]) => `${k}=${one(v, depth + 1)}`).join(",")}}` : "";
+      return `_${n}${attrs}`;
+    }
+    if (typeof t === "string") return JSON.stringify(t);
+    if (typeof t === "number") return `i${t}`;
+    if (typeof t === "bigint") return `b${t}`;
+    if (t instanceof Float) return `f${t.v}`;
+    if (t instanceof Str) return `s${JSON.stringify(t.s)}`;
+    if (t === NIL) return "[]";
+    if (t instanceof Cons) return `[${one(t.head, depth + 1)}|${one(t.tail, depth + 1)}]`;
+    if (t instanceof Struct) return `${JSON.stringify(t.name)}(${t.args.map((a) => one(a, depth + 1)).join(",")})`;
+    return "?";
+  };
+  return one(t0, 0);
 }
 
 /** Arbitrary object terms over a pool of four variables (two of them attributed), so terms share variables. */

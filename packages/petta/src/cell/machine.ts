@@ -13,11 +13,11 @@
 import type { Clause, Pred } from "../db";
 import { copyTerm, type Builtin, type Machine } from "../machine";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "../swi-index";
-import { NIL, PrologError, Struct, existenceError, instantiationError, mkList, typeError, type Term } from "../terms";
+import { Halt, NIL, PrologError, Struct, existenceError, instantiationError, mkList, typeError, type Term } from "../terms";
 import { CellArgs } from "./args";
 import { bridgeBuiltin, nextSolution, objectTrailMark, startNondet, takeSolution, type BridgeRun } from "./bridge";
 import { build, headProgram, runHead, type HeadProgram } from "./headprog";
-import { ATM, ATV, Heap, REF, STR } from "./heap";
+import { ATM, ATV, BOX, Heap, INT, REF, STR } from "./heap";
 
 /** Code the trampoline runs: the code to run next, or null at a run's exit. */
 export type Code = () => Code | null;
@@ -76,9 +76,9 @@ interface ColdFact {
   tries: number;
 }
 
-/** An error leaving a solve with its ball copied, plain variables for attributed ones, as the object machine's are. */
+/** An error leaving a solve with its ball copied, attributes kept, as the object machine copies its balls. */
 function copiedBall(e: unknown): unknown {
-  return e instanceof PrologError ? new PrologError(copyTerm(e.ball)) : e;
+  return e instanceof PrologError ? new PrologError(copyTerm(e.ball, new Map(), true)) : e;
 }
 
 /** A procedure as compiled code calls it: the predicate once one exists, or a native builtin over cells. */
@@ -150,6 +150,8 @@ export class CellMachine {
   private readonly F_ONCE: number;
   private readonly F_IGNORE: number;
   private readonly F_FORALL: number;
+  /** '$attr_unify_hook'/3, the goal each woken attribute runs (consult.ts renames Module:attr_unify_hook/2 to it). */
+  private readonly F_HOOK: number;
   private readonly A_TRUE: number;
   private readonly A_FAIL: number;
   private readonly A_FALSE: number;
@@ -191,6 +193,7 @@ export class CellMachine {
     this.F_ONCE = hp.functor("once", 1);
     this.F_IGNORE = hp.functor("ignore", 1);
     this.F_FORALL = hp.functor("forall", 2);
+    this.F_HOOK = hp.functor("$attr_unify_hook", 3);
     this.A_TRUE = hp.atom("true");
     this.A_FAIL = hp.atom("fail");
     this.A_FALSE = hp.atom("false");
@@ -261,7 +264,17 @@ export class CellMachine {
     this.proc("throw", 1).ctl = (cm) => {
       const ball = cm.hp.deref(cm.A[0]!);
       if ((ball & 7) === REF || (ball & 7) === ATV) throw instantiationError();
-      throw new PrologError(copyTerm(cm.hp.decode(ball, new Map())));
+      throw new PrologError(copyTerm(cm.hp.decode(ball, new Map()), new Map(), true));
+    };
+    // halt/0 and halt/1 end the run as the object machine's step does (Machine.step): Halt carries the status, a
+    // status that is not a number giving 0.
+    this.proc("halt", 0).ctl = () => {
+      throw new Halt(0);
+    };
+    this.proc("halt", 1).ctl = (cm) => {
+      const s = cm.hp.deref(cm.A[0]!);
+      const v = (s & 7) === INT ? s >> 3 : (s & 7) === BOX ? cm.hp.boxes[s >> 3] : null;
+      throw new Halt(typeof v === "number" ? v : 0);
     };
     // catch/3's goal exited: a deterministic exit drops the catch choicepoint, as SWI drops its frame.
     this.CATCH_EXIT = def(() => {
@@ -386,6 +399,8 @@ export class CellMachine {
   fail(): Code | null {
     const S = this.S, R = this.R, hp = this.hp;
     for (;;) {
+      // Hooks woken by bindings this failure undoes are dropped, as the object machine drops them before backtracking.
+      if (hp.wakeups.length !== 0) hp.wakeups.length = 0;
       const b = R[RB]!;
       hp.undo(S[b + 2]!);
       hp.top = S[b + 9]!;
@@ -420,8 +435,7 @@ export class CellMachine {
           if (r === 1) this.popCP(b);
           else hp.hb = hp.top;
           if (!takeSolution(this, run, S[b + 7]!)) continue;
-          if (hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
-          return this.CODE[R[RCP]!]!;
+          return hp.wakeups.length !== 0 ? this.wake(R[RCC]!) : this.CODE[R[RCP]!]!;
         }
         case K_CATCH:
           // The caught goal has no more solutions: catch/3 fails.
@@ -620,8 +634,7 @@ export class CellMachine {
       }
       if (!takeSolution(this, run, mark)) return this.fail();
     }
-    if (this.hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
-    return this.proceed();
+    return this.hp.wakeups.length !== 0 ? this.wake(cc) : this.proceed();
   }
 
   /**
@@ -634,8 +647,7 @@ export class CellMachine {
     const found: Term[] = [];
     this.solveAllFrom(() => this.goal(g, this.R[RB]!, this.R[RCC]!), () => void found.push(hp.decode(t, new Map())));
     if (!hp.unify(l, hp.encode(mkList(found), new Map()))) return this.fail();
-    if (hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
-    return this.proceed();
+    return hp.wakeups.length !== 0 ? this.wake(this.R[RCC]!) : this.proceed();
   }
 
   /** setup_call_cleanup(S, G, C): S once; G under a cleanup choicepoint holding C, its cut local to it. */
@@ -696,6 +708,7 @@ export class CellMachine {
    */
   private unwind(e: PrologError, bar: number): Code | null {
     const S = this.S, R = this.R, hp = this.hp;
+    hp.wakeups.length = 0;
     let b = R[RCC]!;
     // Each cleanup the ball passes runs, with the bindings undone to its setup's (Machine.unwindTo).
     if (this.cleanups > 0) this.cleanupsAbove(b > bar ? b : bar, true);
@@ -711,14 +724,54 @@ export class CellMachine {
         const recovery = S[b + CPH + 1]!;
         this.popCP(b);
         R[RCC] = outer;
-        return this.goal(recovery, R[RB]!, outer);
+        // Hooks the catcher's unification woke run before the recovery.
+        return this.goal(hp.wakeups.length !== 0 ? this.conj(this.wakeGoal(), recovery) : recovery, R[RB]!, outer);
       }
       hp.undo(S[b + 2]!);
       hp.top = S[b + 9]!;
+      hp.wakeups.length = 0;
       this.popCP(b);
       b = outer;
     }
     throw copiedBall(e);
+  }
+
+  /**
+   * Run the hooks the bindings since the last goal woke, then go on with the continuation, as Machine.flushWakeups
+   * puts them before the next goal: '$attr_unify_hook'(Module, Value, Other) for each attribute of each attributed
+   * variable bound, in binding order; `cc` is the catch context they run in.
+   * am[implements a-petta-cell-store.runtime.attrs.wake]
+   */
+  wake(cc: number): Code | null {
+    return this.goal(this.wakeGoal(), this.R[RB]!, cc);
+  }
+
+  /** The woken hooks as one goal cell, a conjunction in waking order, emptying the queue. Time: the hooks. */
+  private wakeGoal(): number {
+    const hp = this.hp, H = hp.h, w = hp.wakeups;
+    const hooks: number[] = [];
+    for (const { attrs, value } of w)
+      for (let l = attrs; (l & 7) === STR; l = H[(l >> 3) + 3]!) {
+        const q = hp.alloc(4);
+        H[q] = this.F_HOOK;
+        H[q + 1] = H[(l >> 3) + 1]!;
+        H[q + 2] = H[(l >> 3) + 2]!;
+        H[q + 3] = value;
+        hooks.push((q << 3) | STR);
+      }
+    w.length = 0;
+    let g = hooks[hooks.length - 1]!;
+    for (let i = hooks.length - 2; i >= 0; i--) g = this.conj(hooks[i]!, g);
+    return g;
+  }
+
+  /** The goal cell (a, b). */
+  private conj(a: number, b: number): number {
+    const H = this.hp.h, q = this.hp.alloc(3);
+    H[q] = this.F_COMMA;
+    H[q + 1] = a;
+    H[q + 2] = b;
+    return (q << 3) | STR;
   }
 
   /** Call `p` with A[0..n), the continuation being the current one. */
@@ -727,8 +780,7 @@ export class CellMachine {
     this.R[RCC] = cc;
     if (p.det !== undefined) {
       if (!p.det(this, n)) return this.fail();
-      if (this.hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
-      return this.proceed();
+      return this.hp.wakeups.length !== 0 ? this.wake(cc) : this.proceed();
     }
     if (p.ctl !== undefined) return p.ctl(this, n, cc);
     let pred = p.pred;
@@ -738,20 +790,30 @@ export class CellMachine {
       if (b !== undefined) {
         if (b.nondet !== undefined) p.ctl = (cm, k, c) => cm.callNondet(p.key, b, k, c);
         else {
-          // A bridged det builtin answers true or false, or a goal cell it pushed, run next with its cut local.
+          // A bridged det builtin answers true or false, or a goal cell it pushed, run next with its cut local after
+          // the hooks the call woke, as flushWakeups puts them in front of pushed goals.
           const run = bridgeBuiltin(p.key, b);
           p.ctl = (cm, k, c) => {
             const r = run(cm, k);
             if (r === false) return cm.fail();
-            if (r !== true) return cm.goal(r, cm.R[RB]!, c);
-            if (cm.hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
-            return cm.proceed();
+            const woke = cm.hp.wakeups.length !== 0;
+            if (r === true) return woke ? cm.wake(c) : cm.proceed();
+            return cm.goal(woke ? cm.conj(cm.wakeGoal(), r) : r, cm.R[RB]!, c);
           };
         }
         return this.callw(p, n, cc);
       }
-      pred = p.pred = this.om.db.preds.get(p.key);
-      if (pred === undefined) throw existenceError("procedure", new Struct("/", [p.name, p.arity]));
+      // A tabled predicate answers from its tables (Machine.callTabled), which the cell engine does not run yet.
+      const om = this.om;
+      if (om.tabled.size > 0 && om.tabled.has(p.key)) throw new Error(`cell engine: the tabled predicate ${p.key} is not built yet`);
+      pred = p.pred = om.db.preds.get(p.key);
+      // An undefined predicate a library exports loads that library (SWI's autoloader, Machine.autoload); one still
+      // undefined fails under the unknown flag's fail and raises existence_error otherwise, as Machine.callCell does.
+      if (pred === undefined && om.autoload !== null && om.autoload(p.name, p.arity)) pred = p.pred = om.db.preds.get(p.key);
+      if (pred === undefined) {
+        if (om.flags.get("unknown") === "fail") return this.fail();
+        throw existenceError("procedure", new Struct("/", [p.name, p.arity]));
+      }
     }
     const scan = clauseScan(pred, this.args);
     const r = this.tryClauses(pred, scan, scan.start, this.om.db.generation, cc, -1);
@@ -805,6 +867,7 @@ export class CellMachine {
       if (r !== HEADFAIL) return r;
       hp.undo(mark);
       hp.top = h0;
+      if (hp.wakeups.length !== 0) hp.wakeups.length = 0;
       i = j - 1;
     }
     if (cp >= 0) this.popCP(cp);
@@ -840,7 +903,9 @@ export class CellMachine {
     const S = this.S, R = this.R, hp = this.hp;
     const sE = R[RE]!, sCP = R[RCP]!, sB = R[RB]!, sCC = R[RCC]!, sBAR = R[RBAR]!;
     const sNest = this.nest;
-    const sWake = this.hp.wakeups.length;
+    // The run queues its own wakeups: its failures empty the queue, which must not drop the caller's.
+    const sWake = hp.wakeups;
+    hp.wakeups = [];
     const bar = this.pushCP(K_BARRIER, sB, sCC, 0);
     R[RBAR] = bar;
     R[RCP] = this.OK;
@@ -864,7 +929,7 @@ export class CellMachine {
       R[RCC] = sCC;
       R[RBAR] = sBAR;
       this.nest = sNest;
-      this.hp.wakeups.length = sWake;
+      hp.wakeups = sWake;
     }
   }
 
@@ -885,9 +950,11 @@ export class CellMachine {
     if (st === null) c.cell = st = { prog: headProgram(this.hp, c), tries: 1 };
     if (c.nvars > this.vals.length) this.vals = new Int32Array(2 * c.nvars);
     if (!runHead(this.hp, st.prog, this.A, this.vals, this.next)) return HEADFAIL;
-    if (this.hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
-    if (!rule) return this.proceed();
-    return this.goal(build(this.hp, st.prog.body!, 0, this.vals, this.next), h, cc);
+    const woke = this.hp.wakeups.length !== 0;
+    if (!rule) return woke ? this.wake(cc) : this.proceed();
+    // The hooks the head woke run before the body, which they are put in front of.
+    const body = build(this.hp, st.prog.body!, 0, this.vals, this.next);
+    return this.goal(woke ? this.conj(this.wakeGoal(), body) : body, h, cc);
   }
 
   /** Recompile hot clause `c` with an inline head and run it from its head, as its compact code was asked to. */
@@ -912,7 +979,8 @@ export class CellMachine {
     const R = this.R;
     const sE = R[RE]!, sCP = R[RCP]!, sB = R[RB]!, sCC = R[RCC]!, sBAR = R[RBAR]!;
     const sNest = this.nest;
-    const sWake = this.hp.wakeups.length;
+    const sWake = this.hp.wakeups;
+    this.hp.wakeups = [];
     const bar = this.pushCP(K_BARRIER, sB, sCC, 0);
     R[RBAR] = bar;
     R[RCP] = this.OK;
@@ -929,7 +997,7 @@ export class CellMachine {
       R[RCC] = sCC;
       R[RBAR] = sBAR;
       this.nest = sNest;
-      this.hp.wakeups.length = sWake;
+      this.hp.wakeups = sWake;
     }
   }
 }

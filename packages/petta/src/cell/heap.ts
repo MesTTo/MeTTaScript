@@ -3,11 +3,12 @@
 // SPDX-License-Identifier: MIT
 
 // Purpose: the cell engine's term store. A term is a 32-bit cell whose low three bits are its tag: a variable refers
-// to its own address while unbound, a compound or list cell points at its cells on the Int32Array heap, an atom or a
-// functor is an interned id, a small integer is inline, and a large integer, a bigint, a float or a string sits in a
-// side table. Bindings are trailed by address against the newest choicepoint's heap top, as in the WAM, so
-// backtracking resets the heap top and frees everything above it. Decoding to and encoding from the object terms
-// (terms.ts) map variables both ways, which is how builtins written for objects run on cells.
+// to its own address while unbound, an attributed variable likewise with its att(Module, Value, More) list in the
+// next cell, a compound or list cell points at its cells on the Int32Array heap, an atom or a functor is an interned
+// id, a small integer is inline, and a large integer, a bigint, a float or a string sits in a side table. Assignments
+// are trailed by address and old cell against the newest choicepoint's heap top, as in the WAM, so backtracking
+// resets the heap top and frees everything above it. Decoding to and encoding from the object terms (terms.ts) map
+// variables both ways, which is how builtins written for objects run on cells.
 // am[implements a-petta-cell-store.terms]
 
 import { Cons, Float, NIL, Str, Struct, Var, deref as derefObj, mkVar, type Term } from "../terms";
@@ -140,7 +141,10 @@ export class Heap {
     }
   }
 
-  /** Bind the unbound variable at address `a` to `v`, trailed when a choicepoint older than it could undo it. */
+  /**
+   * Set cell `a` to `v`, trailed with its old cell when a choicepoint older than the cell could undo it: a variable's
+   * binding, a global slot's value or an attribute list's link.
+   */
   bind(a: number, v: number): void {
     if (a < this.hb) {
       this.trailOld[this.tr] = this.h[a]!;
@@ -149,7 +153,7 @@ export class Heap {
     this.h[a] = v;
   }
 
-  /** Undo the bindings trailed since `mark`: each cell is made its own unbound self again. */
+  /** Undo the assignments trailed since `mark`, newest first, each cell taking its old cell back. */
   undo(mark: number): void {
     const h = this.h, trail = this.trail, old = this.trailOld;
     let tr = this.tr;
@@ -160,13 +164,16 @@ export class Heap {
     this.tr = mark;
   }
 
-  /** Bind variable cell `x` (unbound) to `y`, waking its attributes when it is attributed. */
+  /** Whether variable cell `x` (unbound) holds attributes: an attributed cell whose list del_attr/2 emptied is plain. */
+  attributed(x: number): boolean {
+    return (x & 7) === ATV && this.h[(x >> 3) + 1] !== this.NIL;
+  }
+
+  /** Bind variable cell `x` (unbound) to `y`, queueing its attributes' hooks when it holds any. */
   private bindVar(x: number, y: number): void {
     const a = x >> 3;
-    if ((x & 7) === ATV) {
-      this.bind(a, y);
-      this.wakeups.push({ attrs: this.h[a + 2]!, value: y });
-    } else this.bind(a, y);
+    this.bind(a, y);
+    if (this.attributed(x)) this.wakeups.push({ attrs: this.h[a + 1]!, value: y });
   }
 
   /** Unify two cells, trailing bindings. Time: one step per pair of cells visited; space: the pending pairs. */
@@ -180,10 +187,12 @@ export class Heap {
       const tx = x & 7, ty = y & 7;
       const xv = tx === REF || tx === ATV, yv = ty === REF || ty === ATV;
       if (xv && yv) {
-        // Bind the younger to the older, so a reset heap top never leaves a binding pointing above it; an attributed
-        // variable binds to a plain one rather than the other way, so its attributes stay reachable.
-        if (tx === ATV && ty === REF) this.bindVar(y, x);
-        else if (ty === ATV && tx === REF) this.bindVar(x, y);
+        // A plain variable is bound to an attributed one whatever their ages, waking nothing; otherwise the younger is
+        // bound to the older, waking the younger's hooks. An attributed cell is made when put_attr/3 first gives a
+        // variable attributes, so its address is that age (c-attvar-bind-swi-1106, c-swi-attvar-age-1106).
+        // am[rests-on c-attvar-bind-swi-1106] am[rests-on c-swi-attvar-age-1106]
+        const xa = this.attributed(x), ya = this.attributed(y);
+        if (xa !== ya) this.bind(xa ? y >> 3 : x >> 3, xa ? x : y);
         else if (x >> 3 < y >> 3) this.bindVar(y, x);
         else this.bindVar(x, y);
         continue;
@@ -218,13 +227,12 @@ export class Heap {
     return true;
   }
 
-  /** A fresh attributed variable whose attribute list is the cell `attrs`. */
+  /** A fresh attributed variable whose att/3 list is the cell `attrs`. */
   newAttVar(attrs: number): number {
-    const a = this.alloc(3);
+    const a = this.alloc(2);
     const c = (a << 3) | ATV;
     this.h[a] = c;
-    this.h[a + 1] = ATV_MARK;
-    this.h[a + 2] = attrs;
+    this.h[a + 1] = attrs;
     return c;
   }
 
@@ -257,7 +265,7 @@ export class Heap {
           this.h[a + 3] = list;
           list = (a << 3) | STR;
         }
-        this.h[(c >> 3) + 2] = list;
+        this.h[(c >> 3) + 1] = list;
         return c;
       }
       c = this.newVar();
@@ -331,9 +339,9 @@ export class Heap {
           vars.set(a, v);
           if ((c & 7) === ATV) {
             const m = new Map<string, Term>();
-            for (let l = this.deref(h[a + 2]!); (l & 7) === STR; l = this.deref(h[(l >> 3) + 3]!)) {
+            for (let l = h[a + 1]!; (l & 7) === STR; l = h[(l >> 3) + 3]!) {
               const p = l >> 3;
-              m.set(this.atomNames[this.deref(h[p + 1]!) >> 3]!, this.decode(h[p + 2]!, vars));
+              m.set(this.atomNames[h[p + 1]! >> 3]!, this.decode(h[p + 2]!, vars));
             }
             if (m.size > 0) v.attrs = m;
           }
@@ -380,12 +388,6 @@ export class Heap {
     throw new Error(`cell ${c}: a functor cell is not a term`);
   }
 }
-
-/**
- * The second cell of an attributed variable: a mark no term cell takes (a functor cell of id -1 cannot be interned),
- * which tells an unbound attributed variable from a plain one when the trail resets it.
- */
-const ATV_MARK = (-1 << 3) | FUN;
 
 /** Equality of two boxed values as unification sees it: 1 and 1.0 differ, NaN equals NaN, strings by content. */
 export function boxEq(x: unknown, y: unknown): boolean {

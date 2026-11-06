@@ -9,8 +9,9 @@
 // disjunction, negation, once/1, ignore/1 and forall/2 inline over in-clause choicepoints. The steps run in parts,
 // functions whose switch resumes at any step a continuation, a choicepoint's alternative or the part before enters; a
 // variable lives in a local unless a resume point lies between its definition and its last use, then in an environment
-// slot. Ground compound literals are built anew at each use, as SWI does (a-hp-swi-gap); arithmetic runs arith.ts's
-// functions and comparison on the operands' values.
+// slot. Where the head or an inline unification wakes attribute hooks, the locals live there go into a wake frame the
+// hooks run above and come back from it at that wake point's own entry. Ground compound literals are built anew at
+// each use, as SWI does (a-hp-swi-gap); arithmetic runs arith.ts's functions and comparison on the operands' values.
 // am[implements a-petta-cell-store.compile.steps]
 
 import { appendFileSync } from "node:fs";
@@ -292,18 +293,16 @@ function runtime(cm: CellMachine): Runtime {
     OVF: (): never => {
       throw new Error("cell heap exhausted");
     },
-    WAKE: (): never => {
-      throw new Error("cell engine: attribute wakeups are not built yet");
-    },
   };
   runtimes.set(cm, rt);
   return rt;
 }
-const RT_NAMES = ["E", "NUM", "CMP", "ISVAR", "ISATOM", "ISNUM", "ISINT", "ISFLOAT", "ISATOMIC", "ISCOMPOUND", "ISCALLABLE", "ISLIST", "GROUND", "IDENT", "NUNIFY", "GC", "GB", "GSTR", "GLIS", "UV", "UVAL", "UVOID", "UC", "UB", "USTR", "ULIS", "OVF", "WAKE"];
+const RT_NAMES = ["E", "NUM", "CMP", "ISVAR", "ISATOM", "ISNUM", "ISINT", "ISFLOAT", "ISATOMIC", "ISCOMPOUND", "ISCALLABLE", "ISLIST", "GROUND", "IDENT", "NUNIFY", "GC", "GB", "GSTR", "GLIS", "UV", "UVAL", "UVOID", "UC", "UB", "USTR", "ULIS", "OVF"];
 
 /**
  * Make the goals compiled code runs inline also run natively when called through a procedure, as a meta-call or
- * call/N does: the type tests and comparisons (TESTS), =/2, is/2 and the arithmetic comparisons.
+ * call/N does: the type tests and comparisons (TESTS), =/2, is/2 and the arithmetic comparisons. The hooks a binding
+ * wakes run after them as after any det builtin (CellMachine.callw).
  */
 export function installInlineBuiltins(cm: CellMachine): void {
   const rt = runtime(cm), A = cm.A, hp = cm.hp;
@@ -314,11 +313,7 @@ export function installInlineBuiltins(cm: CellMachine): void {
     const arity = Number(key.slice(at + 1));
     cm.proc(key.slice(0, at), arity).det = arity === 1 ? () => f(A[0]!) !== neg : () => f(A[0]!, A[1]!) !== neg;
   }
-  cm.proc("=", 2).det = () => {
-    const ok = hp.unify(A[0]!, A[1]!);
-    if (ok && hp.wakeups.length !== 0) (rt.WAKE as () => never)();
-    return ok;
-  };
+  cm.proc("=", 2).det = () => hp.unify(A[0]!, A[1]!);
   cm.proc("is", 2).det = () => hp.unify(A[0]!, rt.NUM(rt.E(A[1]!)));
   for (const op of ARITH_TESTS) cm.proc(op, 2).det = () => rt.CMP(op, rt.E(A[0]!), rt.E(A[1]!));
 }
@@ -890,6 +885,27 @@ export function compileCellClause(cm: CellMachine, c: Clause, hot: boolean): Cla
   };
   const leave = env ? "R[1] = S[e + 1]; R[0] = S[e];" : "";
   const goto = (t: number, k: number): string => (partOf[t] === k ? `pc = ${t}; continue;` : `return P[${partOf[t]}](0, 0, ${t});`);
+  // Wake points: after the head (0) and after each inline unification (an exec step), where bindings may have woken
+  // hooks, which run before the next goal as the object compiler suspends there (Machine.flushWakeups). The locals live
+  // at the wake point go into a wake frame, an environment the hooks run above with the wake point's resume code as
+  // their continuation; that code, pc n + k, reads them back, leaves the frame and goes on with the next step
+  // (a-petta-cell-store.runtime.attrs.wake). A local is live after step k when set by then and read after it.
+  // am[implements a-petta-cell-store.runtime.attrs.wake]
+  const wakeIds = new Map<number, number>();
+  const live = (k: number): number[] => {
+    if (k === 0) return [...hc.set].filter((i) => !singleton(i));
+    const out: number[] = [];
+    for (let i = 0; i < nslots; i++) if (!perm.has(i) && !(i < c.nvars && singleton(i)) && defAt(i) <= k && lastUse[i]! > k) out.push(i);
+    return out;
+  };
+  const spill = (k: number): string => {
+    let id = wakeIds.get(k);
+    if (id === undefined) wakeIds.set(k, (id = cm.CODE.push(null as never) - 1));
+    const vs = live(k);
+    return `if (hp.wakeups.length !== 0) { const w = cm.allocate(${vs.length}, b0, cc); ${vs.map((i, j) => `S[w + ${ENV + j}] = v${i};`).join(" ")} R[1] = ${id}; return cm.wake(cc); }`;
+  };
+  /** A wake point's resume: its locals back from the wake frame at e, the frame left, e the environment again. */
+  const reload = (k: number): string => `${live(k).map((i, j) => `v${i} = S[e + ${ENV + j}];`).join(" ")} R[1] = S[e + 1]; R[0] = S[e]; e = R[0];`;
   /** A step's terms built at the local heap top, then `body` with the values computed before the top is written back. */
   const withHeap = (b: Build, values: string, body: string): string =>
     b.heap
@@ -900,7 +916,7 @@ export function compileCellClause(cm: CellMachine, c: Clause, hot: boolean): Cla
       case "test":
         return withHeap(s.b, `const ok = ${s.js};`, `if (!ok) { ${s.else === null ? "return cm.fail();" : goto(s.else.pc, k)} }`);
       case "exec":
-        return withHeap(s.b, `const x = ${s.x}, y = ${s.y};`, "if (!hp.unify(x, y)) return cm.fail(); if (hp.wakeups.length !== 0) WAKE();");
+        return withHeap(s.b, `const x = ${s.x}, y = ${s.y};`, `if (!hp.unify(x, y)) return cm.fail(); ${spill(pc)}`);
       case "set":
         return withHeap(s.b, `const x = ${s.js};`, `${vx(s.slot)} = x;`);
       case "call": {
@@ -938,7 +954,8 @@ export function compileCellClause(cm: CellMachine, c: Clause, hot: boolean): Cla
     // A compact fact counts its calls and has itself recompiled with an inline head once hot.
     const count = hot ? "" : `if (++${bc.k({ n: 0 })}.n > ${HOT_AFTER}) return cm.retier(${bc.k(c)}, b0, cc);`;
     const locals = hc.inV || c.nvars === 0 ? "" : `let ${Array.from({ length: c.nvars }, (_, i) => `v${i}`).join(", ")};`;
-    const src = `return [(function fact(b0, cc, pc) { ${count} const H = hp.h; ${locals} ${headCode} if (hp.wakeups.length !== 0) WAKE(); return CODE[R[1]]; })];`;
+    // A fact's hooks run with its continuation, which is all that follows them.
+    const src = `return [(function fact(b0, cc, pc) { ${count} const H = hp.h; ${locals} ${headCode} if (hp.wakeups.length !== 0) return cm.wake(cc); return CODE[R[1]]; })];`;
     if (DUMP !== undefined) appendFileSync(DUMP, `// ${c.pred.name}/${c.pred.arity} clause ${c.seq}\n${src}\n\n`);
     const rt = runtime(cm);
     const factory = new Function("cm", "hp", "A", "S", "R", "CODE", "K", "HF", "P", ...RT_NAMES, src) as (...a: unknown[]) => ClauseFn[];
@@ -949,16 +966,22 @@ export function compileCellClause(cm: CellMachine, c: Clause, hot: boolean): Cla
   // Every step's code first: generating it registers the resume points the parts' entries list.
   const code: string[] = [];
   for (let pc = 1; pc < n; pc++) code[pc] = stepCode(steps[pc]!, pc, partOf[pc]!);
+  // The body's entry after the head: its variables made, its environment pushed with the slots that live there.
+  const entry: string[] = [];
+  if (made.length > 0) entry.push(`{ let t = hp.top; ${made.map((i) => `v${i} = (H[t] = t << 3, t++ << 3);`).join(" ")} hp.top = t; }`);
+  if (env) entry.push(`e = cm.allocate(${nslots}, b0, cc);`, ...[...perm].filter((i) => i < c.nvars && (hc.set.has(i) || made.includes(i))).map((i) => `S[e + ${ENV + i}] = v${i};`));
+  const headWake = fact ? "" : spill(0);
   const parts: string[] = [];
   for (let k = 0; k < nparts; k++) {
     const out: string[] = [`(function part${k}(b0, cc, pc) {`, "const H = hp.h;", "let e = -1;", declare];
     if (k === 0) {
-      out.push("if (pc === 0) {", headCode, "if (hp.wakeups.length !== 0) WAKE();", fromV);
-      if (made.length > 0) out.push(`{ let t = hp.top; ${made.map((i) => `v${i} = (H[t] = t << 3, t++ << 3);`).join(" ")} hp.top = t; }`);
-      if (env) out.push(`e = cm.allocate(${nslots}, b0, cc);`, ...[...perm].filter((i) => i < c.nvars && (hc.set.has(i) || made.includes(i))).map((i) => `S[e + ${ENV + i}] = v${i};`));
+      out.push("if (pc === 0) {", headCode, fromV, headWake, ...entry);
       out.push("pc = 1;", "} else {", "e = R[0]; b0 = S[e + 2]; cc = S[e + 4]; R[3] = cc;", "}");
     } else out.push("e = R[0]; b0 = S[e + 2]; cc = S[e + 4]; R[3] = cc;");
     out.push("for (;;) {", "switch (pc) {");
+    // The head's wake point enters the body as the head does; a step's goes on with the step after it.
+    if (k === 0 && wakeIds.has(0)) out.push(`case ${n}:`, reload(0), ...entry, "pc = 1; continue;");
+    for (const w of wakeIds.keys()) if (w > 0 && partOf[w] === k) out.push(`case ${n + w}:`, reload(w), goto(w + 1, k));
     let last = 0;
     for (let pc = 1; pc < n; pc++)
       if (partOf[pc] === k) {
@@ -980,6 +1003,10 @@ export function compileCellClause(cm: CellMachine, c: Clause, hot: boolean): Cla
   P.push(...factory(cm, hp, cm.A, cm.S, cm.R, cm.CODE, bc.consts, HEADFAIL, P, ...RT_NAMES.map((k) => rt[k])));
   for (const [pc, id] of ids) {
     const f = P[partOf[pc]!]!;
+    cm.CODE[id] = () => f(0, 0, pc);
+  }
+  for (const [w, id] of wakeIds) {
+    const f = P[partOf[w]!]!, pc = n + w;
     cm.CODE[id] = () => f(0, 0, pc);
   }
   return P[0]!;

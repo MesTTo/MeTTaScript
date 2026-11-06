@@ -2,16 +2,17 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Purpose: the term builtins on cells (a-petta-cell-store.builtins.terms), each giving the object builtin's answers,
+// Purpose: the term, global variable and attribute builtins on cells, each giving the object builtin's answers,
 // bindings and errors (builtins.ts, library.ts) without decoding its arguments: the standard order (compare/3, @</2
 // and the rest, ==/2), variance (=@=/2), subsumes_term/2, functor/3, arg/3, =../2, copy_term/2, cyclic_term/1,
-// term_variables/2,3, length/2 and the sorts. A mode that needs a generator (arg/3 with an unbound index, length/2 of a
-// partial list with an unbound length) goes to the object builtin's generator through the bridge.
+// term_variables/2,3, length/2 and the sorts; b_setval/2, nb_setval/2 and their readers; put_attr/3, get_attr/3,
+// del_attr/2 and the rest. A mode that needs a generator (arg/3 with an unbound index, length/2 of a partial list with
+// an unbound length) goes to the object builtin's generator through the bridge.
 // am[implements a-petta-cell-store.builtins.terms]
 
 import { compareNum, type Num } from "../arith";
 import { cmpStr } from "../builtins";
-import { Float, NIL, Str, domainError, existenceError, instantiationError, typeError } from "../terms";
+import { Float, NIL, PrologError, Str, Struct, domainError, existenceError, instantiationError, mkVar, typeError } from "../terms";
 import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, INT, LIS, REF, STR, boxEq, type Heap } from "./heap";
 import { copyTerm } from "../machine";
 import type { Term } from "../terms";
@@ -20,10 +21,10 @@ import type { CellMachine } from "./machine";
 const isVarTag = (c: number): boolean => (c & 7) === REF || (c & 7) === ATV;
 
 /**
- * The object term of cell c as an error's culprit: copied with plain variables, as the object machine's thrown ball
- * is (Machine.copyTerm drops attributes).
+ * The object term of cell c as an error's culprit: a copy, attributes kept, as the object machine copies its thrown
+ * ball (c-swi-attr-copies-1106).
  */
-const culprit = (hp: Heap, c: number): Term => copyTerm(hp.decode(c, new Map()));
+const culprit = (hp: Heap, c: number): Term => copyTerm(hp.decode(c, new Map()), new Map(), true);
 
 /** Rank in the standard order: variable 0, number 1, atom 3, string 4, compound 5 (builtins.ts typeRank). */
 function rank(hp: Heap, c: number): number {
@@ -117,16 +118,27 @@ export function variantCells(hp: Heap, a0: number, b0: number): boolean {
   return true;
 }
 
-/** A copy of the term at c with fresh plain variables, attributes dropped as Machine.copyTerm drops them. */
-function copyCells(hp: Heap, c0: number, map: Map<number, number>): number {
+/**
+ * A copy of the term at c with fresh variables, `map` taking each variable to its copy; with `attrs` an attributed
+ * variable's copy gets its att/3 list copied through the same map, as Machine.copyTerm with attributes gives SWI's
+ * copy_term/2 (c-swi-attr-copies-1106), else the copies are plain. Time: the term's size, with its attributes'.
+ */
+function copyCells(hp: Heap, c0: number, map: Map<number, number>, attrs: boolean): number {
   const c = hp.deref(c0);
   const tag = c & 7;
   if (tag === REF || tag === ATV) {
     let v = map.get(c);
     if (v === undefined) {
-      const a = hp.alloc(1);
-      hp.h[a] = v = a << 3;
-      map.set(c, v);
+      if (attrs && hp.attributed(c)) {
+        v = hp.newAttVar(hp.NIL);
+        map.set(c, v);
+        const list = copyCells(hp, hp.h[(c >> 3) + 1]!, map, true);
+        hp.h[(v >> 3) + 1] = list;
+      } else {
+        const a = hp.alloc(1);
+        hp.h[a] = v = a << 3;
+        map.set(c, v);
+      }
     }
     return v;
   }
@@ -136,21 +148,21 @@ function copyCells(hp: Heap, c0: number, map: Map<number, number>): number {
     let last = first;
     let rest = c;
     for (;;) {
-      hp.h[last] = copyCells(hp, hp.h[rest >> 3]!, map);
+      hp.h[last] = copyCells(hp, hp.h[rest >> 3]!, map, attrs);
       rest = hp.deref(hp.h[(rest >> 3) + 1]!);
       if ((rest & 7) !== LIS) break;
       const next = hp.alloc(2);
       hp.h[last + 1] = (next << 3) | LIS;
       last = next;
     }
-    hp.h[last + 1] = copyCells(hp, rest, map);
+    hp.h[last + 1] = copyCells(hp, rest, map, attrs);
     return (first << 3) | LIS;
   }
   if (tag === STR) {
     const p = c >> 3, n = hp.funArity[hp.h[p]! >> 3]!;
     const q = hp.alloc(n + 1);
     hp.h[q] = hp.h[p]!;
-    for (let i = 1; i <= n; i++) hp.h[q + i] = copyCells(hp, hp.h[p + i]!, map);
+    for (let i = 1; i <= n; i++) hp.h[q + i] = copyCells(hp, hp.h[p + i]!, map, attrs);
     return (q << 3) | STR;
   }
   return c;
@@ -306,7 +318,7 @@ export function installGlobalBuiltins(cm: CellMachine): void {
   };
   cm.proc("nb_setval", 2).det = () => {
     const a = slotOf(atomArg(hp, A[0]!));
-    const copy = copyTerm(hp.decode(A[1]!, new Map()));
+    const copy = copyTerm(hp.decode(A[1]!, new Map()), new Map(), true);
     const c = H[a]!;
     const v = (c & 7) === BOX ? hp.boxes[c >> 3] : null;
     if (v instanceof NbValue) v.t = copy;
@@ -329,9 +341,93 @@ export function installGlobalBuiltins(cm: CellMachine): void {
   };
 }
 
+/**
+ * The attribute builtins on cells (a-petta-cell-store.runtime.attrs.store), with the object builtins' answers and
+ * errors (builtins.ts put_attr/3 and the rest). An attributed variable is an ATV cell whose next cell holds its
+ * att(Module, Value, More) list ending in []. put_attr/3 on a variable without attributes binds it to a new attributed
+ * variable, as SWI makes one (c-swi-attvar-age-1106); on one with attributes it sets the module's value in place or
+ * links the module on at the end, each a trailed assignment (c-swi-attr-inplace-1106). del_attr/2 unlinks the
+ * module's entry, and a variable whose list it empties is plain (Heap.attributed). Time: the variable's attributes.
+ * am[implements a-petta-cell-store.runtime.attrs.store] am[rests-on c-swi-attvar-age-1106] am[rests-on c-swi-attr-inplace-1106]
+ */
+export function installAttrBuiltins(cm: CellMachine): void {
+  const hp = cm.hp, A = cm.A, H = hp.h;
+  const F_ATT = hp.functor("att", 3);
+  const att = (m: number, v: number, more: number): number => {
+    const q = hp.alloc(4);
+    H[q] = F_ATT;
+    H[q + 1] = m;
+    H[q + 2] = v;
+    H[q + 3] = more;
+    return (q << 3) | STR;
+  };
+  // seek(d, m): the address of the link to module m's entry in attributed variable d's list (the variable's list
+  // cell or the previous entry's More), the entry's address left in `at`; when m has none, `at` is 0 and the link
+  // returned is the last one, which holds [].
+  let at = 0;
+  const seek = (d: number, m: number): number => {
+    let link = (d >> 3) + 1;
+    for (let l = H[link]!; (l & 7) === STR; l = H[link]!) {
+      if (H[(l >> 3) + 1] === m) {
+        at = l >> 3;
+        return link;
+      }
+      link = (l >> 3) + 3;
+    }
+    at = 0;
+    return link;
+  };
+  const def = (name: string, arity: number, f: () => boolean): void => {
+    cm.proc(name, arity).det = f;
+  };
+  def("put_attr", 3, () => {
+    const d = hp.deref(A[0]!);
+    if (!isVarTag(d)) throw new PrologError(new Struct("error", [new Struct("uninstantiation_error", [culprit(hp, d)]), mkVar()]));
+    const m = hp.atom(atomArg(hp, A[1]!));
+    if (!hp.attributed(d)) hp.bind(d >> 3, hp.newAttVar(att(m, A[2]!, hp.NIL)));
+    else {
+      const link = seek(d, m);
+      if (at !== 0) hp.bind(at + 2, A[2]!);
+      else hp.bind(link, att(m, A[2]!, hp.NIL));
+    }
+    return true;
+  });
+  def("get_attr", 3, () => {
+    const d = hp.deref(A[0]!);
+    if (!hp.attributed(d)) return false;
+    seek(d, hp.atom(atomArg(hp, A[1]!)));
+    return at !== 0 && hp.unify(A[2]!, H[at + 2]!);
+  });
+  def("del_attr", 2, () => {
+    const d = hp.deref(A[0]!);
+    if (!isVarTag(d)) return true;
+    const m = hp.atom(atomArg(hp, A[1]!));
+    if (hp.attributed(d)) {
+      const link = seek(d, m);
+      if (at !== 0) hp.bind(link, H[at + 3]!);
+    }
+    return true;
+  });
+  def("attvar", 1, () => hp.attributed(hp.deref(A[0]!)));
+  def("get_attrs", 2, () => {
+    const d = hp.deref(A[0]!);
+    return hp.attributed(d) && hp.unify(A[1]!, H[(d >> 3) + 1]!);
+  });
+  def("del_attrs", 1, () => {
+    const d = hp.deref(A[0]!);
+    if (hp.attributed(d)) hp.bind((d >> 3) + 1, hp.NIL);
+    return true;
+  });
+  def("term_attvars", 2, () => {
+    const vs = varsOf(hp, A[0]!).filter((v) => hp.attributed(v));
+    return hp.unify(A[1]!, listCells(hp, vs, hp.NIL));
+  });
+}
+
 /** Install the term builtins on `cm`: each a det function over the argument registers (CellProc.det). */
 export function installTermBuiltins(cm: CellMachine): void {
   installGlobalBuiltins(cm);
+  installAttrBuiltins(cm);
   const hp = cm.hp, A = cm.A, H = hp.h;
   const def = (name: string, arity: number, f: () => boolean): void => {
     cm.proc(name, arity).det = f;
@@ -346,8 +442,7 @@ export function installTermBuiltins(cm: CellMachine): void {
       const r = f();
       if (r === null) return m.callNondet(key, b, n, cc);
       if (!r) return m.fail();
-      if (hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
-      return m.proceed();
+      return hp.wakeups.length !== 0 ? m.wake(cc) : m.proceed();
     };
   };
   const unify = (x: number, y: number): boolean => hp.unify(x, y);
@@ -368,7 +463,7 @@ export function installTermBuiltins(cm: CellMachine): void {
 
   // subsumes_term(G, S): G unifies with S leaving S a variant of what it was; every binding of the trial is undone.
   def("subsumes_term", 2, () => {
-    const before = copyCells(hp, A[1]!, new Map());
+    const before = copyCells(hp, A[1]!, new Map(), false);
     const hb = hp.hb, mark = hp.tr, w = hp.wakeups.length;
     hp.hb = HEAP_CELLS;
     let ok = false;
@@ -436,7 +531,7 @@ export function installTermBuiltins(cm: CellMachine): void {
     return unify(A[1]!, listCells(hp, [d], hp.NIL));
   });
 
-  def("copy_term", 2, () => unify(A[1]!, copyCells(hp, A[0]!, new Map())));
+  def("copy_term", 2, () => unify(A[1]!, copyCells(hp, A[0]!, new Map(), true)));
   def("cyclic_term", 1, () => cyclicCells(hp, A[0]!));
   def("acyclic_term", 1, () => !cyclicCells(hp, A[0]!));
   def("term_variables", 2, () => unify(A[1]!, listCells(hp, varsOf(hp, A[0]!), hp.NIL)));

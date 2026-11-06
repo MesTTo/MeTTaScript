@@ -7,17 +7,20 @@
 // fixed order and use unification, tests, arithmetic, cut, if-then-else, soft-cut, disjunction and negation, are loaded
 // once into the object machine's database, which both engines read; each query's answers must come in the same order
 // with the same bindings, up to the first 40, and the query must throw on both or neither. Fixed recursive programs
-// (naive reverse, member, a counting loop) check recursion and backtracking through it.
+// (naive reverse, member, a counting loop) check recursion and backtracking through it; database, global variable and
+// attribute programs run on fresh machine pairs, attributes also against SWI-Prolog's measured answers.
 // am[verifies a-petta-cell-store.compile.diff]
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
+import { ATTR_PROGRAMS, ATTR_SWI } from "../attr-fixture";
 import { installBuiltins } from "../builtins";
+import { installClpfd } from "../clpfd";
 import { installConsult } from "../consult";
 import { installLibrary } from "../library";
 import { Machine } from "../machine";
 import { readClauses } from "../prolog-reader";
-import { Cons, Float, NIL, Struct, Var, deref, mkVar, type Term } from "../terms";
+import { Cons, Float, NIL, Struct, Var, deref, listToArray, mkVar, type Term } from "../terms";
 import { installTermBuiltins } from "./builtins";
 import { compileCellClause, installInlineBuiltins } from "./compile";
 import { CellMachine } from "./machine";
@@ -70,6 +73,7 @@ function machines(): { m: Machine; cm: CellMachine } {
   installBuiltins(m);
   installLibrary(m);
   installConsult(m);
+  installClpfd(m);
   const cm = new CellMachine(m);
   cm.compile = compileCellClause;
   installInlineBuiltins(cm);
@@ -248,6 +252,32 @@ describe("cell engine against the object machine", () => {
       }
       expect(onCells(b.cm, name, [mkVar()]), name).toStrictEqual(onObjects(a.m, name, [mkVar()]));
     }
+  });
+
+  // am[verifies a-petta-cell-store.runtime.attrs.test]
+  it("runs attributed variables and their hooks as the object machine and SWI-Prolog do, cold and compiled", () => {
+    for (const [name, text] of Object.entries(ATTR_SWI)) {
+      const want = listToArray((readClauses(`swi(${text}).`)[0] as Struct).args[0]!)!.map((t) => canon([t]));
+      // Cold: each clause runs from its head program; rep then calls it 40 times, so it is compiled on its 32nd try.
+      const a = machines(), b = machines();
+      for (const c of readClauses(ATTR_PROGRAMS)) {
+        a.m.addClause(c, true);
+        b.m.addClause(c, true);
+      }
+      const got = onCells(b.cm, name, [mkVar()]);
+      expect(got, `${name} object: ${lastObjectError} cell: ${lastCellError}`).toStrictEqual(onObjects(a.m, name, [mkVar()]));
+      expect(got.answers, `${name} against SWI`).toStrictEqual(want);
+      const rep = [name as Term, mkVar()];
+      expect(onCells(b.cm, "rep", rep), `${name} compiled`).toStrictEqual(onObjects(a.m, "rep", rep));
+    }
+    // A fact tried over HOT_AFTER times gets its inline head, waking from it as from the compact one.
+    const a = machines(), b = machines();
+    for (const c of readClauses(ATTR_PROGRAMS)) {
+      a.m.addClause(c, true);
+      b.m.addClause(c, true);
+    }
+    expect(onCells(b.cm, "hot", [mkVar()])).toStrictEqual({ answers: ["2200"], threw: false });
+    expect(onObjects(a.m, "hot", [mkVar()])).toStrictEqual({ answers: ["2200"], threw: false });
   });
 
   it("runs recursive programs as the object machine does", () => {
