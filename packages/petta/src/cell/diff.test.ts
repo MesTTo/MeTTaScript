@@ -221,9 +221,17 @@ describe("cell engine against the object machine", () => {
       db8(X) :- retractall(u8(_)), assertz(u8(1)), retractall(u8(_)), ( u8(_) -> X = some ; X = none ).
       db9(X) :- assertz(v9(1)), v9(A), assertz(v9(2)), findall_free(A, X).
       findall_free(A, A).
+      sc1(X) :- setup_call_cleanup(true, X = 1, assertz(log1(c))), log1(c).
+      sc2(X) :- catch(setup_call_cleanup(true, throw(e), assertz(log2(c))), e, true), ( log2(c) -> X = ran ; X = not ).
+      sc3(X) :- \\+ setup_call_cleanup(true, fail, assertz(log3(c))), ( log3(c) -> X = ran ; X = not ).
+      sc4(X) :- setup_call_cleanup(true, mem(X, [1, 2]), assertz(log4(c))), !, log4(c).
+      sc5(X) :- call_cleanup(mem(X, [1, 2]), true).
+      sc6(X) :- setup_call_cleanup(Y = 1, X = Y, true).
+      mem(X, [X|_]).
+      mem(X, [_|T]) :- mem(X, T).
       db10(X) :- assertz(w10(1)), w10(X), retract(w10(X)), \\+ w10(_).
     `;
-    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10"]) {
+    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6"]) {
       const a = machines(), b = machines();
       for (const c of readClauses(src)) {
         a.m.addClause(c, true);

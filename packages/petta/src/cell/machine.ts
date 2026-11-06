@@ -32,6 +32,8 @@ export const K_ALT = 1;
 export const K_BRIDGE = 2;
 /** catch/3's choicepoint: the catcher and recovery saved as its arguments, S[b + 6] the catch context outside it. */
 export const K_CATCH = 3;
+/** setup_call_cleanup/3's choicepoint: its cleanup goal saved as its argument (Machine.setupCallCleanup). */
+export const K_CLEANUP = 4;
 export const K_BARRIER = 7;
 
 // Registers, as indexes of R: E, CP, B, CC, the run's barrier, the cut barrier a clause is entered with.
@@ -132,6 +134,9 @@ export class CellMachine {
   private readonly ONCE: number;
   private readonly PROCEED: number;
   private readonly CATCH_EXIT: number;
+  private readonly SCC_EXIT: number;
+  /** Cleanup choicepoints on the stack, so a cut or an unwind looks for them only when there are any. */
+  private cleanups = 0;
   /** The choicepoint fail() last popped for an alternative, which the alternative's code reads its data from. */
   private lastAlt = 0;
   // Functor and atom cells the interpreter dispatches on.
@@ -237,6 +242,21 @@ export class CellMachine {
     this.PROCEED = def(() => this.proceed());
     for (let n = 1; n <= 8; n++) this.proc("call", n).ctl = (cm, k, cc) => cm.callN(k, cc);
     this.proc("catch", 3).ctl = (cm, _k, cc) => cm.catchGoal(cc);
+    this.proc("setup_call_cleanup", 3).ctl = (cm, _k, cc) => cm.setupCallCleanup(cm.A[0]!, cm.A[1]!, cm.A[2]!, cc);
+    this.proc("call_cleanup", 2).ctl = (cm, _k, cc) => cm.setupCallCleanup(cm.A_TRUE, cm.A[0]!, cm.A[1]!, cc);
+    // The goal under setup_call_cleanup/3 exited: a deterministic exit runs the cleanup now.
+    this.SCC_EXIT = def(() => {
+      const S = this.S, R = this.R, e = R[RE]!;
+      const b = S[e + ENV]!;
+      R[RCP] = S[e + 1]!;
+      R[RE] = S[e]!;
+      if (R[RB] === b) {
+        this.popCP(b);
+        this.cleanups--;
+        this.runCleanup(S[b + CPH]!);
+      }
+      return this.proceed();
+    });
     this.proc("throw", 1).ctl = (cm) => {
       const ball = cm.hp.deref(cm.A[0]!);
       if ((ball & 7) === REF || (ball & 7) === ATV) throw instantiationError();
@@ -347,6 +367,8 @@ export class CellMachine {
   /** Cut: drop the choicepoints newer than `b0`. */
   cutTo(b0: number): void {
     if (this.R[RB]! <= b0) return;
+    // A cut past setup_call_cleanup's choicepoint runs its cleanup (Machine.cutTo).
+    if (this.cleanups > 0) this.cleanupsAbove(b0, false);
     this.R[RB] = b0;
     this.hp.hb = this.S[b0 + 9]!;
   }
@@ -403,6 +425,12 @@ export class CellMachine {
         case K_CATCH:
           // The caught goal has no more solutions: catch/3 fails.
           this.popCP(b);
+          continue;
+        case K_CLEANUP:
+          // The goal has no more solutions: its cleanup runs, with the bindings undone to its setup's.
+          this.popCP(b);
+          this.cleanups--;
+          this.runCleanup(S[b + CPH]!);
           continue;
         default:
           throw new Error(`cell machine: choicepoint kind ${S[b + 1]} is not built yet`);
@@ -595,6 +623,43 @@ export class CellMachine {
     return this.proceed();
   }
 
+  /** setup_call_cleanup(S, G, C): S once; G under a cleanup choicepoint holding C, its cut local to it. */
+  setupCallCleanup(setup: number, g: number, cleanup: number, cc: number): Code | null {
+    const S = this.S, R = this.R;
+    if (!this.solveCell(setup)) return this.fail();
+    this.A[0] = cleanup;
+    const b = this.pushCP(K_CLEANUP, R[RB]!, cc, 1);
+    this.cleanups++;
+    const e = this.allocate(1, b, cc);
+    S[e + ENV] = b;
+    R[RCP] = this.SCC_EXIT;
+    return this.goal(g, b, cc);
+  }
+
+  /** Run cleanup goal cell `c` once; its failure or error does not reach the caller (Machine.runCleanup). */
+  private runCleanup(c: number): void {
+    try {
+      this.solveCell(c);
+    } catch (e) {
+      if (!(e instanceof PrologError)) throw e;
+    }
+  }
+
+  /** The cleanups of the cleanup choicepoints above `b0`, newest first, each after undoing to its setup when `undo`. */
+  private cleanupsAbove(b0: number, undo: boolean): void {
+    const S = this.S;
+    const found: number[] = [];
+    for (let b = this.R[RB]!; b > b0; b = S[b]!) if (S[b + 1] === K_CLEANUP) found.push(b);
+    for (const b of found) {
+      this.cleanups--;
+      // Retire it before running, so the cleanup's own cuts do not meet it again.
+      S[b + 1] = K_ALT;
+      S[b + 8] = this.FAILC;
+      if (undo) this.hp.undo(S[b + 2]!);
+      this.runCleanup(S[b + CPH]!);
+    }
+  }
+
   /** catch(G, C, R) with A[0..3) holding them: G runs under a catch choicepoint, its cut local to it. */
   catchGoal(cc: number): Code | null {
     const A = this.A, S = this.S, R = this.R;
@@ -617,6 +682,8 @@ export class CellMachine {
   private unwind(e: PrologError, bar: number): Code | null {
     const S = this.S, R = this.R, hp = this.hp;
     let b = R[RCC]!;
+    // Each cleanup the ball passes runs, with the bindings undone to its setup's (Machine.unwindTo).
+    if (this.cleanups > 0) this.cleanupsAbove(b > bar ? b : bar, true);
     while (b > bar && S[b + 1] === K_CATCH) {
       hp.undo(S[b + 2]!);
       hp.top = S[b + 9]!;
@@ -800,8 +867,18 @@ export class CellMachine {
     return fn(b0, cc, 0);
   }
 
+  /** Solve goal cell `g` once, its cut local; bindings persist on success. */
+  solveCell(g: number): boolean {
+    return this.solveFrom(() => this.goal(g, this.R[RB]!, this.R[RCC]!));
+  }
+
   /** Solve the goal predicate `p` with A[0..n) once; bindings persist on success. */
   solveOnce(p: CellProc, n: number): boolean {
+    return this.solveFrom(() => this.callw(p, n, this.R[RCC]!));
+  }
+
+  /** Run code `start` once under a barrier; bindings persist on success. */
+  private solveFrom(start: Code): boolean {
     const R = this.R;
     const sE = R[RE]!, sCP = R[RCP]!, sB = R[RB]!, sCC = R[RCC]!, sBAR = R[RBAR]!;
     const sNest = this.nest;
@@ -810,9 +887,8 @@ export class CellMachine {
     R[RBAR] = bar;
     R[RCP] = this.OK;
     try {
-      const f: Code | null = () => this.callw(p, n, sCC);
       this.nest = 0;
-      this.drive(f, bar);
+      this.drive(start, bar);
       this.cutTo(sB);
       return this.result;
     } catch (e) {
