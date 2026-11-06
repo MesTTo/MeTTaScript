@@ -55,7 +55,8 @@ export class CellArgs implements ArgVector {
     const tag = c & 7;
     if (tag !== STR && tag !== LIS) return null;
     let ch = this.child;
-    if (ch === null) this.child = ch = new CellArgs(hp, hp.h, 0);
+    // A concurrent_and worker runs on a heap array of its own, so the child follows the current one.
+    if (ch === null || ch.cells !== hp.h) this.child = ch = new CellArgs(hp, hp.h, 0);
     ch.base = tag === STR ? (c >> 3) + 1 : c >> 3;
     return ch;
   }

@@ -332,6 +332,31 @@ describe("cell engine against the object machine", () => {
     expect(onCells(cm, "tg", [mkVar()]).answers).toStrictEqual(['"unbound"']);
   });
 
+  // am[verifies a-petta-cell-store.runtime.rest.fibers]
+  it("runs concurrent_and's workers interleaved as the object machine's fibers do", () => {
+    const src = `
+      mem(X, [X|_]).
+      mem(X, [_|T]) :- mem(X, T).
+      count(0) :- !.
+      count(N) :- N1 is N - 1, count(N1).
+      ca1(L) :- findall(X, concurrent_and(mem(X, [1, 2, 3]), true), L).
+      ca2(L) :- findall(X-Y, concurrent_and(mem(X, [1, 2]), mem(Y, [a, b])), L).
+      ca3(X) :- once(concurrent_and(mem(N-R, [100000-slow, 1-fast]), (count(N), X = R))).
+      ca4(E) :- catch(concurrent_and(mem(X, [1]), throw(oops(X))), E, true).
+      ca5(L) :- nb_setval(kca, 1), findall(V, concurrent_and(mem(_, [a]), (nb_current(kca, V) -> true ; V = none)), L).
+      ca6(L) :- findall(X, concurrent_and(mem(X, [1, 2, 3]), (X > 1, !)), L).
+      ca7(L) :- findall(X, concurrent_and(mem(X, [5, 3]), (count(X), findall(Y, mem(Y, [X, X]), [_, _]))), L).
+    `;
+    for (const name of ["ca1", "ca2", "ca3", "ca4", "ca5", "ca6", "ca7"]) {
+      const a = machines(), b = machines();
+      for (const c of readClauses(src)) {
+        a.m.addClause(c, true);
+        b.m.addClause(c, true);
+      }
+      expect(onCells(b.cm, name, [mkVar()]), name).toStrictEqual(onObjects(a.m, name, [mkVar()]));
+    }
+  });
+
   // am[verifies a-petta-cell-store.runtime.rest]
   it("answers tabled predicates from tables as the object machine does", () => {
     const src = `

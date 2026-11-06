@@ -41,12 +41,22 @@ export interface Wakeup {
   readonly value: number;
 }
 
+/** A computation's trail: entries' addresses and old cells, and the first free entry (Heap.trailState). */
+export interface TrailState {
+  readonly trail: Int32Array;
+  readonly old: Int32Array;
+  readonly tr: number;
+}
+
 /**
  * The heap with its tables. Cell 0 is never used, so no cell's address is 0; ids start at 0 in each table.
- * Fields are read by generated code (h, top, hb, tr), which reloads them after any call that can allocate.
+ * Fields are read by generated code (h, top, hb, tr), which reloads them after any call that can allocate. A
+ * concurrent_and worker runs on a heap array, trail and queue of its own (CellMachine fibers), the machine swapping
+ * them in and out; the atom, functor and box tables are shared.
  */
 export class Heap {
-  readonly h = new Int32Array(HEAP_CELLS);
+  /** The cells of the computation running now: the main run's, or a concurrent_and worker's own. */
+  h: Int32Array = new Int32Array(HEAP_CELLS);
   /** H: the first free cell. */
   /** Cells 1 to GLOBAL_SLOTS hold b_setval/2's values, below every choicepoint's heap top so always trailed. */
   top = 1 + GLOBAL_SLOTS;
@@ -60,9 +70,9 @@ export class Heap {
    */
   frozen = 0;
   /** Each trail entry's address; only bind, undo and tidy touch the trail, so growing replaces it. */
-  private trail = new Int32Array(TRAIL_START);
+  private trail: Int32Array = new Int32Array(TRAIL_START);
   /** Each trail entry's old cell, which undo puts back: a variable's self-reference, or a global slot's value. */
-  private trailOld = new Int32Array(TRAIL_START);
+  private trailOld: Int32Array = new Int32Array(TRAIL_START);
   /** TR: the first free trail entry. */
   tr = 0;
   /** BOX cells' values: numbers beyond 29 bits, bigints, Floats and Strs. */
@@ -220,6 +230,24 @@ export class Heap {
       h[trail[tr]!] = old[tr]!;
     }
     this.tr = mark;
+  }
+
+  /** The trail as it stands, to put back with setTrailState. */
+  trailState(): TrailState {
+    return { trail: this.trail, old: this.trailOld, tr: this.tr };
+  }
+
+  /** Make `s` the trail; a fresh one when null. */
+  setTrailState(s: TrailState | null): void {
+    if (s === null) {
+      this.trail = new Int32Array(TRAIL_START);
+      this.trailOld = new Int32Array(TRAIL_START);
+      this.tr = 0;
+      return;
+    }
+    this.trail = s.trail;
+    this.trailOld = s.old;
+    this.tr = s.tr;
   }
 
   /** Whether variable cell `x` (unbound) holds attributes: an attributed cell whose list del_attr/2 emptied is plain. */

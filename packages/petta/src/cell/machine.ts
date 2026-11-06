@@ -17,7 +17,7 @@ import { Halt, NIL, PrologError, Struct, existenceError, instantiationError, mkL
 import { CellArgs } from "./args";
 import { bridgeBuiltin, nextSolution, objectTrailMark, startNondet, takeSolution, type BridgeRun } from "./bridge";
 import { build, headProgram, runHead, type HeadProgram } from "./headprog";
-import { ATM, ATV, BOX, Heap, INT, REF, STR } from "./heap";
+import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, Heap, INT, REF, STR, type TrailState, type Wakeup } from "./heap";
 
 /** Code the trampoline runs: the code to run next, or null at a run's exit. */
 export type Code = () => Code | null;
@@ -34,6 +34,11 @@ export const K_BRIDGE = 2;
 export const K_CATCH = 3;
 /** setup_call_cleanup/3's choicepoint: its cleanup goal saved as its argument (Machine.setupCallCleanup). */
 export const K_CLEANUP = 4;
+/**
+ * concurrent_and/2,3's choicepoint: SO[b] its fiber group, and its argument area the control stacks of the group's
+ * workers, so cutting or exhausting it frees them.
+ */
+export const K_FIBERS = 5;
 export const K_BARRIER = 7;
 
 // Registers, as indexes of R: E, CP, B, CC, the run's barrier, the cut barrier a clause is entered with.
@@ -73,6 +78,44 @@ const COMPILE_AFTER = 32;
  * am[implements a-petta-cell-store.control.bounds]
  */
 const S_LIMIT = 1 << 24;
+/** Control stack cells each concurrent_and worker gets in its choicepoint's area. */
+const FIBER_S = 1 << 18;
+/** Trampoline bounces a worker runs before the next takes its turn, as the object machine's workers run SLICE goals. */
+const SLICE = 2000;
+
+/** A computation's state beyond its stack frames: registers, heap array, trail, queue, and where its stack must end. */
+interface Ctx {
+  readonly R: Int32Array;
+  readonly h: Int32Array;
+  readonly top: number;
+  readonly hb: number;
+  readonly frozen: number;
+  readonly trail: TrailState;
+  readonly wakeups: Wakeup[];
+  readonly nest: number;
+  readonly pend: CellProc | null;
+  readonly pendN: number;
+  readonly pendCC: number;
+  readonly result: boolean;
+  readonly sLimit: number;
+  readonly inFiber: boolean;
+}
+
+/** A concurrent_and worker: its state while another runs, the code it goes on with, its pair and its barrier. */
+interface Fiber {
+  ctx: Ctx;
+  next: Code | null;
+  solved: boolean;
+  readonly pair: number;
+  readonly bar: number;
+}
+
+/** A concurrent_and call's workers in turn order, the next to run, and the caller's Generator-Test pair cell. */
+interface FiberGroup {
+  readonly workers: Fiber[];
+  i: number;
+  readonly pair: number;
+}
 /** The goals the meta-call interpreter runs itself (goal) when call/N builds one. */
 const CONTROL = new Set([",/2", ";/2", "->/2", "*->/2", "\\+/1", "call/1", "once/1", "ignore/1", "forall/2"]);
 
@@ -197,6 +240,10 @@ export class CellMachine {
   /** Head slots, of compiled heads (compile.ts) and cold facts' head programs (headprog.ts); grown to the most slots a clause has. */
   vals = new Int32Array(64);
   private readonly next = new Int32Array(1);
+  /** Where the running computation's control stack must end: the stack's end, or a worker's area's end. */
+  private sLimit = S_LIMIT;
+  /** Whether a concurrent_and worker is running, which starts with no global variables (installGlobalBuiltins). */
+  inFiber = false;
 
   constructor(readonly om: Machine) {
     if (om.db.cellMachine !== null) throw new Error("cell machine: a database has one cell machine, the clauses' code being bound to it");
@@ -278,6 +325,8 @@ export class CellMachine {
     this.proc("findall", 3).ctl = (cm) => cm.findall();
     this.proc("setup_call_cleanup", 3).ctl = (cm, _k, cc) => cm.setupCallCleanup(cm.A[0]!, cm.A[1]!, cm.A[2]!, cc);
     this.proc("call_cleanup", 2).ctl = (cm, _k, cc) => cm.setupCallCleanup(cm.A_TRUE, cm.A[0]!, cm.A[1]!, cc);
+    this.proc("concurrent_and", 2).ctl = (cm, _k, cc) => cm.concurrentAnd(cc);
+    this.proc("concurrent_and", 3).ctl = (cm, _k, cc) => cm.concurrentAnd(cc);
     // The goal under setup_call_cleanup/3 exited: a deterministic exit runs the cleanup now.
     this.SCC_EXIT = def(() => {
       const S = this.S, R = this.R, e = R[RE]!;
@@ -374,7 +423,7 @@ export class CellMachine {
   /** Push an environment of `n` cell slots whose continuation is the current one. */
   allocate(n: number, cb: number, cc: number): number {
     const S = this.S, R = this.R, e = this.top();
-    if (e + ENV + n > S_LIMIT) throw new Error("cell control stack exhausted");
+    if (e + ENV + n > this.sLimit) throw new Error("cell control stack exhausted");
     S[e] = R[RE]!;
     S[e + 1] = R[RCP]!;
     S[e + 2] = cb;
@@ -387,7 +436,7 @@ export class CellMachine {
   /** Push a choicepoint saving the continuation, the heap and trail tops and A[0..n); returns its index. */
   pushCP(kind: number, cb: number, cc: number, n: number): number {
     const S = this.S, R = this.R, hp = this.hp, b = this.top();
-    if (b + CPH + n > S_LIMIT) throw new Error("cell control stack exhausted");
+    if (b + CPH + n > this.sLimit) throw new Error("cell control stack exhausted");
     S[b] = R[RB]!;
     S[b + 1] = kind;
     S[b + 2] = hp.tr;
@@ -481,6 +530,21 @@ export class CellMachine {
           this.cleanups--;
           this.runCleanup(S[b + CPH]!);
           continue;
+        case K_FIBERS: {
+          // The workers' next solution, unified with the caller's pair as the object builtin unifies its copy; none
+          // left pops the choicepoint, its workers going with it.
+          R[RE] = S[b + 3]!;
+          R[RCP] = S[b + 4]!;
+          R[RCC] = S[b + 6]!;
+          const g = this.SO[b] as FiberGroup;
+          const sol = this.nextFiberSolution(g);
+          if (sol === null) {
+            this.popCP(b);
+            continue;
+          }
+          if (!hp.unify(g.pair, hp.encode(sol, new Map()))) continue;
+          return hp.wakeups.length !== 0 ? this.wake(R[RCC]!) : this.CODE[R[RCP]!]!;
+        }
         default:
           throw new Error(`cell machine: choicepoint kind ${S[b + 1]} is not built yet`);
       }
@@ -682,6 +746,173 @@ export class CellMachine {
     this.solveAllFrom(() => this.goal(g, this.R[RB]!, this.R[RCC]!), () => void found.push(hp.decode(t, new Map())));
     if (!hp.unify(l, hp.encode(mkList(found), new Map()))) return this.fail();
     return hp.wakeups.length !== 0 ? this.wake(this.R[RCC]!) : this.proceed();
+  }
+
+  /**
+   * concurrent_and(Generator, Test[, Options]) with A[0..2) holding them, as the object builtin runs it (library.ts):
+   * every solution of Generator, solved once here, gives a worker solving a copy of Test; the workers run interleaved
+   * in slices of SLICE bounces, as SWI's threads run at once, and each solution is returned as its worker finds it,
+   * unified back into Generator-Test, so once/1 around it takes the first worker to finish (hyperpose_primes) and an
+   * error in a worker reaches the caller. A worker is a fiber: a heap array, trail and queue of its own, its control
+   * stack in the area of the K_FIBERS choicepoint, which frees them all when it is cut or exhausted.
+   * am[implements a-petta-cell-store.runtime.rest.fibers]
+   */
+  concurrentAnd(cc: number): Code | null {
+    const hp = this.hp, A = this.A;
+    const q = hp.alloc(3);
+    hp.h[q] = hp.functor("-", 2);
+    hp.h[q + 1] = A[0]!;
+    hp.h[q + 2] = A[1]!;
+    const pair = (q << 3) | STR;
+    const pairs: Term[] = [];
+    this.solveEach(A[0]!, () => void pairs.push(copyTerm(hp.decode(pair, new Map()))));
+    if (pairs.length === 0) return this.fail();
+    const b = this.pushCP(K_FIBERS, this.R[RB]!, cc, 0);
+    const area = pairs.length * FIBER_S;
+    if (b + CPH + area > this.sLimit) throw new Error("cell control stack exhausted");
+    this.S[b + 10] = area;
+    const group: FiberGroup = { workers: pairs.map((p, k) => this.newFiber(p, b + CPH + k * FIBER_S)), i: 0, pair };
+    this.SO[b] = group;
+    return this.fail();
+  }
+
+  /** The running computation's state, to put back with loadCtx. */
+  private saveCtx(): Ctx {
+    const hp = this.hp;
+    return {
+      R: this.R.slice(),
+      h: hp.h,
+      top: hp.top,
+      hb: hp.hb,
+      frozen: hp.frozen,
+      trail: hp.trailState(),
+      wakeups: hp.wakeups,
+      nest: this.nest,
+      pend: this.pend,
+      pendN: this.pendN,
+      pendCC: this.pendCC,
+      result: this.result,
+      sLimit: this.sLimit,
+      inFiber: this.inFiber,
+    };
+  }
+
+  /** Make `c` the running computation. */
+  private loadCtx(c: Ctx): void {
+    const hp = this.hp;
+    this.R.set(c.R);
+    hp.h = c.h;
+    hp.top = c.top;
+    hp.hb = c.hb;
+    hp.frozen = c.frozen;
+    hp.setTrailState(c.trail);
+    hp.wakeups = c.wakeups;
+    this.nest = c.nest;
+    this.pend = c.pend;
+    this.pendN = c.pendN;
+    this.pendCC = c.pendCC;
+    this.result = c.result;
+    this.sLimit = c.sLimit;
+    this.inFiber = c.inFiber;
+  }
+
+  /**
+   * A worker solving the Test of `pairTerm`, a Generator-Test copy, its control stack from `base`: an empty
+   * environment and a barrier there as at the machine's bottom, its heap a fresh array holding the pair's cells.
+   */
+  private newFiber(pairTerm: Term, base: number): Fiber {
+    const main = this.saveCtx();
+    const hp = this.hp, S = this.S, R = this.R;
+    try {
+      hp.h = new Int32Array(HEAP_CELLS);
+      hp.top = hp.hb = 1 + GLOBAL_SLOTS;
+      hp.frozen = 0;
+      hp.setTrailState(null);
+      hp.wakeups = [];
+      this.sLimit = base + FIBER_S;
+      this.inFiber = true;
+      const bar = base + ENV;
+      S[base] = base;
+      S[base + 1] = this.OK;
+      S[base + 2] = bar;
+      S[base + 3] = 0;
+      S[base + 4] = -1;
+      S[bar] = bar;
+      S[bar + 1] = K_BARRIER;
+      S[bar + 2] = 0;
+      S[bar + 9] = hp.top;
+      S[bar + 10] = 0;
+      R[RE] = base;
+      R[RCP] = this.OK;
+      R[RB] = bar;
+      R[RCC] = -1;
+      R[RBAR] = bar;
+      const pair = hp.encode(pairTerm, new Map());
+      const test = hp.h[(pair >> 3) + 2]!;
+      const next: Code = () => this.goal(test, this.R[RB]!, this.R[RCC]!);
+      return { ctx: this.saveCtx(), next, solved: false, pair, bar };
+    } finally {
+      this.loadCtx(main);
+    }
+  }
+
+  /**
+   * Run worker `w` for at most `steps` bounces, backtracking into it first when its last solution was taken: a copy of
+   * its pair when it reaches a solution, "failed" when it has no more, "suspended" when the slice ran out. A ball no
+   * catch inside the worker takes reaches the caller. Time: the slice.
+   */
+  private runFiber(w: Fiber, steps: number): Term | "failed" | "suspended" {
+    const main = this.saveCtx();
+    this.loadCtx(w.ctx);
+    try {
+      let f: Code | null;
+      if (w.solved) {
+        w.solved = false;
+        f = this.fail();
+      } else f = w.next;
+      let left = steps;
+      this.nest = 0;
+      for (;;) {
+        try {
+          while (f !== null && left > 0) {
+            left--;
+            f = f();
+          }
+          break;
+        } catch (e) {
+          if (!(e instanceof PrologError)) throw e;
+          this.nest = 0;
+          f = this.unwind(e, w.bar);
+        }
+      }
+      if (f !== null) {
+        w.next = f;
+        return "suspended";
+      }
+      if (!this.result) return "failed";
+      w.solved = true;
+      return copyTerm(this.hp.decode(w.pair, new Map()));
+    } finally {
+      w.ctx = this.saveCtx();
+      this.loadCtx(main);
+    }
+  }
+
+  /** The next solution of group `g`'s workers in turn, as the object builtin's loop takes them, or null when none. */
+  private nextFiberSolution(g: FiberGroup): Term | null {
+    while (g.workers.length > 0) {
+      while (g.i < g.workers.length) {
+        const r = this.runFiber(g.workers[g.i]!, SLICE);
+        if (r === "failed") {
+          g.workers.splice(g.i, 1);
+          continue;
+        }
+        g.i++;
+        if (r !== "suspended") return r;
+      }
+      g.i = 0;
+    }
+    return null;
   }
 
   /** setup_call_cleanup(S, G, C): S once; G under a cleanup choicepoint holding C, its cut local to it. */

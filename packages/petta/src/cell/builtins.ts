@@ -293,7 +293,7 @@ function freshVar(hp: Heap): number {
  * am[implements a-petta-cell-store.runtime.globals.frozen]
  */
 export function installGlobalBuiltins(cm: CellMachine): void {
-  const hp = cm.hp, A = cm.A, H = hp.h;
+  const hp = cm.hp, A = cm.A;
   const slots = new Map<string, number>();
   let next = 1;
   const slotOf = (key: string): number => {
@@ -301,7 +301,7 @@ export function installGlobalBuiltins(cm: CellMachine): void {
     if (a === undefined) {
       if (next > GLOBAL_SLOTS) throw new Error(`cell engine: more than ${GLOBAL_SLOTS} global variables`);
       a = next++;
-      H[a] = 0;
+      hp.h[a] = 0;
       slots.set(key, a);
     }
     return a;
@@ -309,7 +309,9 @@ export function installGlobalBuiltins(cm: CellMachine): void {
   /** Key `key`'s value cell, 0 when unset on both machines. */
   const read = (key: string): number => {
     const a = slots.get(key);
-    if (a !== undefined && H[a] !== 0) return H[a]!;
+    if (a !== undefined && hp.h[a] !== 0) return hp.h[a]!;
+    // A concurrent_and worker starts with no globals, as the object machine's fibers do (Machine.newFiber).
+    if (cm.inFiber) return 0;
     const t = cm.om.globals.get(key);
     if (t === undefined) return 0;
     return keep(slotOf(key), hp.encode(t, new Map()));
@@ -317,7 +319,7 @@ export function installGlobalBuiltins(cm: CellMachine): void {
   /** Set slot `a` to value cell `c` untrailed, freezing the heap when `c` holds cells on it. */
   const keep = (a: number, c: number): number => {
     const tag = hp.deref(c) & 7;
-    H[a] = c;
+    hp.h[a] = c;
     if (tag !== ATM && tag !== INT && tag !== BOX) hp.freeze();
     return c;
   };
@@ -342,8 +344,8 @@ export function installGlobalBuiltins(cm: CellMachine): void {
   cm.proc("nb_delete", 1).det = () => {
     const key = atomArg(hp, A[0]!);
     const a = slots.get(key);
-    if (a !== undefined) H[a] = 0;
-    cm.om.globals.delete(key);
+    if (a !== undefined) hp.h[a] = 0;
+    if (!cm.inFiber) cm.om.globals.delete(key);
     return true;
   };
   cm.proc("nb_current", 2).det = () => {
@@ -361,7 +363,7 @@ export function installGlobalBuiltins(cm: CellMachine): void {
     const tag = t & 7;
     let at: number;
     if (tag === STR) {
-      if (i < 1 || i > hp.funArity[H[t >> 3]! >> 3]!) return false;
+      if (i < 1 || i > hp.funArity[hp.h[t >> 3]! >> 3]!) return false;
       at = (t >> 3) + i;
     } else if (tag === LIS) {
       if (i < 1 || i > 2) return false;
@@ -385,14 +387,14 @@ export function installGlobalBuiltins(cm: CellMachine): void {
  * am[implements a-petta-cell-store.runtime.attrs.store] am[rests-on c-swi-attvar-age-1106] am[rests-on c-swi-attr-inplace-1106]
  */
 export function installAttrBuiltins(cm: CellMachine): void {
-  const hp = cm.hp, A = cm.A, H = hp.h;
+  const hp = cm.hp, A = cm.A;
   const F_ATT = hp.functor("att", 3);
   const att = (m: number, v: number, more: number): number => {
     const q = hp.alloc(4);
-    H[q] = F_ATT;
-    H[q + 1] = m;
-    H[q + 2] = v;
-    H[q + 3] = more;
+    hp.h[q] = F_ATT;
+    hp.h[q + 1] = m;
+    hp.h[q + 2] = v;
+    hp.h[q + 3] = more;
     return (q << 3) | STR;
   };
   // seek(d, m): the address of the link to module m's entry in attributed variable d's list (the variable's list
@@ -401,8 +403,8 @@ export function installAttrBuiltins(cm: CellMachine): void {
   let at = 0;
   const seek = (d: number, m: number): number => {
     let link = (d >> 3) + 1;
-    for (let l = H[link]!; (l & 7) === STR; l = H[link]!) {
-      if (H[(l >> 3) + 1] === m) {
+    for (let l = hp.h[link]!; (l & 7) === STR; l = hp.h[link]!) {
+      if (hp.h[(l >> 3) + 1] === m) {
         at = l >> 3;
         return link;
       }
@@ -430,7 +432,7 @@ export function installAttrBuiltins(cm: CellMachine): void {
     const d = hp.deref(A[0]!);
     if (!hp.attributed(d)) return false;
     seek(d, hp.atom(atomArg(hp, A[1]!)));
-    return at !== 0 && hp.unify(A[2]!, H[at + 2]!);
+    return at !== 0 && hp.unify(A[2]!, hp.h[at + 2]!);
   });
   def("del_attr", 2, () => {
     const d = hp.deref(A[0]!);
@@ -438,14 +440,14 @@ export function installAttrBuiltins(cm: CellMachine): void {
     const m = hp.atom(atomArg(hp, A[1]!));
     if (hp.attributed(d)) {
       const link = seek(d, m);
-      if (at !== 0) hp.bind(link, H[at + 3]!);
+      if (at !== 0) hp.bind(link, hp.h[at + 3]!);
     }
     return true;
   });
   def("attvar", 1, () => hp.attributed(hp.deref(A[0]!)));
   def("get_attrs", 2, () => {
     const d = hp.deref(A[0]!);
-    return hp.attributed(d) && hp.unify(A[1]!, H[(d >> 3) + 1]!);
+    return hp.attributed(d) && hp.unify(A[1]!, hp.h[(d >> 3) + 1]!);
   });
   def("del_attrs", 1, () => {
     const d = hp.deref(A[0]!);
@@ -465,7 +467,7 @@ export function installAttrBuiltins(cm: CellMachine): void {
  * am[implements a-petta-cell-store.runtime.solving]
  */
 export function installSolvingBuiltins(cm: CellMachine): void {
-  const hp = cm.hp, A = cm.A, H = hp.h;
+  const hp = cm.hp, A = cm.A;
   const go = (m: CellMachine, cc: number): ReturnType<CellMachine["proceed"]> => (hp.wakeups.length !== 0 ? m.wake(cc) : m.proceed());
   cm.proc("findnsols", 4).ctl = (m, _n, cc) => {
     const limit = intArg(hp, A[0]!), t = A[1]!, g = A[2]!, l = A[3]!;
@@ -483,11 +485,11 @@ export function installSolvingBuiltins(cm: CellMachine): void {
     const p = A[0]!, items = properListArg(hp, A[1]!), s = A[2]!;
     const order = (a: number, b: number): number => {
       const o = freshVar(hp), q = hp.alloc(5);
-      H[q] = F_CALL4;
-      H[q + 1] = p;
-      H[q + 2] = o;
-      H[q + 3] = a;
-      H[q + 4] = b;
+      hp.h[q] = F_CALL4;
+      hp.h[q + 1] = p;
+      hp.h[q + 2] = o;
+      hp.h[q + 3] = a;
+      hp.h[q + 4] = b;
       if (!m.solveCell((q << 3) | STR)) throw new PrologError("predsort_failed");
       const r = hp.deref(o);
       return r === LT ? -1 : r === GT ? 1 : 0;
@@ -524,7 +526,7 @@ export function installTermBuiltins(cm: CellMachine): void {
   installGlobalBuiltins(cm);
   installAttrBuiltins(cm);
   installSolvingBuiltins(cm);
-  const hp = cm.hp, A = cm.A, H = hp.h;
+  const hp = cm.hp, A = cm.A;
   const def = (name: string, arity: number, f: () => boolean): void => {
     cm.proc(name, arity).det = f;
   };
@@ -600,7 +602,7 @@ export function installTermBuiltins(cm: CellMachine): void {
     if (isNum) {
       const k = numOf(hp, nd) as number;
       const [n, , p] = compound(hp, d);
-      return k >= 1 && k <= n && unify(A[2]!, H[p + k - 1]!);
+      return k >= 1 && k <= n && unify(A[2]!, hp.h[p + k - 1]!);
     }
     // An unbound index enumerates the arguments: the object builtin's generator.
     if (isVarTag(nd)) return null;
@@ -621,7 +623,7 @@ export function installTermBuiltins(cm: CellMachine): void {
     if ((d & 7) === STR || (d & 7) === LIS) {
       const [n, f, p] = compound(hp, d);
       const items = [hp.atom(f)];
-      for (let i = 0; i < n; i++) items.push(H[p + i]!);
+      for (let i = 0; i < n; i++) items.push(hp.h[p + i]!);
       return unify(A[1]!, listCells(hp, items, hp.NIL));
     }
     return unify(A[1]!, listCells(hp, [d], hp.NIL));
@@ -638,7 +640,7 @@ export function installTermBuiltins(cm: CellMachine): void {
     let count = 0;
     while ((t & 7) === LIS) {
       count++;
-      t = hp.deref(H[(t >> 3) + 1]!);
+      t = hp.deref(hp.h[(t >> 3) + 1]!);
     }
     if (t === hp.NIL) return unify(A[1]!, hp.int(count));
     if (!isVarTag(t)) throw typeError("list", culprit(hp, A[0]!));
@@ -670,7 +672,7 @@ export function installTermBuiltins(cm: CellMachine): void {
       const d = hp.deref(t);
       if ((d & 7) !== STR && (d & 7) !== LIS) return t;
       const [n, , p] = compound(hp, d);
-      return key - 1 < n ? H[p + key - 1]! : t;
+      return key - 1 < n ? hp.h[p + key - 1]! : t;
     };
     const sign = order === "@<" || order === "@=<" ? 1 : -1;
     const sorted = properListArg(hp, A[2]!)
@@ -688,8 +690,8 @@ export function installTermBuiltins(cm: CellMachine): void {
     if (items === null) throw instantiationError();
     const keyOf = (t: number): number => {
       const d = hp.deref(t);
-      if ((d & 7) !== STR || H[d >> 3] !== minus) throw typeError("pair", culprit(hp, d));
-      return H[(d >> 3) + 1]!;
+      if ((d & 7) !== STR || hp.h[d >> 3] !== minus) throw typeError("pair", culprit(hp, d));
+      return hp.h[(d >> 3) + 1]!;
     };
     const sorted = items.map((t, i) => ({ t, i })).sort((a, b) => compareCells(hp, keyOf(a.t), keyOf(b.t)) || a.i - b.i);
     return unify(A[1]!, listCells(hp, sorted.map((x) => x.t), hp.NIL));
