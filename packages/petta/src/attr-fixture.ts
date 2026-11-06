@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 // Purpose: attributed-variable programs with SWI-Prolog's answers to each, which the object machine's attribute test
-// (attrs.test.ts) runs.
+// (attrs.test.ts) and the cell engine's differential test (cell/diff.test.ts) both run.
 // am[related a-petta-cell-store.runtime.attrs.test] am[rests-on c-swi-attvar-age-1106] am[rests-on c-swi-attr-copies-1106] am[rests-on c-swi-attr-inplace-1106]
 
 /**
