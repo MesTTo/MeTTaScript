@@ -317,6 +317,28 @@ function runtime(cm: CellMachine): Runtime {
 }
 const RT_NAMES = ["E", "NUM", "CMP", "ISVAR", "ISATOM", "ISNUM", "ISINT", "ISFLOAT", "ISATOMIC", "ISCOMPOUND", "ISCALLABLE", "ISLIST", "GROUND", "IDENT", "NUNIFY", "GC", "GB", "GSTR", "GLIS", "UV", "UVAL", "UVOID", "UC", "UB", "USTR", "ULIS", "OVF", "WAKE"];
 
+/**
+ * Make the goals compiled code runs inline also run natively when called through a procedure, as a meta-call or
+ * call/N does: the type tests and comparisons (TESTS), =/2, is/2 and the arithmetic comparisons.
+ */
+export function installInlineBuiltins(cm: CellMachine): void {
+  const rt = runtime(cm), A = cm.A, hp = cm.hp;
+  for (const [key, fn] of Object.entries(TESTS)) {
+    const neg = fn.startsWith("!");
+    const f = rt[neg ? fn.slice(1) : fn] as (...a: number[]) => boolean;
+    const at = key.lastIndexOf("/");
+    const arity = Number(key.slice(at + 1));
+    cm.proc(key.slice(0, at), arity).det = arity === 1 ? () => f(A[0]!) !== neg : () => f(A[0]!, A[1]!) !== neg;
+  }
+  cm.proc("=", 2).det = () => {
+    const ok = hp.unify(A[0]!, A[1]!);
+    if (ok && hp.wakeups.length !== 0) (rt.WAKE as () => never)();
+    return ok;
+  };
+  cm.proc("is", 2).det = () => hp.unify(A[0]!, rt.NUM(rt.E(A[1]!)));
+  for (const op of ARITH_TESTS) cm.proc(op, 2).det = () => rt.CMP(op, rt.E(A[0]!), rt.E(A[1]!));
+}
+
 /** Statements building terms at the local heap top `t`, and whether there are any. */
 class Build {
   readonly lines: string[] = [];
@@ -468,12 +490,21 @@ class BodyCompiler {
 
   /** Compile goal `t` at this point of the body; `cb` is the JS expression of the choicepoint index its cut returns to. */
   goal(t: Term, cb: string): void {
+    // A variable goal runs as call/1 does, its cut local to it.
+    if (t instanceof Slot) {
+      this.goal(new Struct("call", [t]), cb);
+      return;
+    }
     const g = view(t);
     if (g === null) throw new Error(`cell compiler: a goal that is not callable: ${String(t)}`);
     const { name, args } = g;
     const key = name + "/" + args.length;
     switch (key) {
       case "true/0":
+        return;
+      // The machine has one module, so M:G runs G (consult.ts's :/2).
+      case ":/2":
+        this.goal(args[1]!, cb);
         return;
       case "fail/0":
       case "false/0":

@@ -13,10 +13,12 @@
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { installBuiltins } from "../builtins";
+import { installConsult } from "../consult";
+import { installLibrary } from "../library";
 import { Machine } from "../machine";
 import { readClauses } from "../prolog-reader";
 import { Cons, Float, NIL, Struct, Var, deref, mkVar, type Term } from "../terms";
-import { compileCellClause } from "./compile";
+import { compileCellClause, installInlineBuiltins } from "./compile";
 import { CellMachine } from "./machine";
 
 const MAX_ANSWERS = 40;
@@ -65,8 +67,11 @@ function onObjects(m: Machine, name: string, args: Term[]): Outcome {
 function machines(): { m: Machine; cm: CellMachine } {
   const m = new Machine();
   installBuiltins(m);
+  installLibrary(m);
+  installConsult(m);
   const cm = new CellMachine(m);
   cm.compile = compileCellClause;
+  installInlineBuiltins(cm);
   return { m, cm };
 }
 
@@ -152,6 +157,10 @@ function goal(i: number, preds: number, pool: Var[], depth: number): fc.Arbitrar
     { weight: 1, arbitrary: fc.tuple(body, body).map(([c, th]) => new Struct("->", [c, th]) as Term) },
     { weight: 2, arbitrary: fc.tuple(body, body).map(([a, b]) => new Struct(";", [a, b]) as Term) },
     { weight: 1, arbitrary: body.map((g) => new Struct("\\+", [g]) as Term) },
+    // Meta-calls: a goal run by call/1, and one bound to a variable and then run, its cut local to it.
+    { weight: 1, arbitrary: body.map((g) => new Struct("call", [g]) as Term) },
+    { weight: 1, arbitrary: fc.tuple(fc.constantFrom<Term>(...pool), body).map(([v, g]) => new Struct(",", [new Struct("=", [v, g]), v]) as Term) },
+    { weight: 1, arbitrary: fc.tuple(body, fc.constantFrom<Term>(...pool)).map(([g, v]) => new Struct("call", [new Struct(",", [g, "!"]), v]) as Term) },
   );
 }
 
@@ -213,6 +222,23 @@ describe("cell engine against the object machine", () => {
       onc(X) :- once(mem(X, [4, 5])).
       ign(X) :- ignore(mem(X, [6, 7])), X == 6.
       cutin(X, Y) :- mem(X, [1, 2]), ( mem(Y, [a, b]), ! ; Y = c ).
+      mc1(X) :- call((mem(X, [1, 2, 3]), X > 1)).
+      mc2(X) :- G = mem(X), call(G, [a, b]).
+      mc3(X) :- call((mem(X, [1, 2, 3]), !)).
+      mc4(X) :- mem(X, [1, 2, 3]), call(!).
+      mc5(X) :- call(;, X = a, X = b).
+      mc6(X) :- call((mem(X, [1, 2]) -> true ; X = 2)).
+      mc7(X) :- G = (mem(Y, [1, 2]), X = Y), G.
+      mc8(X) :- \\+ call(fail), X = ok.
+      mc9(X) :- call(forall(mem(Y, [1, 2]), Y > 0)), X = ok.
+      mc10(X) :- call(once(mem(X, [5, 6]))).
+      mc11(X) :- call(ignore(mem(X, [7]))).
+      mc12(X) :- call((mem(X, [1, 2, 3]) *-> true ; X = none)).
+      mc13(X) :- call(m:mem(X, [9])).
+      mc14(X) :- call(app([1], [2]), X).
+      mc15(X) :- call(X).
+      mc16(X) :- X = 3, call(X).
+      mc17(X) :- call(undefined_pred_xyz(X)).
     `;
     const { m, cm } = machines();
     for (const c of readClauses(src)) m.addClause(c, true);
@@ -234,6 +260,9 @@ describe("cell engine against the object machine", () => {
       ["onc", [mkVar()]],
       ["ign", [mkVar()]],
       ["cutin", [mkVar(), mkVar()]],
+      ...["mc1", "mc2", "mc3", "mc4", "mc5", "mc6", "mc7", "mc8", "mc9", "mc10", "mc11", "mc12", "mc13", "mc14", "mc15", "mc16", "mc17"].map(
+        (n) => [n, [mkVar()]] as [string, Term[]],
+      ),
     ];
     for (const [name, args] of queries) expect(onCells(cm, name, args), name).toStrictEqual(onObjects(m, name, args));
   });

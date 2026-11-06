@@ -13,10 +13,11 @@
 import type { Clause, Pred } from "../db";
 import type { Machine } from "../machine";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "../swi-index";
+import { NIL, Struct, existenceError, instantiationError, typeError } from "../terms";
 import { CellArgs } from "./args";
 import { bridgeBuiltin } from "./bridge";
 import { headProgram, runHead, type HeadProgram } from "./headprog";
-import { Heap } from "./heap";
+import { ATM, ATV, Heap, REF, STR } from "./heap";
 
 /** Code the trampoline runs: the code to run next, or null at a run's exit. */
 export type Code = () => Code | null;
@@ -60,6 +61,8 @@ const NEST = 4;
  * (c-cold-plan-facts-1106). The object engine compiles a clause on the same try (machine.ts COMPILE_AFTER).
  */
 const COMPILE_AFTER = 32;
+/** The goals the meta-call interpreter runs itself (goal) when call/N builds one. */
+const CONTROL = new Set([",/2", ";/2", "->/2", "*->/2", "\\+/1", "call/1", "once/1", "ignore/1", "forall/2"]);
 
 /** A fact not yet compiled: its head program and how often it has been tried. */
 interface ColdFact {
@@ -72,6 +75,8 @@ export class CellProc {
   pred: Pred | undefined = undefined;
   /** A native deterministic builtin over the argument registers: true on success. */
   det: ((cm: CellMachine, n: number) => boolean) | undefined = undefined;
+  /** A control builtin over the argument registers (call/N): the code to run next, as callw returns it. */
+  ctl: ((cm: CellMachine, n: number, cc: number) => Code | null) | undefined = undefined;
   constructor(
     readonly name: string,
     readonly arity: number,
@@ -107,6 +112,36 @@ export class CellMachine {
   private readonly RETRY: number;
   /** Code that only fails on: a soft-cut gives it to its choicepoint, whose alternative may no longer run. */
   readonly FAILC: number;
+  // The meta-call interpreter's continuations (goal): after a conjunction's left goal, a disjunction's or
+  // if-then-else's other branch, an if-then-else's or soft-cut's condition, a negated goal, once/1's goal, and a
+  // negation's choicepoint going on with the continuation it saved.
+  private readonly CONJ: number;
+  private readonly DISJ: number;
+  private readonly ITE_THEN: number;
+  private readonly ITE_SOFT: number;
+  private readonly NOT: number;
+  private readonly ONCE: number;
+  private readonly PROCEED: number;
+  /** The choicepoint fail() last popped for an alternative, which the alternative's code reads its data from. */
+  private lastAlt = 0;
+  // Functor and atom cells the interpreter dispatches on.
+  private readonly F_COMMA: number;
+  private readonly F_SEMI: number;
+  private readonly F_ARROW: number;
+  private readonly F_SOFT: number;
+  private readonly F_NOT: number;
+  private readonly F_COLON: number;
+  private readonly F_CALL1: number;
+  private readonly F_ONCE: number;
+  private readonly F_IGNORE: number;
+  private readonly F_FORALL: number;
+  private readonly A_TRUE: number;
+  private readonly A_FAIL: number;
+  private readonly A_FALSE: number;
+  private readonly A_CUT: number;
+  /** Procedures by functor id and by atom id, so a meta-call finds its procedure without building its key. */
+  private readonly funProcs: (CellProc | undefined)[] = [];
+  private readonly atomProcs: (CellProc | undefined)[] = [];
   private pend: CellProc | null = null;
   private pendN = 0;
   private pendCC = -1;
@@ -130,6 +165,69 @@ export class CellMachine {
     });
     this.CALL = def(() => this.callw(this.pend!, this.pendN, this.pendCC));
     this.FAILC = def(() => this.fail());
+    const hp = this.hp;
+    this.F_COMMA = hp.functor(",", 2);
+    this.F_SEMI = hp.functor(";", 2);
+    this.F_ARROW = hp.functor("->", 2);
+    this.F_SOFT = hp.functor("*->", 2);
+    this.F_NOT = hp.functor("\\+", 1);
+    this.F_COLON = hp.functor(":", 2);
+    this.F_CALL1 = hp.functor("call", 1);
+    this.F_ONCE = hp.functor("once", 1);
+    this.F_IGNORE = hp.functor("ignore", 1);
+    this.F_FORALL = hp.functor("forall", 2);
+    this.A_TRUE = hp.atom("true");
+    this.A_FAIL = hp.atom("fail");
+    this.A_FALSE = hp.atom("false");
+    this.A_CUT = hp.atom("!");
+    // The conjunction's right goal waits in its frame: leave the frame and run it.
+    this.CONJ = def(() => {
+      const S = this.S, R = this.R, e = R[RE]!;
+      const g = S[e + ENV]!, cb = S[e + 2]!, cc = S[e + 4]!;
+      R[RCP] = S[e + 1]!;
+      R[RE] = S[e]!;
+      return this.goal(g, cb, cc);
+    });
+    // The other branch waits in the popped choicepoint's saved argument.
+    this.DISJ = def(() => {
+      const S = this.S, b = this.lastAlt;
+      return this.goal(S[b + CPH]!, S[b + 5]!, S[b + 6]!);
+    });
+    // The condition succeeded: cut back past the if-then-else's choicepoint (or, for a soft-cut, only disable its
+    // alternative), leave the frame and run the then-branch.
+    const then = (soft: boolean): Code => () => {
+      const S = this.S, R = this.R, e = R[RE]!;
+      const g = S[e + ENV]!, b = S[e + ENV + 1]!, cb = S[e + 2]!, cc = S[e + 4]!;
+      R[RCP] = S[e + 1]!;
+      R[RE] = S[e]!;
+      if (soft) S[b + 8] = this.FAILC;
+      else this.cutTo(S[b]!);
+      return this.goal(g, cb, cc);
+    };
+    this.ITE_THEN = def(then(false));
+    this.ITE_SOFT = def(then(true));
+    // The negated goal succeeded: cut back past the negation's choicepoint and fail.
+    this.NOT = def(() => {
+      const S = this.S, R = this.R, e = R[RE]!;
+      const b = S[e + ENV]!;
+      R[RCP] = S[e + 1]!;
+      R[RE] = S[e]!;
+      this.cutTo(S[b]!);
+      return this.fail();
+    });
+    // once/1's goal succeeded: cut its choicepoints and go on.
+    this.ONCE = def(() => {
+      const S = this.S, R = this.R, e = R[RE]!;
+      const b = S[e + ENV]!;
+      R[RCP] = S[e + 1]!;
+      R[RE] = S[e]!;
+      this.cutTo(b);
+      return this.proceed();
+    });
+    this.PROCEED = def(() => this.proceed());
+    for (let n = 1; n <= 8; n++) this.proc("call", n).ctl = (cm, k, cc) => cm.callN(k, cc);
+    // The machine has one module, so M:G runs G (consult.ts's :/2), its cut local as call/1's.
+    this.proc(":", 2).ctl = (cm, _k, cc) => cm.goal(cm.A[1]!, cm.R[RB]!, cc);
     this.RETRY = def(() => {
       const b = this.R[RB]!;
       const r = this.tryClauses(this.SO[b + 1] as Pred, this.SO[b] as Scan, this.S[b + 7]!, this.GEN[b]!, this.S[b + 6]!, b);
@@ -240,6 +338,7 @@ export class CellMachine {
           this.popCP(b);
           R[RE] = S[b + 3]!;
           R[RCP] = S[b + 4]!;
+          this.lastAlt = b;
           return this.CODE[S[b + 8]!]!;
         default:
           throw new Error(`cell machine: choicepoint kind ${S[b + 1]} is not built yet`);
@@ -265,9 +364,155 @@ export class CellMachine {
     return this.CODE[this.CALL]!;
   }
 
+  /** The procedure of functor cell `f` (name/n) or of atom cell `a` (name/0), found by its id. */
+  private funProc(f: number): CellProc {
+    const id = f >> 3;
+    return (this.funProcs[id] ??= this.proc(this.hp.funNames[id]!, this.hp.funArity[id]!));
+  }
+  private atomProc(a: number): CellProc {
+    const id = a >> 3;
+    return (this.atomProcs[id] ??= this.proc(this.hp.atomNames[id]!, 0));
+  }
+
+  /**
+   * Run the goal on the heap at cell `g0` with the current continuation, as call/1 runs a goal (Machine.step): the
+   * control constructs are interpreted here with `cb` the choicepoint a cut in them cuts back to, a module-qualified
+   * goal runs its goal, and any other goal is called through its procedure. Throws instantiation_error for an unbound
+   * goal and type_error(callable, G) for one that is not callable.
+   */
+  goal(g0: number, cb: number, cc: number): Code | null {
+    const hp = this.hp, H = hp.h, S = this.S, R = this.R;
+    let g = hp.deref(g0);
+    while ((g & 7) === STR && H[g >> 3] === this.F_COLON) g = hp.deref(H[(g >> 3) + 2]!);
+    const tag = g & 7;
+    if (tag === REF || tag === ATV) throw instantiationError();
+    if (tag === ATM) {
+      if (g === this.A_TRUE) return this.proceed();
+      if (g === this.A_FAIL || g === this.A_FALSE) return this.fail();
+      if (g === this.A_CUT) {
+        this.cutTo(cb);
+        return this.proceed();
+      }
+      if (g === hp.NIL) throw typeError("callable", NIL);
+      return this.callw(this.atomProc(g), 0, cc);
+    }
+    if (tag !== STR) throw typeError("callable", hp.decode(g, new Map()));
+    const p = g >> 3, f = H[p]!;
+    switch (f) {
+      case this.F_COMMA: {
+        const e = this.allocate(1, cb, cc);
+        S[e + ENV] = H[p + 2]!;
+        R[RCP] = this.CONJ;
+        return this.goal(H[p + 1]!, cb, cc);
+      }
+      case this.F_SEMI: {
+        const l = hp.deref(H[p + 1]!);
+        const lf = (l & 7) === STR ? H[l >> 3]! : 0;
+        if (lf === this.F_ARROW || lf === this.F_SOFT) return this.ifThenElse(H[(l >> 3) + 1]!, H[(l >> 3) + 2]!, H[p + 2]!, lf === this.F_SOFT, cb, cc);
+        this.A[0] = H[p + 2]!;
+        const b = this.pushCP(K_ALT, cb, cc, 1);
+        S[b + 8] = this.DISJ;
+        return this.goal(l, cb, cc);
+      }
+      // (C -> T) and (C *-> T) alone are their if-then-else with a failing else.
+      case this.F_ARROW:
+        return this.ifThenElse(H[p + 1]!, H[p + 2]!, this.A_FAIL, false, cb, cc);
+      case this.F_SOFT:
+        return this.ifThenElse(H[p + 1]!, H[p + 2]!, this.A_FAIL, true, cb, cc);
+      case this.F_NOT:
+        return this.negation(H[p + 1]!, cb, cc);
+      case this.F_CALL1:
+        return this.goal(H[p + 1]!, R[RB]!, cc);
+      case this.F_ONCE: {
+        const e = this.allocate(1, cb, cc);
+        S[e + ENV] = R[RB]!;
+        R[RCP] = this.ONCE;
+        return this.goal(H[p + 1]!, S[e + ENV]!, cc);
+      }
+      case this.F_IGNORE:
+        return this.ifThenElse(H[p + 1]!, this.A_TRUE, this.A_TRUE, false, cb, cc);
+      case this.F_FORALL: {
+        // forall(C, A) is \+ (C, \+ A), as the object machine rewrites it.
+        const q = hp.alloc(5);
+        H[q] = this.F_NOT;
+        H[q + 1] = H[p + 2]!;
+        H[q + 2] = this.F_COMMA;
+        H[q + 3] = H[p + 1]!;
+        H[q + 4] = (q << 3) | STR;
+        return this.negation(((q + 2) << 3) | STR, cb, cc);
+      }
+    }
+    const n = hp.funArity[f >> 3]!;
+    for (let i = 0; i < n; i++) this.A[i] = H[p + 1 + i]!;
+    return this.callw(this.funProc(f), n, cc);
+  }
+
+  /** (C -> T ; E), or (C *-> T ; E) when `soft`: C's cut is local to it, its success commits to T. */
+  private ifThenElse(c: number, t: number, e: number, soft: boolean, cb: number, cc: number): Code | null {
+    const S = this.S;
+    this.A[0] = e;
+    const b = this.pushCP(K_ALT, cb, cc, 1);
+    S[b + 8] = this.DISJ;
+    const fr = this.allocate(2, cb, cc);
+    S[fr + ENV] = t;
+    S[fr + ENV + 1] = b;
+    this.R[RCP] = soft ? this.ITE_SOFT : this.ITE_THEN;
+    return this.goal(c, b, cc);
+  }
+
+  /** \+ G: G's cut is local to it; its success cuts back and fails, its failure goes on. */
+  private negation(g: number, cb: number, cc: number): Code | null {
+    const S = this.S;
+    const b = this.pushCP(K_ALT, cb, cc, 0);
+    S[b + 8] = this.PROCEED;
+    const e = this.allocate(1, cb, cc);
+    S[e + ENV] = b;
+    this.R[RCP] = this.NOT;
+    return this.goal(g, b, cc);
+  }
+
+  /**
+   * call/N with A[0] the goal and A[1..n) the arguments it gets: a control construct is built on the heap and
+   * interpreted (goal); any other goal is called with its own arguments then these, its cut local to it.
+   */
+  callN(n: number, cc: number): Code | null {
+    const hp = this.hp, H = hp.h, A = this.A;
+    let g = hp.deref(A[0]!);
+    while ((g & 7) === STR && H[g >> 3] === this.F_COLON) g = hp.deref(H[(g >> 3) + 2]!);
+    const tag = g & 7;
+    if (tag === REF || tag === ATV) throw instantiationError();
+    if (n === 1) return this.goal(g, this.R[RB]!, cc);
+    let name: string, k: number, base: number;
+    if (tag === ATM && g !== hp.NIL) {
+      name = hp.atomNames[g >> 3]!;
+      k = 0;
+      base = 0;
+    } else if (tag === STR) {
+      const f = H[g >> 3]! >> 3;
+      name = hp.funNames[f]!;
+      k = hp.funArity[f]!;
+      base = (g >> 3) + 1;
+    } else throw typeError("callable", hp.decode(g, new Map()));
+    const m = n - 1, total = k + m;
+    const f = hp.functor(name, total);
+    if (CONTROL.has(name + "/" + total)) {
+      const q = hp.alloc(total + 1);
+      H[q] = f;
+      for (let i = 0; i < k; i++) H[q + 1 + i] = H[base + i]!;
+      for (let i = 0; i < m; i++) H[q + 1 + k + i] = A[1 + i]!;
+      return this.goal((q << 3) | STR, this.R[RB]!, cc);
+    }
+    // The extra arguments move to follow the goal's own, in an order that reads each before overwriting it.
+    if (k > 1) for (let i = m - 1; i >= 0; i--) A[k + i] = A[1 + i]!;
+    else if (k === 0) for (let i = 0; i < m; i++) A[i] = A[1 + i]!;
+    for (let i = 0; i < k; i++) A[i] = H[base + i]!;
+    return this.callw(this.funProc(f), total, cc);
+  }
+
   /** Call `p` with A[0..n), the continuation being the current one. */
   callw(p: CellProc, n: number, cc: number): Code | null {
     if (p.det !== undefined) return p.det(this, n) ? this.proceed() : this.fail();
+    if (p.ctl !== undefined) return p.ctl(this, n, cc);
     let pred = p.pred;
     if (pred === undefined) {
       // A builtin comes before a predicate of its key, as the object machine resolves calls (Machine.callCell).
@@ -277,7 +522,7 @@ export class CellMachine {
         return this.callw(p, n, cc);
       }
       pred = p.pred = this.om.db.preds.get(p.key);
-      if (pred === undefined) throw new Error(`cell machine: unknown procedure ${p.key}`);
+      if (pred === undefined) throw existenceError("procedure", new Struct("/", [p.name, p.arity]));
     }
     const scan = clauseScan(pred, this.args);
     const r = this.tryClauses(pred, scan, scan.start, this.om.db.generation, cc, -1);
