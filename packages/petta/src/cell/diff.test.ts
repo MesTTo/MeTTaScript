@@ -15,7 +15,7 @@ import { describe, expect, it } from "vitest";
 import { installBuiltins } from "../builtins";
 import { Machine } from "../machine";
 import { readClauses } from "../prolog-reader";
-import { Cons, NIL, Struct, Var, deref, mkVar, type Term } from "../terms";
+import { Cons, Float, NIL, Struct, Var, deref, mkVar, type Term } from "../terms";
 import { compileCellClause } from "./compile";
 import { CellMachine } from "./machine";
 
@@ -127,6 +127,13 @@ function goal(i: number, preds: number, pool: Var[], depth: number): fc.Arbitrar
     {
       weight: 2,
       arbitrary: fc.tuple(v, operand(pool), fc.constantFrom("+", "-"), operand(pool)).map(([x, a, op, b]) => new Struct("is", [x, new Struct(op, [a, b])]) as Term),
+    },
+    {
+      // Integer and float functions, division by zero and a nested expression, as arith.ts evaluates them.
+      weight: 1,
+      arbitrary: fc
+        .tuple(v, operand(pool), fc.constantFrom("*", "//", "mod", "/", "min", "max", "**", ">>", "/\\"), operand(pool), fc.constantFrom("abs", "-", "float", "sign"))
+        .map(([x, a, op, b, un]) => new Struct("is", [x, new Struct(un, [new Struct(op, [a, new Struct("+", [b, new Float(0.5)])])])]) as Term),
     },
     { weight: 1, arbitrary: fc.tuple(fc.constantFrom("<", ">", "=<", ">=", "=:=", "=\\="), operand(pool), operand(pool)).map(([n, a, b]) => new Struct(n, [a, b]) as Term) },
     { weight: 1, arbitrary: fc.constantFrom<Term>("!", "true", "fail") },
