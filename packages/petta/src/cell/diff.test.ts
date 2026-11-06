@@ -240,11 +240,20 @@ describe("cell engine against the object machine", () => {
       gv5(X) :- nb_setval(k5, a), b_setval(k5, b), ( fail ; true ), b_getval(k5, X).
       gv6(X) :- ( nb_current(k6, _) -> X = yes ; X = no ), nb_setval(k6, 1).
       gv7(X) :- nb_setval(k7, 1), nb_setval(k7, 2), nb_getval(k7, X).
+      gv8(X) :- nb_setval(k8, f(_)), nb_getval(k8, A), nb_getval(k8, B), ( A == B -> X = same ; X = diff ).
+      gv9(X) :- nb_setval(k9, f(_)), ( nb_getval(k9, f(Y)), Y = 1, fail ; true ), nb_getval(k9, X).
+      ns1(X) :- T = c(0), ( between(1, 5, _), arg(1, T, N0), N1 is N0 + 1, nb_setarg(1, T, N1), fail ; true ), arg(1, T, X).
+      ns2(X) :- T = c(0), ( between(1, 5, _), arg(1, T, N0), N1 is N0 + 1, setarg(1, T, N1), fail ; true ), arg(1, T, X).
+      ns3(X) :- T = c(none), ( mem(V, [a, b]), nb_setarg(1, T, f(V, _)), fail ; true ), arg(1, T, X).
+      ns4(X) :- T = [a|b], setarg(2, T, c), X = T.
+      ns5(X) :- catch(setarg(1, foo, x), error(E, _), X = E).
+      ns6(X) :- T = f(a), ( setarg(3, T, b) -> X = set ; X = range ).
+      ns7(X) :- T = f(a), nb_setarg(1, T, g(Y)), Y = 1, X = T.
       mem(X, [X|_]).
       mem(X, [_|T]) :- mem(X, T).
       db10(X) :- assertz(w10(1)), w10(X), retract(w10(X)), \\+ w10(_).
     `;
-    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7"]) {
+    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7", "gv8", "gv9", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7"]) {
       const a = machines(), b = machines();
       for (const c of readClauses(src)) {
         a.m.addClause(c, true);

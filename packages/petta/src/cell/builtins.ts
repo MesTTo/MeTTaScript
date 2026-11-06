@@ -281,17 +281,14 @@ function freshVar(hp: Heap): number {
   return a << 3;
 }
 
-/** An nb_setval/2 value: a copy outside the backtracked heap, held in a box its slot points at. */
-class NbValue {
-  constructor(public t: Term) {}
-}
-
 /**
  * The global variable builtins on cells (a-petta-cell-store.runtime.globals, c-globals-design-1106), one store as the
  * object machine's: each key has a slot cell below every choicepoint's heap top; b_setval/2 binds it, trailed with
- * its old cell so backtracking restores it; nb_setval/2 points it, untrailed, at a box holding a copy of the value,
- * reused by the key's later nb_setval/2; b_getval/2 and nb_getval/2 read either, existence_error(variable, K) when
- * unset; nb_current/2 fails then.
+ * its old cell so backtracking restores it; nb_setval/2 sets it, untrailed, to a copy of the value made at the heap top
+ * and kept there by freezing the heap, as SWI's nb_setval does, so every read gives that one term and a binding inside
+ * it is trailed; b_getval/2 and nb_getval/2 read either, existence_error(variable, K) when unset; nb_current/2 fails
+ * then. A key set on the object machine, by a directive of a file it consulted, is read through once and kept here.
+ * am[implements a-petta-cell-store.runtime.globals.frozen]
  */
 export function installGlobalBuiltins(cm: CellMachine): void {
   const hp = cm.hp, A = cm.A, H = hp.h;
@@ -307,10 +304,20 @@ export function installGlobalBuiltins(cm: CellMachine): void {
     }
     return a;
   };
-  const read = (a: number | undefined): number => (a === undefined ? 0 : H[a]!);
-  const value = (c: number): number => {
-    const v = (c & 7) === BOX ? hp.boxes[c >> 3] : null;
-    return v instanceof NbValue ? hp.encode(v.t, new Map()) : c;
+  /** Key `key`'s value cell, 0 when unset on both machines. */
+  const read = (key: string): number => {
+    const a = slots.get(key);
+    if (a !== undefined && H[a] !== 0) return H[a]!;
+    const t = cm.om.globals.get(key);
+    if (t === undefined) return 0;
+    return keep(slotOf(key), hp.encode(t, new Map()));
+  };
+  /** Set slot `a` to value cell `c` untrailed, freezing the heap when `c` holds cells on it. */
+  const keep = (a: number, c: number): number => {
+    const tag = hp.deref(c) & 7;
+    H[a] = c;
+    if (tag !== ATM && tag !== INT && tag !== BOX) hp.freeze();
+    return c;
   };
   cm.proc("b_setval", 2).det = () => {
     hp.bind(slotOf(atomArg(hp, A[0]!)), A[1]!);
@@ -318,27 +325,44 @@ export function installGlobalBuiltins(cm: CellMachine): void {
   };
   cm.proc("nb_setval", 2).det = () => {
     const a = slotOf(atomArg(hp, A[0]!));
-    const copy = copyTerm(hp.decode(A[1]!, new Map()), new Map(), true);
-    const c = H[a]!;
-    const v = (c & 7) === BOX ? hp.boxes[c >> 3] : null;
-    if (v instanceof NbValue) v.t = copy;
-    else H[a] = hp.box(new NbValue(copy));
+    keep(a, copyCells(hp, A[1]!, new Map(), true));
     return true;
   };
   const getval = (): boolean => {
     const key = atomArg(hp, A[0]!);
-    const c = read(slots.get(key));
+    const c = read(key);
     if (c === 0) throw existenceError("variable", key);
-    return hp.unify(A[1]!, value(c));
+    return hp.unify(A[1]!, c);
   };
   cm.proc("b_getval", 2).det = getval;
   cm.proc("nb_getval", 2).det = getval;
   cm.proc("nb_current", 2).det = () => {
     const k = hp.deref(A[0]!);
     if ((k & 7) !== ATM) throw new Error("cell engine: nb_current/2 enumerating keys is not built yet");
-    const c = read(slots.get(atomText(hp, k)));
-    return c !== 0 && hp.unify(A[1]!, value(c));
+    const c = read(atomText(hp, k));
+    return c !== 0 && hp.unify(A[1]!, c);
   };
+  // setarg/3 sets a compound's argument, trailed; nb_setarg/3 sets it untrailed to a plain copy of the value, kept
+  // on the frozen heap, as the object machine's setArg does with copyTerm (builtins.ts): an index out of range fails,
+  // and an argument that is not compound raises type_error(compound, T).
+  const setArg = (backtrackable: boolean) => (): boolean => {
+    const i = intArg(hp, A[0]!);
+    const t = hp.deref(A[1]!);
+    const tag = t & 7;
+    let at: number;
+    if (tag === STR) {
+      if (i < 1 || i > hp.funArity[H[t >> 3]! >> 3]!) return false;
+      at = (t >> 3) + i;
+    } else if (tag === LIS) {
+      if (i < 1 || i > 2) return false;
+      at = (t >> 3) + i - 1;
+    } else throw typeError("compound", culprit(hp, t));
+    if (backtrackable) hp.bind(at, A[2]!);
+    else keep(at, copyCells(hp, A[2]!, new Map(), false));
+    return true;
+  };
+  cm.proc("setarg", 3).det = setArg(true);
+  cm.proc("nb_setarg", 3).det = setArg(false);
 }
 
 /**

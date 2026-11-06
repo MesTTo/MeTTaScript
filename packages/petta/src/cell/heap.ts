@@ -52,6 +52,13 @@ export class Heap {
   top = 1 + GLOBAL_SLOTS;
   /** HB: the heap top when the newest choicepoint was pushed; a binding of a cell below it is trailed. */
   hb = 1 + GLOBAL_SLOTS;
+  /**
+   * The frozen bar: the heap top no backtracking resets below, raised over the values nb_setval/2 and nb_setarg/3
+   * keep, as SWI's freezeGlobal raises LD->frozen_bar; every reset of the heap top or HB from a choicepoint takes the
+   * larger of the two (CellMachine.fail and the rest), so a binding inside a kept value is trailed.
+   * am[implements a-petta-cell-store.runtime.globals.frozen]
+   */
+  frozen = 0;
   /** Each trail entry's address; only bind, undo and tidy touch the trail, so growing replaces it. */
   private trail = new Int32Array(TRAIL_START);
   /** Each trail entry's old cell, which undo puts back: a variable's self-reference, or a global slot's value. */
@@ -155,6 +162,17 @@ export class Heap {
       this.trail[this.tr++] = a;
     }
     this.h[a] = v;
+  }
+
+  /** Keep every cell made so far through backtracking, raising the frozen bar and HB to the heap top. */
+  freeze(): void {
+    this.frozen = this.top;
+    if (this.hb < this.top) this.hb = this.top;
+  }
+
+  /** The heap top or HB to restore from a choicepoint's saved heap top `t`: never below the frozen bar. */
+  above(t: number): number {
+    return t > this.frozen ? t : this.frozen;
   }
 
   /**

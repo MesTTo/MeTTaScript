@@ -383,7 +383,7 @@ export class CellMachine {
   popCP(b: number): void {
     const p = this.S[b]!;
     this.R[RB] = p;
-    this.hp.hb = this.S[p + 9]!;
+    this.hp.hb = this.hp.above(this.S[p + 9]!);
   }
 
   /** Cut: drop the choicepoints newer than `b0`. */
@@ -393,7 +393,7 @@ export class CellMachine {
     if (this.cleanups > 0) this.cleanupsAbove(b0, false);
     this.R[RB] = b0;
     const hp = this.hp, mark = this.S[b0 + 2]!;
-    hp.hb = this.S[b0 + 9]!;
+    hp.hb = hp.above(this.S[b0 + 9]!);
     if (hp.tr > mark) hp.tidy(mark);
   }
 
@@ -413,7 +413,7 @@ export class CellMachine {
       if (hp.wakeups.length !== 0) hp.wakeups.length = 0;
       const b = R[RB]!;
       hp.undo(S[b + 2]!);
-      hp.top = S[b + 9]!;
+      hp.top = hp.above(S[b + 9]!);
       switch (S[b + 1]) {
         case K_BARRIER:
           return this.CODE[this.NO]!;
@@ -724,9 +724,9 @@ export class CellMachine {
     if (this.cleanups > 0) this.cleanupsAbove(b > bar ? b : bar, true);
     while (b > bar && S[b + 1] === K_CATCH) {
       hp.undo(S[b + 2]!);
-      hp.top = S[b + 9]!;
+      hp.top = hp.above(S[b + 9]!);
       R[RB] = b;
-      hp.hb = S[b + 9]!;
+      hp.hb = hp.top;
       R[RE] = S[b + 3]!;
       R[RCP] = S[b + 4]!;
       const outer = S[b + 6]!;
@@ -738,7 +738,7 @@ export class CellMachine {
         return this.goal(hp.wakeups.length !== 0 ? this.conj(this.wakeGoal(), recovery) : recovery, R[RB]!, outer);
       }
       hp.undo(S[b + 2]!);
-      hp.top = S[b + 9]!;
+      hp.top = hp.above(S[b + 9]!);
       hp.wakeups.length = 0;
       this.popCP(b);
       b = outer;
@@ -931,9 +931,9 @@ export class CellMachine {
       throw copiedBall(e);
     } finally {
       hp.undo(S[bar + 2]!);
-      hp.top = S[bar + 9]!;
+      hp.top = hp.above(S[bar + 9]!);
       R[RB] = sB;
-      hp.hb = S[sB + 9]!;
+      hp.hb = hp.above(S[sB + 9]!);
       R[RE] = sE;
       R[RCP] = sCP;
       R[RCC] = sCC;
