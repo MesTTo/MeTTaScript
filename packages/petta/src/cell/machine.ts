@@ -183,6 +183,12 @@ export class CellMachine {
   /** Choicepoint data that is not a number: a Clauses choicepoint's scan and predicate. */
   readonly SO: unknown[] = [];
   readonly GEN = new Float64Array(S_LIMIT);
+  /**
+   * For each choicepoint, the trail index up to which a cut back to it has tidied (cutTo): what a tidy kept stays
+   * kept, so a later cut to the same choicepoint scans only newer entries, where rescanning them made he_minimalmetta
+   * spend 77% of its time tidying (Machine.tidyTrail keeps the same mark).
+   */
+  private readonly TIDIED = new Int32Array(S_LIMIT);
   readonly CODE: Code[] = [];
   /** The argument registers as clause selection reads them. */
   private readonly args: CellArgs;
@@ -446,6 +452,7 @@ export class CellMachine {
     S[b + 6] = cc;
     S[b + 9] = hp.top;
     S[b + 10] = n;
+    this.TIDIED[b] = hp.tr;
     for (let i = 0; i < n; i++) S[b + CPH + i] = this.A[i]!;
     R[RB] = b;
     hp.hb = hp.top;
@@ -465,9 +472,11 @@ export class CellMachine {
     // A cut past setup_call_cleanup's choicepoint runs its cleanup (Machine.cutTo).
     if (this.cleanups > 0) this.cleanupsAbove(b0, false);
     this.R[RB] = b0;
-    const hp = this.hp, mark = this.S[b0 + 2]!;
+    const hp = this.hp, mark = this.S[b0 + 2]!, done = this.TIDIED[b0]!;
     hp.hb = hp.above(this.S[b0 + 9]!);
-    if (hp.tr > mark) hp.tidy(mark);
+    const from = done > mark ? (done < hp.tr ? done : hp.tr) : mark;
+    if (hp.tr > from) hp.tidy(from);
+    this.TIDIED[b0] = hp.tr;
   }
 
   /** Go on with the continuation. */
@@ -486,6 +495,7 @@ export class CellMachine {
       if (hp.wakeups.length !== 0) hp.wakeups.length = 0;
       const b = R[RB]!;
       hp.undo(S[b + 2]!);
+      this.TIDIED[b] = S[b + 2]!;
       hp.top = hp.above(S[b + 9]!);
       switch (S[b + 1]) {
         case K_BARRIER:
