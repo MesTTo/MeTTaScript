@@ -29,17 +29,17 @@ const f32 = Math.fround;
  * strings, [] and compounds get "\u0001"-prefixed strings, a compound's cached per name and arity (indexOfWord,
  * argKey). Building no string per call keeps clause selection allocation-free on the hot path.
  */
-type Key = string | number | bigint;
+export type Key = string | number | bigint;
 
-const NIL_KEY = "\u0001n";
-const LIST_KEY = "\u0001c[|]/2";
+export const NIL_KEY = "\u0001n";
+export const LIST_KEY = "\u0001c[|]/2";
 const functorKeys = new Map<string, string[]>();
 // The last functor asked for, since consecutive calls of one predicate usually carry the same one.
 // am[implements a-petta-speed-1105.goal.select-once]
 let lastName = "";
 let lastArity = -1;
 let lastKey = "";
-function functorKey(name: string, arity: number): string {
+export function functorKey(name: string, arity: number): string {
   if (name === lastName && arity === lastArity) return lastKey;
   let byArity = functorKeys.get(name);
   if (byArity === undefined) functorKeys.set(name, (byArity = []));
@@ -138,6 +138,27 @@ export interface Scan {
 }
 
 const NO_CLAUSES: Scan = { list: [], start: 0, key: null, keyAt: null };
+
+/**
+ * A call's arguments as clause selection reads them when they are not object terms (the cell engine's argument
+ * registers or a compound on its heap): argument i's key, as termKey gives it for the same term, and a compound
+ * argument's own arguments for a deep index (c-cell-select-shared-1106).
+ * am[implements a-petta-cell-store.select]
+ */
+export interface ArgVector {
+  key(i: number): Key | null;
+  sub(i: number): ArgVector | null;
+}
+/** A call's arguments: object terms, or a vector the cell engine reads. */
+export type Args = readonly Term[] | ArgVector;
+/** The key of argument i (pl-index.c indexOfWord on a call argument), whichever engine made the arguments. */
+function argKey(args: Args, i: number): Key | null {
+  return Array.isArray(args) ? termKey(deref((args as readonly Term[])[i]!)) : (args as ArgVector).key(i);
+}
+/** Argument i's own arguments, for a deep index. */
+function argSub(args: Args, i: number): Args {
+  return Array.isArray(args) ? compoundArgs(deref((args as readonly Term[])[i]!))! : (args as ArgVector).sub(i)!;
+}
 /** A key no clause carries: the scan for a call key matching no clause key of a static list (ClauseList.primaryScan). */
 const NO_KEY = Symbol("no clause key") as unknown as Key;
 
@@ -364,7 +385,7 @@ class ClauseList {
   }
 
   /** pl-index.c first_clause_guarded: the scan for a call with argument vector `args` at index depth `depth`. */
-  select(args: readonly Term[], depth: number): Scan {
+  select(args: Args, depth: number): Scan {
     if (depth === 0) this.updatePrimary();
     if (this.unindexed || this.arity === 0) return this.allScan();
     const n = this.liveCount();
@@ -374,7 +395,7 @@ class ClauseList {
       let fast: Scan | null = null;
       if (depth === 0 && n <= MIN_CLAUSES_FOR_INDEX) {
         // The primary key scan, unless its first two candidates both carry exactly the call's key.
-        const pkey = termKey(deref(args[pindex]!));
+        const pkey = argKey(args, pindex);
         if (pkey !== null) {
           const s = this.cachedPrimaryScan(pkey);
           if (s !== null) return s;
@@ -429,8 +450,8 @@ class ClauseList {
   }
 
   /** The scan of every clause filtered by the call's key at argument `pindex`, or of every clause when it is unbound. */
-  private keyScan(pindex: number, args: readonly Term[]): Scan {
-    const pkey = termKey(deref(args[pindex]!));
+  private keyScan(pindex: number, args: Args): Scan {
+    const pkey = argKey(args, pindex);
     return pkey === null ? this.allScan() : { list: this.clauses, start: 0, key: pkey, keyAt: this.keyAtFn(pindex) };
   }
 
@@ -490,7 +511,7 @@ class ClauseList {
   }
 
   /** pl-index.c nextClauseFromBucket and nextClauseFromList. */
-  private bucketScan(ci: ClauseIndex, key: Key, args: readonly Term[], depth: number): Scan {
+  private bucketScan(ci: ClauseIndex, key: Key, args: Args, depth: number): Scan {
     if (!ci.realised) this.realise(ci);
     if (!ci.list) {
       let s = ci.scans.get(key);
@@ -510,7 +531,7 @@ class ClauseList {
     }
     if (sub !== undefined) {
       if (isFunctorKey(key) && depth < MAXINDEXDEPTH) {
-        const inner = compoundArgs(deref(args[ci.args[0]!]!))!;
+        const inner = argSub(args, ci.args[0]!);
         return sub.select(inner, depth + 1);
       }
       return sub.allScan();
@@ -677,9 +698,9 @@ class ClauseList {
   }
 
   /** pl-index.c bestHash, then hashDefinition: an index on the best bound argument or argument pair, realised. */
-  private createIndex(args: readonly Term[], betterThan: ClauseIndex | null): ClauseIndex | null {
+  private createIndex(args: Args, betterThan: ClauseIndex | null): ClauseIndex | null {
     const inst: number[] = [];
-    for (let i = 0; i < this.arity; i++) if (termKey(deref(args[i]!)) !== null) inst.push(i);
+    for (let i = 0; i < this.arity; i++) if (argKey(args, i) !== null) inst.push(i);
     if (inst.length === 0) return null;
     this.assessArgs(inst);
     let best = -1;
@@ -850,11 +871,11 @@ function betterIndex(betterThan: ClauseIndex | null, speedup: number): boolean {
 }
 
 /** The call's key for an index, null when one of its arguments is unbound. */
-function callIndexKey(ci: ClauseIndex, args: readonly Term[]): Key | null {
-  if (ci.args.length === 1) return termKey(deref(args[ci.args[0]!]!));
+function callIndexKey(ci: ClauseIndex, args: Args): Key | null {
+  if (ci.args.length === 1) return argKey(args, ci.args[0]!);
   const parts: string[] = [];
   for (const a of ci.args) {
-    const k = termKey(deref(args[a]!));
+    const k = argKey(args, a);
     if (k === null) return null;
     parts.push(keyString(k));
   }
@@ -960,7 +981,7 @@ export class SwiIndex implements ClauseObserver {
     return !this.pred.dynamic && !this.pred.multifile;
   }
 
-  select(args: readonly Term[]): Scan {
+  select(args: Args): Scan {
     return this.top.select(args, 0);
   }
 
@@ -998,7 +1019,7 @@ export class SwiIndex implements ClauseObserver {
 }
 
 /** The scan for a call to `pred` with `args`, creating the predicate's indexing state on first use. */
-export function clauseScan(pred: Pred, args: readonly Term[]): Scan {
+export function clauseScan(pred: Pred, args: Args): Scan {
   let s = pred.observer as SwiIndex | null;
   if (s === null) pred.observer = s = new SwiIndex(pred);
   return s.select(args);
