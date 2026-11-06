@@ -2,9 +2,10 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Purpose: a clause head as a flat program over cells and its interpreter, the cold tier of a fact: a fact runs its
-// head from this program, made without V8 compiling anything, until it is hot enough for generated code
-// (c-cold-plan-facts-1106). The program has one term program per head argument in order; matching one against an
+// Purpose: a clause head as a flat program over cells and its interpreter, and a rule's body as a program that builds
+// it on the heap, the cold tier of a clause: a fact runs its head from this program and a rule its head and then its
+// built body through the meta-call interpreter, made without V8 compiling anything, until hot enough for generated
+// code (c-cold-plan-facts-1106, a-petta-cell-store.compile.rulecold). The program has one term program per head argument in order; matching one against an
 // argument cell reads it where it is bound (read mode) and builds the template where it is unbound (write mode), as the
 // generated head code does, constants compared as canonical cells and boxes by content through unification.
 // am[implements a-petta-cell-store.compile.cold]
@@ -28,15 +29,26 @@ const STRC = 5;
 /** [LIST, end] then the programs of the head and the tail. */
 const LIST = 6;
 
-/** A clause head's program and its arity. */
+/**
+ * A clause's head program and its arity, and for a rule its body's program: the body as a term built from the slots
+ * the head set, a variable goal in a body position run as call/1 runs it, as compiled code runs it.
+ */
 export interface HeadProgram {
   readonly code: Int32Array;
   readonly arity: number;
+  readonly body: Int32Array | null;
 }
 
-/** The program of clause `c`'s head. Time: linear in the head. */
+/** A body template with each variable goal in a conjunction, disjunction or if-then-else made call/1 of it. */
+function callSlots(t: Term): Term {
+  if (t instanceof Slot) return new Struct("call", [t]);
+  if (t instanceof Struct && t.args.length === 2 && (t.name === "," || t.name === ";" || t.name === "->" || t.name === "*->"))
+    return new Struct(t.name, t.args.map(callSlots));
+  return t;
+}
+
+/** The program of clause `c`'s head, and of its body for a rule. Time: linear in the clause. */
 export function headProgram(hp: Heap, c: Clause): HeadProgram {
-  const out: number[] = [];
   const count = new Map<number, number>();
   const countSlots = (t: Term): void => {
     if (t instanceof Slot) count.set(t.i, (count.get(t.i) ?? 0) + 1);
@@ -47,45 +59,56 @@ export function headProgram(hp: Heap, c: Clause): HeadProgram {
     }
   };
   countSlots(c.head);
+  countSlots(c.body);
   const seen = new Set<number>();
-  const emit = (t0: Term): void => {
-    const t = t0 instanceof Ground ? t0.t : t0;
-    if (t instanceof Slot) {
-      if (count.get(t.i) === 1) out.push(VOID);
-      else if (seen.has(t.i)) out.push(VARN, t.i);
-      else {
-        seen.add(t.i);
-        out.push(VAR1, t.i);
-      }
-    } else if (t instanceof Cons) {
-      const at = out.length;
-      out.push(LIST, 0);
-      emit(t.head);
-      emit(t.tail);
-      out[at + 1] = out.length;
-    } else if (t instanceof Struct && t.args.length > 0) {
-      const at = out.length;
-      out.push(STRC, hp.functor(t.name, t.args.length), t.args.length, 0);
-      t.args.forEach(emit);
-      out[at + 3] = out.length;
-    } else if (typeof t === "string") out.push(CONST, hp.atom(t));
-    else if (t === NIL) out.push(CONST, hp.NIL);
-    else if (typeof t === "number" || typeof t === "bigint") {
-      const c = hp.int(t);
-      out.push((c & 7) === BOX ? BOXC : CONST, c);
-    } else if (t instanceof Float || t instanceof Str) out.push(BOXC, hp.box(t));
-    else throw new Error(`cell head program: no cell for ${String(t)}`);
+  const emitter = (out: number[]): ((t0: Term) => void) => {
+    const emit = (t0: Term): void => {
+      const t = t0 instanceof Ground ? t0.t : t0;
+      if (t instanceof Slot) {
+        if (count.get(t.i) === 1) out.push(VOID);
+        else if (seen.has(t.i)) out.push(VARN, t.i);
+        else {
+          seen.add(t.i);
+          out.push(VAR1, t.i);
+        }
+      } else if (t instanceof Cons) {
+        const at = out.length;
+        out.push(LIST, 0);
+        emit(t.head);
+        emit(t.tail);
+        out[at + 1] = out.length;
+      } else if (t instanceof Struct && t.args.length > 0) {
+        const at = out.length;
+        out.push(STRC, hp.functor(t.name, t.args.length), t.args.length, 0);
+        t.args.forEach(emit);
+        out[at + 3] = out.length;
+      } else if (typeof t === "string") out.push(CONST, hp.atom(t));
+      else if (t === NIL) out.push(CONST, hp.NIL);
+      else if (typeof t === "number" || typeof t === "bigint") {
+        const k = hp.int(t);
+        out.push((k & 7) === BOX ? BOXC : CONST, k);
+      } else if (t instanceof Float || t instanceof Str) out.push(BOXC, hp.box(t));
+      else throw new Error(`cell head program: no cell for ${String(t)}`);
+    };
+    return emit;
   };
+  const head: number[] = [];
   const args = c.head instanceof Struct ? c.head.args : [];
-  args.forEach(emit);
-  return { code: Int32Array.from(out), arity: args.length };
+  args.forEach(emitter(head));
+  let body: Int32Array | null = null;
+  if (c.body !== "true") {
+    const b: number[] = [];
+    emitter(b)(callSlots(c.body));
+    body = Int32Array.from(b);
+  }
+  return { code: Int32Array.from(head), arity: args.length, body };
 }
 
 /**
  * Build the term whose program starts at pc, slots taken from or set in `vals`; returns its cell, the pc after it in
  * `next[0]`. Time: the term's size.
  */
-function build(hp: Heap, code: Int32Array, pc: number, vals: Int32Array, next: Int32Array): number {
+export function build(hp: Heap, code: Int32Array, pc: number, vals: Int32Array, next: Int32Array): number {
   switch (code[pc]) {
     case VAR1: {
       const a = hp.alloc(1);

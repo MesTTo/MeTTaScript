@@ -16,7 +16,7 @@ import { MAX_LOOKAHEAD, clauseScan, type Scan } from "../swi-index";
 import { NIL, PrologError, Struct, existenceError, instantiationError, typeError } from "../terms";
 import { CellArgs } from "./args";
 import { bridgeBuiltin, nextSolution, objectTrailMark, startNondet, takeSolution, type BridgeRun } from "./bridge";
-import { headProgram, runHead, type HeadProgram } from "./headprog";
+import { build, headProgram, runHead, type HeadProgram } from "./headprog";
 import { ATM, ATV, Heap, REF, STR } from "./heap";
 
 /** Code the trampoline runs: the code to run next, or null at a run's exit. */
@@ -66,7 +66,7 @@ const COMPILE_AFTER = 32;
 /** The goals the meta-call interpreter runs itself (goal) when call/N builds one. */
 const CONTROL = new Set([",/2", ";/2", "->/2", "*->/2", "\\+/1", "call/1", "once/1", "ignore/1", "forall/2"]);
 
-/** A fact not yet compiled: its head program and how often it has been tried. */
+/** A clause not yet compiled: its head and body programs and how often it has been tried. */
 interface ColdFact {
   readonly prog: HeadProgram;
   tries: number;
@@ -685,14 +685,15 @@ export class CellMachine {
   }
 
   /**
-   * Try clause `c`, which has no code yet: a rule is compiled now; a fact runs its head program until its
-   * COMPILE_AFTERth try, when it is compiled. Returns what the clause's code would.
+   * Try clause `c`, which has no code yet: for its first COMPILE_AFTER tries it runs from its head program, a rule
+   * then building its body on the heap and running it through the meta-call interpreter with the clause's cut
+   * barrier; on that try it is compiled, a rule with an inline head, a fact with a compact one (compile.ts,
+   * c-head-tiers-1106). Returns what the clause's code would.
    */
   private cold(c: Clause, h: number, cc: number): Code | null {
     let st = c.cell as ColdFact | null;
-    // A rule is compiled with an inline head at once; a fact first with a compact one (compile.ts, c-head-tiers-1106).
     const rule = c.body !== "true";
-    if (rule || (st !== null && ++st.tries >= COMPILE_AFTER)) {
+    if (st !== null && ++st.tries >= COMPILE_AFTER) {
       const fn = this.compile!(this, c, rule);
       c.cell = fn;
       return fn(h, cc, 0);
@@ -701,7 +702,8 @@ export class CellMachine {
     if (c.nvars > this.vals.length) this.vals = new Int32Array(2 * c.nvars);
     if (!runHead(this.hp, st.prog, this.A, this.vals, this.next)) return HEADFAIL;
     if (this.hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
-    return this.proceed();
+    if (!rule) return this.proceed();
+    return this.goal(build(this.hp, st.prog.body!, 0, this.vals, this.next), h, cc);
   }
 
   /** Recompile hot clause `c` with an inline head and run it from its head, as its compact code was asked to. */
