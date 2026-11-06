@@ -11,8 +11,8 @@
 
 import { compareNum, type Num } from "../arith";
 import { cmpStr } from "../builtins";
-import { Float, NIL, Str, domainError, instantiationError, typeError } from "../terms";
-import { ATM, ATV, BOX, HEAP_CELLS, INT, LIS, REF, STR, boxEq, type Heap } from "./heap";
+import { Float, NIL, Str, domainError, existenceError, instantiationError, typeError } from "../terms";
+import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, INT, LIS, REF, STR, boxEq, type Heap } from "./heap";
 import { copyTerm } from "../machine";
 import type { Term } from "../terms";
 import type { CellMachine } from "./machine";
@@ -269,8 +269,69 @@ function freshVar(hp: Heap): number {
   return a << 3;
 }
 
+/** An nb_setval/2 value: a copy outside the backtracked heap, held in a box its slot points at. */
+class NbValue {
+  constructor(public t: Term) {}
+}
+
+/**
+ * The global variable builtins on cells (a-petta-cell-store.runtime.globals, c-globals-design-1106), one store as the
+ * object machine's: each key has a slot cell below every choicepoint's heap top; b_setval/2 binds it, trailed with
+ * its old cell so backtracking restores it; nb_setval/2 points it, untrailed, at a box holding a copy of the value,
+ * reused by the key's later nb_setval/2; b_getval/2 and nb_getval/2 read either, existence_error(variable, K) when
+ * unset; nb_current/2 fails then.
+ */
+export function installGlobalBuiltins(cm: CellMachine): void {
+  const hp = cm.hp, A = cm.A, H = hp.h;
+  const slots = new Map<string, number>();
+  let next = 1;
+  const slotOf = (key: string): number => {
+    let a = slots.get(key);
+    if (a === undefined) {
+      if (next > GLOBAL_SLOTS) throw new Error(`cell engine: more than ${GLOBAL_SLOTS} global variables`);
+      a = next++;
+      H[a] = 0;
+      slots.set(key, a);
+    }
+    return a;
+  };
+  const read = (a: number | undefined): number => (a === undefined ? 0 : H[a]!);
+  const value = (c: number): number => {
+    const v = (c & 7) === BOX ? hp.boxes[c >> 3] : null;
+    return v instanceof NbValue ? hp.encode(v.t, new Map()) : c;
+  };
+  cm.proc("b_setval", 2).det = () => {
+    hp.bind(slotOf(atomArg(hp, A[0]!)), A[1]!);
+    return true;
+  };
+  cm.proc("nb_setval", 2).det = () => {
+    const a = slotOf(atomArg(hp, A[0]!));
+    const copy = copyTerm(hp.decode(A[1]!, new Map()));
+    const c = H[a]!;
+    const v = (c & 7) === BOX ? hp.boxes[c >> 3] : null;
+    if (v instanceof NbValue) v.t = copy;
+    else H[a] = hp.box(new NbValue(copy));
+    return true;
+  };
+  const getval = (): boolean => {
+    const key = atomArg(hp, A[0]!);
+    const c = read(slots.get(key));
+    if (c === 0) throw existenceError("variable", key);
+    return hp.unify(A[1]!, value(c));
+  };
+  cm.proc("b_getval", 2).det = getval;
+  cm.proc("nb_getval", 2).det = getval;
+  cm.proc("nb_current", 2).det = () => {
+    const k = hp.deref(A[0]!);
+    if ((k & 7) !== ATM) throw new Error("cell engine: nb_current/2 enumerating keys is not built yet");
+    const c = read(slots.get(atomText(hp, k)));
+    return c !== 0 && hp.unify(A[1]!, value(c));
+  };
+}
+
 /** Install the term builtins on `cm`: each a det function over the argument registers (CellProc.det). */
 export function installTermBuiltins(cm: CellMachine): void {
+  installGlobalBuiltins(cm);
   const hp = cm.hp, A = cm.A, H = hp.h;
   const def = (name: string, arity: number, f: () => boolean): void => {
     cm.proc(name, arity).det = f;

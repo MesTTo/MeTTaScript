@@ -18,6 +18,7 @@ import { installLibrary } from "../library";
 import { Machine } from "../machine";
 import { readClauses } from "../prolog-reader";
 import { Cons, Float, NIL, Struct, Var, deref, mkVar, type Term } from "../terms";
+import { installTermBuiltins } from "./builtins";
 import { compileCellClause, installInlineBuiltins } from "./compile";
 import { CellMachine } from "./machine";
 
@@ -72,6 +73,7 @@ function machines(): { m: Machine; cm: CellMachine } {
   const cm = new CellMachine(m);
   cm.compile = compileCellClause;
   installInlineBuiltins(cm);
+  installTermBuiltins(cm);
   return { m, cm };
 }
 
@@ -227,11 +229,18 @@ describe("cell engine against the object machine", () => {
       sc4(X) :- setup_call_cleanup(true, mem(X, [1, 2]), assertz(log4(c))), !, log4(c).
       sc5(X) :- call_cleanup(mem(X, [1, 2]), true).
       sc6(X) :- setup_call_cleanup(Y = 1, X = Y, true).
+      gv1(X) :- b_setval(k1, f(Y)), Y = 1, b_getval(k1, X).
+      gv2(X) :- ( b_setval(k2, a), fail ; true ), catch(b_getval(k2, X), E, X = e(E)).
+      gv3(X) :- nb_setval(k3, g(Z)), Z = 1, nb_getval(k3, X).
+      gv4(X) :- ( nb_setval(k4, kept), fail ; true ), nb_getval(k4, X).
+      gv5(X) :- nb_setval(k5, a), b_setval(k5, b), ( fail ; true ), b_getval(k5, X).
+      gv6(X) :- ( nb_current(k6, _) -> X = yes ; X = no ), nb_setval(k6, 1).
+      gv7(X) :- nb_setval(k7, 1), nb_setval(k7, 2), nb_getval(k7, X).
       mem(X, [X|_]).
       mem(X, [_|T]) :- mem(X, T).
       db10(X) :- assertz(w10(1)), w10(X), retract(w10(X)), \\+ w10(_).
     `;
-    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6"]) {
+    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7"]) {
       const a = machines(), b = machines();
       for (const c of readClauses(src)) {
         a.m.addClause(c, true);

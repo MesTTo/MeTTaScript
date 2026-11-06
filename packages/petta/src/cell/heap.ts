@@ -28,6 +28,8 @@ export const INT_MAX = (1 << 28) - 1;
 
 /** Heap cells. Linux commits pages as they are touched, so the size is address space until the heap grows into it. */
 export const HEAP_CELLS = 1 << 28;
+/** Global variable slots reserved at the heap's bottom (b_setval/2): PeTTa names a few dozen globals. */
+export const GLOBAL_SLOTS = 4096;
 const TRAIL_CELLS = 1 << 24;
 
 /** A woken attribute: the attributed variable's attribute list and the value it was bound to (attr_unify_hook). */
@@ -43,10 +45,13 @@ export interface Wakeup {
 export class Heap {
   readonly h = new Int32Array(HEAP_CELLS);
   /** H: the first free cell. */
-  top = 1;
+  /** Cells 1 to GLOBAL_SLOTS hold b_setval/2's values, below every choicepoint's heap top so always trailed. */
+  top = 1 + GLOBAL_SLOTS;
   /** HB: the heap top when the newest choicepoint was pushed; a binding of a cell below it is trailed. */
-  hb = 1;
+  hb = 1 + GLOBAL_SLOTS;
   readonly trail = new Int32Array(TRAIL_CELLS);
+  /** Each trail entry's old cell, which undo puts back: a variable's self-reference, or a global slot's value. */
+  readonly trailOld = new Int32Array(TRAIL_CELLS);
   /** TR: the first free trail entry. */
   tr = 0;
   /** BOX cells' values: numbers beyond 29 bits, bigints, Floats and Strs. */
@@ -137,18 +142,20 @@ export class Heap {
 
   /** Bind the unbound variable at address `a` to `v`, trailed when a choicepoint older than it could undo it. */
   bind(a: number, v: number): void {
+    if (a < this.hb) {
+      this.trailOld[this.tr] = this.h[a]!;
+      this.trail[this.tr++] = a;
+    }
     this.h[a] = v;
-    if (a < this.hb) this.trail[this.tr++] = a;
   }
 
   /** Undo the bindings trailed since `mark`: each cell is made its own unbound self again. */
   undo(mark: number): void {
-    const h = this.h, trail = this.trail;
+    const h = this.h, trail = this.trail, old = this.trailOld;
     let tr = this.tr;
     while (tr > mark) {
-      const a = trail[--tr]!;
-      // An attributed variable stays one when unbound again.
-      h[a] = (a << 3) | (h[a + 1] === ATV_MARK ? ATV : REF);
+      --tr;
+      h[trail[tr]!] = old[tr]!;
     }
     this.tr = mark;
   }
