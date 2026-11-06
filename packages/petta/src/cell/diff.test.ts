@@ -268,6 +268,19 @@ describe("cell engine against the object machine", () => {
       mc15(X) :- call(X).
       mc16(X) :- X = 3, call(X).
       mc17(X) :- call(undefined_pred_xyz(X)).
+      ct1(X) :- catch(throw(my), E, X = caught(E)).
+      ct2(X) :- catch(X is foo + 1, error(type_error(T, V), _), X = te(T, V)).
+      ct3(X) :- catch(mem(X, [1, 2, 3]), _, true).
+      ct4(X) :- catch((mem(Z, [1, 2, 3]), Z > 1, throw(found(Z))), found(Y), X = Y).
+      ct5(X) :- catch(catch(throw(a), b, X = inner), a, X = outer).
+      ct6(X) :- catch(throw(f(_)), f(Z), X = got(Z)).
+      ct7(X) :- catch(undefined_xyz, error(existence_error(procedure, P), _), X = P).
+      ct8(X) :- catch((X = 1 ; X = 2), _, true), X > 1.
+      ct9(X) :- ( catch(throw(a), b, true) -> X = no ; X = yes ).
+      ct10(X) :- catch(ct10h(X), E, X = e(E)).
+      ct10h(X) :- mem(X, [1, 2]), X > 1, throw(t(X)).
+      ct11(X) :- catch(true, _, true), X = after.
+      ct12(X) :- catch(mem(X, [1, 2]), _, true), throw(late(X)).
     `;
     const { m, cm } = machines();
     for (const c of readClauses(src)) m.addClause(c, true);
@@ -289,6 +302,7 @@ describe("cell engine against the object machine", () => {
       ["onc", [mkVar()]],
       ["ign", [mkVar()]],
       ["cutin", [mkVar(), mkVar()]],
+      ...["ct1", "ct2", "ct3", "ct4", "ct5", "ct6", "ct7", "ct8", "ct9", "ct10", "ct11", "ct12"].map((n) => [n, [mkVar()]] as [string, Term[]]),
       ...["mc1", "mc2", "mc3", "mc4", "mc5", "mc6", "mc7", "mc8", "mc9", "mc10", "mc11", "mc12", "mc13", "mc14", "mc15", "mc16", "mc17"].map(
         (n) => [n, [mkVar()]] as [string, Term[]],
       ),

@@ -30,6 +30,8 @@ export const K_CLAUSES = 0;
 export const K_ALT = 1;
 /** A nondeterministic builtin's generator (bridge.ts): SO[b] its run, S[b + 7] the object trail mark. */
 export const K_BRIDGE = 2;
+/** catch/3's choicepoint: the catcher and recovery saved as its arguments, S[b + 6] the catch context outside it. */
+export const K_CATCH = 3;
 export const K_BARRIER = 7;
 
 // Registers, as indexes of R: E, CP, B, CC, the run's barrier, the cut barrier a clause is entered with.
@@ -129,6 +131,7 @@ export class CellMachine {
   private readonly NOT: number;
   private readonly ONCE: number;
   private readonly PROCEED: number;
+  private readonly CATCH_EXIT: number;
   /** The choicepoint fail() last popped for an alternative, which the alternative's code reads its data from. */
   private lastAlt = 0;
   // Functor and atom cells the interpreter dispatches on.
@@ -233,6 +236,22 @@ export class CellMachine {
     });
     this.PROCEED = def(() => this.proceed());
     for (let n = 1; n <= 8; n++) this.proc("call", n).ctl = (cm, k, cc) => cm.callN(k, cc);
+    this.proc("catch", 3).ctl = (cm, _k, cc) => cm.catchGoal(cc);
+    this.proc("throw", 1).ctl = (cm) => {
+      const ball = cm.hp.deref(cm.A[0]!);
+      if ((ball & 7) === REF || (ball & 7) === ATV) throw instantiationError();
+      throw new PrologError(copyTerm(cm.hp.decode(ball, new Map())));
+    };
+    // catch/3's goal exited: a deterministic exit drops the catch choicepoint, as SWI drops its frame.
+    this.CATCH_EXIT = def(() => {
+      const S = this.S, R = this.R, e = R[RE]!;
+      const b = S[e + ENV]!;
+      R[RCP] = S[e + 1]!;
+      R[RE] = S[e]!;
+      if (R[RB] === b) this.popCP(b);
+      R[RCC] = S[b + 6]!;
+      return this.proceed();
+    });
     // A control construct called as a procedure, as call/N or a caller of ','/2 calls it, runs as that goal's
     // meta-call: built from the registers and interpreted, its cut local to it.
     for (const key of CONTROL) {
@@ -353,12 +372,14 @@ export class CellMachine {
         case K_CLAUSES:
           R[RE] = S[b + 3]!;
           R[RCP] = S[b + 4]!;
+          R[RCC] = S[b + 6]!;
           for (let i = 0, n = S[b + 10]!; i < n; i++) this.A[i] = S[b + CPH + i]!;
           return this.CODE[this.RETRY]!;
         case K_ALT:
           this.popCP(b);
           R[RE] = S[b + 3]!;
           R[RCP] = S[b + 4]!;
+          R[RCC] = S[b + 6]!;
           this.lastAlt = b;
           return this.CODE[S[b + 8]!]!;
         case K_BRIDGE: {
@@ -366,6 +387,7 @@ export class CellMachine {
           // goes on; another keeps it. A solution the cells do not take backtracks again.
           R[RE] = S[b + 3]!;
           R[RCP] = S[b + 4]!;
+          R[RCC] = S[b + 6]!;
           const run = this.SO[b] as BridgeRun;
           const r = nextSolution(this, run);
           if (r === 0) {
@@ -378,6 +400,10 @@ export class CellMachine {
           if (hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
           return this.CODE[R[RCP]!]!;
         }
+        case K_CATCH:
+          // The caught goal has no more solutions: catch/3 fails.
+          this.popCP(b);
+          continue;
         default:
           throw new Error(`cell machine: choicepoint kind ${S[b + 1]} is not built yet`);
       }
@@ -569,8 +595,54 @@ export class CellMachine {
     return this.proceed();
   }
 
+  /** catch(G, C, R) with A[0..3) holding them: G runs under a catch choicepoint, its cut local to it. */
+  catchGoal(cc: number): Code | null {
+    const A = this.A, S = this.S, R = this.R;
+    const g = A[0]!;
+    A[0] = A[1]!;
+    A[1] = A[2]!;
+    const b = this.pushCP(K_CATCH, R[RB]!, cc, 2);
+    const e = this.allocate(1, b, cc);
+    S[e + ENV] = b;
+    R[RCP] = this.CATCH_EXIT;
+    R[RCC] = b;
+    return this.goal(g, b, b);
+  }
+
+  /**
+   * A ball thrown inside this run (a PrologError): unwind to the innermost catch around the code that threw (the
+   * catch context R[RCC]) whose catcher unifies with the ball encoded, restoring the state at that catch and running
+   * its recovery; catches at or below `bar`, the run's barrier, belong to an outer run, so the ball is thrown on.
+   */
+  private unwind(e: PrologError, bar: number): Code | null {
+    const S = this.S, R = this.R, hp = this.hp;
+    let b = R[RCC]!;
+    while (b > bar && S[b + 1] === K_CATCH) {
+      hp.undo(S[b + 2]!);
+      hp.top = S[b + 9]!;
+      R[RB] = b;
+      hp.hb = S[b + 9]!;
+      R[RE] = S[b + 3]!;
+      R[RCP] = S[b + 4]!;
+      const outer = S[b + 6]!;
+      if (hp.unify(S[b + CPH]!, hp.encode(e.ball, new Map()))) {
+        const recovery = S[b + CPH + 1]!;
+        this.popCP(b);
+        R[RCC] = outer;
+        return this.goal(recovery, R[RB]!, outer);
+      }
+      hp.undo(S[b + 2]!);
+      hp.top = S[b + 9]!;
+      this.popCP(b);
+      b = outer;
+    }
+    throw copiedBall(e);
+  }
+
   /** Call `p` with A[0..n), the continuation being the current one. */
   callw(p: CellProc, n: number, cc: number): Code | null {
+    // The catch context of the call, which a throw from inside it unwinds to (unwind).
+    this.R[RCC] = cc;
     if (p.det !== undefined) {
       if (!p.det(this, n)) return this.fail();
       if (this.hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
@@ -647,6 +719,21 @@ export class CellMachine {
     return undefined;
   }
 
+  /** Run the trampoline from `f` until a run's exit, a thrown ball unwinding to its catch (unwind). */
+  private drive(f0: Code | null, bar: number): null {
+    let f = f0;
+    for (;;) {
+      try {
+        while (f !== null) f = f();
+        return null;
+      } catch (e) {
+        if (!(e instanceof PrologError)) throw e;
+        this.nest = 0;
+        f = this.unwind(e, bar);
+      }
+    }
+  }
+
   /**
    * Solve the goal predicate `p` with A[0..n) for every solution, calling `each` after each one with whether a
    * choicepoint of the goal remains, as Machine.solveAll does; `each` returning false stops. Every binding and heap
@@ -664,7 +751,7 @@ export class CellMachine {
       let f: Code | null = () => this.callw(p, n, sCC);
       this.nest = 0;
       for (;;) {
-        while (f !== null) f = f();
+        f = this.drive(f, bar);
         if (!this.result || each(R[RB] !== bar) === false) break;
         f = this.fail();
       }
@@ -723,9 +810,9 @@ export class CellMachine {
     R[RBAR] = bar;
     R[RCP] = this.OK;
     try {
-      let f: Code | null = () => this.callw(p, n, sCC);
+      const f: Code | null = () => this.callw(p, n, sCC);
       this.nest = 0;
-      while (f !== null) f = f();
+      this.drive(f, bar);
       this.cutTo(sB);
       return this.result;
     } catch (e) {

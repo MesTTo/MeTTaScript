@@ -956,8 +956,8 @@ export function compileCellClause(cm: CellMachine, c: Clause, hot: boolean): Cla
       out.push("if (pc === 0) {", headCode, "if (hp.wakeups.length !== 0) WAKE();", fromV);
       if (made.length > 0) out.push(`{ let t = hp.top; ${made.map((i) => `v${i} = (H[t] = t << 3, t++ << 3);`).join(" ")} hp.top = t; }`);
       if (env) out.push(`e = cm.allocate(${nslots}, b0, cc);`, ...[...perm].filter((i) => i < c.nvars && (hc.set.has(i) || made.includes(i))).map((i) => `S[e + ${ENV + i}] = v${i};`));
-      out.push("pc = 1;", "} else {", "e = R[0]; b0 = S[e + 2]; cc = S[e + 4];", "}");
-    } else out.push("e = R[0]; b0 = S[e + 2]; cc = S[e + 4];");
+      out.push("pc = 1;", "} else {", "e = R[0]; b0 = S[e + 2]; cc = S[e + 4]; R[3] = cc;", "}");
+    } else out.push("e = R[0]; b0 = S[e + 2]; cc = S[e + 4]; R[3] = cc;");
     out.push("for (;;) {", "switch (pc) {");
     let last = 0;
     for (let pc = 1; pc < n; pc++)
