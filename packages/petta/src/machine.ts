@@ -172,7 +172,7 @@ export interface Builtin {
  * variable, so tidying drops it once the variable is newer than every choicepoint left.
  * am[implements a-petta-speed-1105.memory.trail-values]
  */
-class AttrUndo {
+export class AttrUndo {
   constructor(
     readonly v: Var,
     readonly old: Map<string, Term> | null,
@@ -607,18 +607,28 @@ export class Machine {
     if (a !== null && a.size > 0) for (const [mod, val] of a) this.wakeups.push(mkStruct("$attr_unify_hook", mod, val, t));
   }
 
-  /** put_attr/3: backtrackable. */
+  /**
+   * put_attr/3: backtrackable. A variable without attributes is bound to a fresh variable carrying the attribute, as
+   * SWI makes a new attributed variable, so attributed variables are ordered by when they became attributed, which
+   * decides which of two is bound and whose hook wakes (unify).
+   * am[addresses i-obj-attvar-age-1106] am[rests-on c-swi-attvar-age-1106]
+   */
   putAttr(v: Var, mod: string, val: Term): void {
     const old = v.attrs;
+    if (old === null) {
+      const nv = mkVar();
+      nv.attrs = new Map([[mod, val]]);
+      this.bind(v, nv);
+      return;
+    }
     // A variable newer than the newest choicepoint is unreachable from any state backtracking returns to, so its
     // attributes change in place with nothing to restore, as bind leaves such a variable off the trail.
     // am[implements a-petta-speed-1105.memory.trail-values]
     if (v.id >= this.trailBoundary) {
-      if (old === null) v.attrs = new Map([[mod, val]]);
-      else old.set(mod, val);
+      old.set(mod, val);
       return;
     }
-    const next = new Map(old ?? []);
+    const next = new Map(old);
     next.set(mod, val);
     v.attrs = next;
     this.trail.push(new AttrUndo(v, old));
@@ -694,7 +704,9 @@ export class Machine {
     if (tpl instanceof Ground) return this.unifyLiteral(tpl.t, act);
     act = deref(act);
     if (act instanceof Var) {
-      this.bind(act, this.inst(tpl, vars));
+      // An attributed variable's hooks wake, as unifyLiteral and compiled heads (bindVar) wake them.
+      // am[addresses i-obj-head-wake-1106]
+      this.bindAttr(act, this.inst(tpl, vars));
       return true;
     }
     if (tpl instanceof Cons) {
@@ -894,7 +906,7 @@ export class Machine {
   /** One solution of a findall goal: a copy of the template joins the results ($fa_collect). */
   faCollect(h: number): void {
     const cp = this.cps[h]!;
-    cp.results!.push(copyTerm(cp.template));
+    cp.results!.push(copyTerm(cp.template, new Map(), true));
   }
 
   /**
@@ -1254,7 +1266,7 @@ export class Machine {
   /** Unwind to the innermost catch whose catcher unifies with the ball; false if none is in this run. */
   private handleThrow(e: PrologError, base: number): boolean {
     this.wakeups.length = 0;
-    const ball = copyTerm(e.ball);
+    const ball = copyTerm(e.ball, new Map(), true);
     let c = this.curCC;
     while (c >= base) {
       const cp = this.cps[c];
@@ -1530,7 +1542,7 @@ export class Machine {
         }
         if (name === "$fa_collect") {
           const cp = this.cps[deref(args[0]!) as number]!;
-          cp.results!.push(copyTerm(cp.template));
+          cp.results!.push(copyTerm(cp.template, new Map(), true));
           return false;
         }
         if (name === "$catch_exit") {
@@ -1569,7 +1581,7 @@ export class Machine {
         if (name === "throw") {
           const ball = deref(real(args[0]!));
           if (ball instanceof Var) throw instantiationError();
-          throw new PrologError(copyTerm(ball));
+          throw new PrologError(copyTerm(ball, new Map(), true));
         }
         if (name === "halt") {
           const st = deref(real(args[0]!));
@@ -1863,30 +1875,42 @@ export function addArgs(goal: Term, extra: Term[]): Term {
 }
 
 /** copy_term/2 without attributes: fresh variables, sharing preserved. Time: term size. */
-export function copyTerm(t: Term, map: Map<Var, Var> = new Map()): Term {
+/**
+ * A copy of term t with fresh variables, `map` taking each variable met to its copy. With `attrs`, an attributed
+ * variable's copy gets its attributes, their values copied through the same map, as SWI's copy_term/2, findall/3 and
+ * caught balls keep them; without, the copies are plain, as assert and copy_term/3's copy are (c-swi-attr-copies-1106).
+ * Time: the term's size, with its attribute values when `attrs`.
+ * am[addresses i-obj-copy-drops-attrs-1106] am[rests-on c-swi-attr-copies-1106]
+ */
+export function copyTerm(t: Term, map: Map<Var, Var> = new Map(), attrs = false): Term {
   t = deref(t);
   if (t instanceof Var) {
     let v = map.get(t);
     if (v === undefined) {
       v = mkVar();
       map.set(t, v);
+      if (attrs && t.attrs !== null) {
+        const copied = new Map<string, Term>();
+        for (const [mod, val] of t.attrs) copied.set(mod, copyTerm(val, map, true));
+        v.attrs = copied;
+      }
     }
     return v;
   }
   if (t instanceof Cons) {
-    const first = new Cons(copyTerm(t.head, map), NIL);
+    const first = new Cons(copyTerm(t.head, map, attrs), NIL);
     let last = first;
     let rest = deref(t.tail);
     while (rest instanceof Cons) {
-      const cell = new Cons(copyTerm(rest.head, map), NIL);
+      const cell = new Cons(copyTerm(rest.head, map, attrs), NIL);
       last.tail = cell;
       last = cell;
       rest = deref(rest.tail);
     }
-    last.tail = copyTerm(rest, map);
+    last.tail = copyTerm(rest, map, attrs);
     return first;
   }
-  if (t instanceof Struct) return new Struct(t.name, t.args.map((a) => copyTerm(a, map)));
+  if (t instanceof Struct) return new Struct(t.name, t.args.map((a) => copyTerm(a, map, attrs)));
   return t;
 }
 

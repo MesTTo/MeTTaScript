@@ -614,7 +614,8 @@ export function installBuiltins(m: Machine): void {
   def("get_attrs", 2, det((m2, [v, as]) => {
     const d = deref(v!);
     if (!(d instanceof Var) || d.attrs === null || d.attrs.size === 0) return false;
-    let t: Term = "[]";
+    // The chain ends in the empty list, as SWI's does, not the atom '[]' (c-swi-attr-inplace-1106 t11).
+    let t: Term = NIL;
     for (const [mod, val] of [...d.attrs].reverse()) t = mkStruct("att", mod, val, t);
     return m2.unify(as!, t);
   }));
@@ -742,7 +743,7 @@ export function installBuiltins(m: Machine): void {
     const [f, ar] = functorOf(d);
     return m2.unify(n!, f) && m2.unify(a!, ar);
   }));
-  def("copy_term", 2, det((m2, [a, b]) => m2.unify(b!, copyTerm(a!))));
+  def("copy_term", 2, det((m2, [a, b]) => m2.unify(b!, copyTerm(a!, new Map(), true))));
   // copy_term(+Term, -Copy, -Gs): Copy without attributes, Gs the goals that would restore them: a module's
   // attribute_goals//1 when it defines one, else put_attr(V, Module, Value).
   def("copy_term", 3, det((m2, [a, b, gs]) => {
@@ -763,7 +764,7 @@ export function installBuiltins(m: Machine): void {
     return m2.unify(b!, c!) && m2.unify(gs!, g!);
   }));
   def("copy_term_nat", 2, det((m2, [a, b]) => m2.unify(b!, copyTerm(a!))));
-  def("duplicate_term", 2, det((m2, [a, b]) => m2.unify(b!, copyTerm(a!))));
+  def("duplicate_term", 2, det((m2, [a, b]) => m2.unify(b!, copyTerm(a!, new Map(), true))));
   // copy_term(+VarsIn, +Term, -VarsOut, -TermOut): rename only VarsIn, share the rest.
   def("copy_term", 4, det((m2, [vi, t, vo, to]) => {
     const map = new Map<Var, Var>();
@@ -798,7 +799,7 @@ export function installBuiltins(m: Machine): void {
   def("findnsols", 4, det((m2, [n, t, g, l]) => {
     const limit = intArg(n!);
     const out: Term[] = [];
-    if (limit > 0) m2.solveAll(g!, () => (out.push(copyTerm(t!)), out.length < limit));
+    if (limit > 0) m2.solveAll(g!, () => (out.push(copyTerm(t!, new Map(), true)), out.length < limit));
     return m2.unify(l!, mkList(out));
   }));
   // term_size/2: cells on SWI's 64-bit global stack: 0 for atoms and small integers, 3 for a float, 2 plus the
@@ -1346,7 +1347,7 @@ export function installBuiltins(m: Machine): void {
   }));
 
   // global variables
-  def("nb_setval", 2, det((m2, [k, v]) => (m2.globals.set(atomArg(k!), copyTerm(v!)), true)));
+  def("nb_setval", 2, det((m2, [k, v]) => (m2.globals.set(atomArg(k!), copyTerm(v!, new Map(), true)), true)));
   def("b_setval", 2, det((m2, [k, v]) => {
     const key = atomArg(k!);
     const old = m2.globals.get(key);

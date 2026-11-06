@@ -557,7 +557,9 @@ class HeadCompiler {
     const d = `d${this.temps++}`;
     if (typeof t === "string" || typeof t === "number") {
       const lit = typeof t === "string" ? JSON.stringify(t) : Object.is(t, -0) ? "-0" : String(t);
-      this.lines.push(`{ const ${d} = deref(${a}); if (${d} instanceof Var) m.bind(${d}, ${lit}); else if (${d} !== ${lit}) return false; }`);
+      // A call variable is bound through bindVar, which wakes an attributed one's hooks (i-obj-head-wake-1106).
+      // am[addresses i-obj-head-wake-1106]
+      this.lines.push(`{ const ${d} = deref(${a}); if (${d} instanceof Var) m.bindVar(${d}, ${lit}); else if (${d} !== ${lit}) return false; }`);
       return;
     }
     if (!(t instanceof Struct || t instanceof Cons) || size(t) > BUILD_NODES) {
@@ -570,7 +572,7 @@ class HeadCompiler {
     // Bind a call variable to the instantiated template, or match a call term of the template's shape.
     const before = new Set(this.set);
     const built = this.build(t, before);
-    this.lines.push(`{ const ${d} = deref(${a});`, `if (${d} instanceof Var) m.bind(${d}, ${built});`);
+    this.lines.push(`{ const ${d} = deref(${a});`, `if (${d} instanceof Var) m.bindVar(${d}, ${built});`);
     if (t instanceof Cons) this.lines.push(`else if (${d} instanceof L) {`);
     else this.lines.push(`else if (${d} instanceof S && ${d}.name === ${JSON.stringify(t.name)} && ${d}.args.length === ${t.args.length}) {`);
     if (t instanceof Cons) {
