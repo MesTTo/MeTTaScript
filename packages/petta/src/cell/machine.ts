@@ -14,6 +14,7 @@ import type { Clause, Pred } from "../db";
 import type { Machine } from "../machine";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "../swi-index";
 import { CellArgs } from "./args";
+import { bridgeBuiltin } from "./bridge";
 import { Heap } from "./heap";
 
 /** Code the trampoline runs: the code to run next, or null at a run's exit. */
@@ -25,7 +26,6 @@ export const HEADFAIL = Object.freeze({ headFailed: true }) as unknown as Code;
 /** Choicepoint kinds at S[b + 1]. */
 export const K_CLAUSES = 0;
 export const K_ALT = 1;
-export const K_NOT = 5;
 export const K_BARRIER = 7;
 
 // Registers, as indexes of R: E, CP, B, CC, the run's barrier, the cut barrier a clause is entered with.
@@ -51,8 +51,6 @@ export class CellProc {
   pred: Pred | undefined = undefined;
   /** A native deterministic builtin over the argument registers: true on success. */
   det: ((cm: CellMachine, n: number) => boolean) | undefined = undefined;
-  /** An auxiliary predicate of the compiler (an if-then-else, disjunction or negation): its clauses, tried in order. */
-  aux: { pred: Pred; scan: Scan } | undefined = undefined;
   constructor(
     readonly name: string,
     readonly arity: number,
@@ -60,8 +58,11 @@ export class CellProc {
   ) {}
 }
 
-/** A clause's compiled code: from its head with cut barrier `b0`, the argument registers holding the call. */
-export type ClauseFn = (b0: number, cc: number) => Code | null;
+/**
+ * A clause's compiled code: with `pc` 0, from its head with cut barrier `b0` and catch context `cc`, the argument
+ * registers holding the call; with another `pc`, resumed at that step of its body, its environment current.
+ */
+export type ClauseFn = (b0: number, cc: number, pc: number) => Code | null;
 
 export class CellMachine {
   readonly hp = new Heap();
@@ -83,11 +84,15 @@ export class CellMachine {
   readonly NO: number;
   private readonly CALL: number;
   private readonly RETRY: number;
+  /** Code that only fails on: a soft-cut gives it to its choicepoint, whose alternative may no longer run. */
+  readonly FAILC: number;
   private pend: CellProc | null = null;
   private pendN = 0;
   private pendCC = -1;
 
   constructor(readonly om: Machine) {
+    if (om.db.cellMachine !== null) throw new Error("cell machine: a database has one cell machine, the clauses' code being bound to it");
+    om.db.cellMachine = this;
     const def = (c: Code): number => this.CODE.push(c) - 1;
     this.OK = def(() => {
       this.result = true;
@@ -98,6 +103,7 @@ export class CellMachine {
       return null;
     });
     this.CALL = def(() => this.callw(this.pend!, this.pendN, this.pendCC));
+    this.FAILC = def(() => this.fail());
     this.RETRY = def(() => {
       const b = this.R[RB]!;
       const r = this.tryClauses(this.SO[b + 1] as Pred, this.SO[b] as Scan, this.S[b + 7]!, this.GEN[b]!, this.S[b + 6]!, b);
@@ -209,11 +215,6 @@ export class CellMachine {
           R[RE] = S[b + 3]!;
           R[RCP] = S[b + 4]!;
           return this.CODE[S[b + 8]!]!;
-        case K_NOT:
-          this.popCP(b);
-          R[RE] = S[b + 3]!;
-          R[RCP] = S[b + 4]!;
-          return this.CODE[R[RCP]!]!;
         default:
           throw new Error(`cell machine: choicepoint kind ${S[b + 1]} is not built yet`);
       }
@@ -234,12 +235,17 @@ export class CellMachine {
   /** Call `p` with A[0..n), the continuation being the current one. */
   callw(p: CellProc, n: number, cc: number): Code | null {
     if (p.det !== undefined) return p.det(this, n) ? this.proceed() : this.fail();
-    if (p.aux !== undefined) {
-      const r = this.tryClauses(p.aux.pred, p.aux.scan, 0, this.om.db.generation, cc, -1);
-      return r === undefined ? this.fail() : r;
+    let pred = p.pred;
+    if (pred === undefined) {
+      // A builtin comes before a predicate of its key, as the object machine resolves calls (Machine.callCell).
+      const b = this.om.builtins.get(p.key);
+      if (b !== undefined) {
+        p.det = bridgeBuiltin(p.key, b);
+        return this.callw(p, n, cc);
+      }
+      pred = p.pred = this.om.db.preds.get(p.key);
+      if (pred === undefined) throw new Error(`cell machine: unknown procedure ${p.key}`);
     }
-    const pred = p.pred ?? (p.pred = this.om.db.preds.get(p.key));
-    if (pred === undefined) throw new Error(`cell machine: unknown procedure ${p.key}`);
     const scan = clauseScan(pred, this.args);
     const r = this.tryClauses(pred, scan, scan.start, this.om.db.generation, cc, -1);
     return r === undefined ? this.fail() : r;
@@ -289,7 +295,7 @@ export class CellMachine {
       const mark = hp.tr, h0 = hp.top;
       let fn = c.cell as ClauseFn | null;
       if (fn === null) c.cell = fn = this.compile!(this, c);
-      const r = fn(h, cc);
+      const r = fn(h, cc, 0);
       if (r !== HEADFAIL) return r;
       hp.undo(mark);
       hp.top = h0;
@@ -297,6 +303,36 @@ export class CellMachine {
     }
     if (cp >= 0) this.popCP(cp);
     return undefined;
+  }
+
+  /**
+   * Solve the goal predicate `p` with A[0..n) for every solution, calling `each` after each one with whether a
+   * choicepoint of the goal remains, as Machine.solveAll does; `each` returning false stops. Every binding and heap
+   * cell of the run is undone at the end.
+   */
+  solveAll(p: CellProc, n: number, each: (hasChoice: boolean) => boolean | void): void {
+    const S = this.S, R = this.R, hp = this.hp;
+    const sE = R[RE]!, sCP = R[RCP]!, sB = R[RB]!, sCC = R[RCC]!, sBAR = R[RBAR]!;
+    const bar = this.pushCP(K_BARRIER, sB, sCC, 0);
+    R[RBAR] = bar;
+    R[RCP] = this.OK;
+    try {
+      let f: Code | null = () => this.callw(p, n, sCC);
+      for (;;) {
+        while (f !== null) f = f();
+        if (!this.result || each(R[RB] !== bar) === false) break;
+        f = this.fail();
+      }
+    } finally {
+      hp.undo(S[bar + 2]!);
+      hp.top = S[bar + 9]!;
+      R[RB] = sB;
+      hp.hb = S[sB + 9]!;
+      R[RE] = sE;
+      R[RCP] = sCP;
+      R[RCC] = sCC;
+      R[RBAR] = sBAR;
+    }
   }
 
   /** Solve the goal predicate `p` with A[0..n) once; bindings persist on success. */

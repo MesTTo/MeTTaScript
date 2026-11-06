@@ -125,6 +125,12 @@ export class Database {
   generation = 0;
   private seq = 0;
   private readonly tx: TxLog[] = [];
+  /**
+   * The cell machine reading this database (cell/machine.ts), at most one: the code it compiles for a clause is kept
+   * in the clause (Clause.cell) and bound to that machine's heap and registers.
+   */
+  // am[implements a-petta-cell-store.control]
+  cellMachine: unknown = null;
 
   beginTransaction(): void {
     this.tx.push({ added: [], removed: [] });

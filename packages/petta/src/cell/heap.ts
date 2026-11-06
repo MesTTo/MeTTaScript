@@ -27,7 +27,7 @@ export const INT_MIN = -(1 << 28);
 export const INT_MAX = (1 << 28) - 1;
 
 /** Heap cells. Linux commits pages as they are touched, so the size is address space until the heap grows into it. */
-const HEAP_CELLS = 1 << 28;
+export const HEAP_CELLS = 1 << 28;
 const TRAIL_CELLS = 1 << 24;
 
 /** A woken attribute: the attributed variable's attribute list and the value it was bound to (attr_unify_hook). */
@@ -342,7 +342,7 @@ export class Heap {
 const ATV_MARK = (-1 << 3) | FUN;
 
 /** Equality of two boxed values as unification sees it: 1 and 1.0 differ, NaN equals NaN, strings by content. */
-function boxEq(x: unknown, y: unknown): boolean {
+export function boxEq(x: unknown, y: unknown): boolean {
   if (x === y) return true;
   if (typeof x === "bigint" || typeof y === "bigint") return typeof x === typeof y && x === y;
   if (x instanceof Float) return y instanceof Float && (x.v === y.v || (Number.isNaN(x.v) && Number.isNaN(y.v)));
