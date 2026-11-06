@@ -13,10 +13,12 @@ import { ATM, ATV, BOX, INT, LIS, REF, STR, type Heap } from "./heap";
 
 /** Arguments at cells[base], cells[base + 1], ...: the argument registers, or a compound's arguments on the heap. */
 export class CellArgs implements ArgVector {
+  /** The vector sub returns, reused: selection reads one compound's arguments at a time at each depth (bucketScan). */
+  private child: CellArgs | null = null;
   constructor(
     readonly hp: Heap,
     readonly cells: Int32Array,
-    readonly base: number,
+    public base: number,
   ) {}
 
   key(i: number): Key | null {
@@ -50,8 +52,11 @@ export class CellArgs implements ArgVector {
   sub(i: number): ArgVector | null {
     const hp = this.hp;
     const c = hp.deref(this.cells[this.base + i]!);
-    if ((c & 7) === STR) return new CellArgs(hp, hp.h, (c >> 3) + 1);
-    if ((c & 7) === LIS) return new CellArgs(hp, hp.h, c >> 3);
-    return null;
+    const tag = c & 7;
+    if (tag !== STR && tag !== LIS) return null;
+    let ch = this.child;
+    if (ch === null) this.child = ch = new CellArgs(hp, hp.h, 0);
+    ch.base = tag === STR ? (c >> 3) + 1 : c >> 3;
+    return ch;
   }
 }

@@ -33,6 +33,9 @@ export class Clause {
   code: Code | null = null;
   /** How often the clause's body was entered while it had no compiled body. */
   entries = 0;
+  /** The cell engine's code for the clause (cell/compile.ts), made on its first try; null until then. */
+  // am[implements a-petta-cell-store.control]
+  cell: unknown = null;
   constructor(
     public readonly pred: Pred,
     public readonly head: Term,
