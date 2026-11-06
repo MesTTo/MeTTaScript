@@ -13,7 +13,7 @@
 import type { Clause, Pred } from "../db";
 import { copyTerm, type Builtin, type Machine } from "../machine";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "../swi-index";
-import { NIL, PrologError, Struct, existenceError, instantiationError, typeError } from "../terms";
+import { NIL, PrologError, Struct, existenceError, instantiationError, mkList, typeError, type Term } from "../terms";
 import { CellArgs } from "./args";
 import { bridgeBuiltin, nextSolution, objectTrailMark, startNondet, takeSolution, type BridgeRun } from "./bridge";
 import { build, headProgram, runHead, type HeadProgram } from "./headprog";
@@ -242,6 +242,7 @@ export class CellMachine {
     this.PROCEED = def(() => this.proceed());
     for (let n = 1; n <= 8; n++) this.proc("call", n).ctl = (cm, k, cc) => cm.callN(k, cc);
     this.proc("catch", 3).ctl = (cm, _k, cc) => cm.catchGoal(cc);
+    this.proc("findall", 3).ctl = (cm) => cm.findall();
     this.proc("setup_call_cleanup", 3).ctl = (cm, _k, cc) => cm.setupCallCleanup(cm.A[0]!, cm.A[1]!, cm.A[2]!, cc);
     this.proc("call_cleanup", 2).ctl = (cm, _k, cc) => cm.setupCallCleanup(cm.A_TRUE, cm.A[0]!, cm.A[1]!, cc);
     // The goal under setup_call_cleanup/3 exited: a deterministic exit runs the cleanup now.
@@ -623,6 +624,20 @@ export class CellMachine {
     return this.proceed();
   }
 
+  /**
+   * findall(T, G, L) with A[0..3) holding them: G solved to exhaustion under its own barrier, its cut local, a
+   * decoded copy of T kept at each solution outside the heap backtracking frees, L unified with their list encoded.
+   */
+  findall(): Code | null {
+    const hp = this.hp, A = this.A;
+    const t = A[0]!, g = A[1]!, l = A[2]!;
+    const found: Term[] = [];
+    this.solveAllFrom(() => this.goal(g, this.R[RB]!, this.R[RCC]!), () => void found.push(hp.decode(t, new Map())));
+    if (!hp.unify(l, hp.encode(mkList(found), new Map()))) return this.fail();
+    if (hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
+    return this.proceed();
+  }
+
   /** setup_call_cleanup(S, G, C): S once; G under a cleanup choicepoint holding C, its cut local to it. */
   setupCallCleanup(setup: number, g: number, cleanup: number, cc: number): Code | null {
     const S = this.S, R = this.R;
@@ -817,6 +832,11 @@ export class CellMachine {
    * cell of the run is undone at the end.
    */
   solveAll(p: CellProc, n: number, each: (hasChoice: boolean) => boolean | void): void {
+    this.solveAllFrom(() => this.callw(p, n, this.R[RCC]!), each);
+  }
+
+  /** Run code `start` for every solution under a barrier, as solveAll; every binding is undone at the end. */
+  private solveAllFrom(start: Code, each: (hasChoice: boolean) => boolean | void): void {
     const S = this.S, R = this.R, hp = this.hp;
     const sE = R[RE]!, sCP = R[RCP]!, sB = R[RB]!, sCC = R[RCC]!, sBAR = R[RBAR]!;
     const sNest = this.nest;
@@ -825,7 +845,7 @@ export class CellMachine {
     R[RBAR] = bar;
     R[RCP] = this.OK;
     try {
-      let f: Code | null = () => this.callw(p, n, sCC);
+      let f: Code | null = start;
       this.nest = 0;
       for (;;) {
         f = this.drive(f, bar);

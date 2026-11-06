@@ -289,6 +289,14 @@ describe("cell engine against the object machine", () => {
       ct10h(X) :- mem(X, [1, 2]), X > 1, throw(t(X)).
       ct11(X) :- catch(true, _, true), X = after.
       ct12(X) :- catch(mem(X, [1, 2]), _, true), throw(late(X)).
+      fa1(L) :- findall(X, mem(X, [1, 2, 3]), L).
+      fa2(L) :- findall(X-Y, (mem(X, [1, 2]), mem(Y, [a, b])), L).
+      fa3(L) :- findall(X, fail, L).
+      fa4(L) :- findall(f(Y), mem(_, [1, 2]), L).
+      fa5(L) :- findall(X, (mem(X, [1, 2, 3]), !), L).
+      fa6(L) :- catch(findall(X, (mem(X, [1, 2]), throw(e)), L), e, L = caught).
+      fa7(L) :- findall(X, mem(X, [1, 2]), [1|L]).
+      fa8(L) :- findall(L0, findall(Y, mem(Y, [a, b]), L0), L).
     `;
     const { m, cm } = machines();
     for (const c of readClauses(src)) m.addClause(c, true);
@@ -310,6 +318,7 @@ describe("cell engine against the object machine", () => {
       ["onc", [mkVar()]],
       ["ign", [mkVar()]],
       ["cutin", [mkVar(), mkVar()]],
+      ...["fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7", "fa8"].map((n) => [n, [mkVar()]] as [string, Term[]]),
       ...["ct1", "ct2", "ct3", "ct4", "ct5", "ct6", "ct7", "ct8", "ct9", "ct10", "ct11", "ct12"].map((n) => [n, [mkVar()]] as [string, Term[]]),
       ...["mc1", "mc2", "mc3", "mc4", "mc5", "mc6", "mc7", "mc8", "mc9", "mc10", "mc11", "mc12", "mc13", "mc14", "mc15", "mc16", "mc17"].map(
         (n) => [n, [mkVar()]] as [string, Term[]],
