@@ -288,7 +288,8 @@ function freshVar(hp: Heap): number {
  * its old cell so backtracking restores it; nb_setval/2 sets it, untrailed, to a copy of the value made at the heap top
  * and kept there by freezing the heap, as SWI's nb_setval does, so every read gives that one term and a binding inside
  * it is trailed; b_getval/2 and nb_getval/2 read either, existence_error(variable, K) when unset; nb_current/2 fails
- * then. A key set on the object machine, by a directive of a file it consulted, is read through once and kept here.
+ * then; nb_delete/1 forgets a key. A key set on the object machine, by a directive of a file it consulted, is read
+ * through once and kept here.
  * am[implements a-petta-cell-store.runtime.globals.frozen]
  */
 export function installGlobalBuiltins(cm: CellMachine): void {
@@ -337,6 +338,14 @@ export function installGlobalBuiltins(cm: CellMachine): void {
   };
   cm.proc("b_getval", 2).det = getval;
   cm.proc("nb_getval", 2).det = getval;
+  // nb_delete/1 forgets the key, untrailed, on the object machine too, so the read-through cannot bring it back.
+  cm.proc("nb_delete", 1).det = () => {
+    const key = atomArg(hp, A[0]!);
+    const a = slots.get(key);
+    if (a !== undefined) H[a] = 0;
+    cm.om.globals.delete(key);
+    return true;
+  };
   cm.proc("nb_current", 2).det = () => {
     const k = hp.deref(A[0]!);
     if ((k & 7) !== ATM) throw new Error("cell engine: nb_current/2 enumerating keys is not built yet");
