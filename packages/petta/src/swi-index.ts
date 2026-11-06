@@ -209,14 +209,18 @@ class ClauseList {
   /** The scan of every clause, kept while the clause array is the same one. */
   private all: Scan | null = null;
   /**
-   * A static list's primary-key scans by call key, null where an index is looked for first, made on first use: its
-   * clauses never change, since a change to a static predicate replaces its lists. Keys no clause carries share
-   * `primaryOther`, and `headKeys` says which keys clauses carry.
+   * The primary-key scans by call key, null where an index is looked for first, made on first use and kept while the
+   * clauses stay the same: a change to a static predicate replaces its lists, and a dynamic predicate's top list drops
+   * them whenever a clause joins or dies or its array is compacted (SwiIndex.added, removed, compacted), so a kept scan
+   * is always the one primaryScan and bothExact would compute now. `primaryKeys` holds the distinct keys live clauses
+   * carry and `primaryHits` their scans, made on first use; keys no live clause carries share `primaryOther`. The
+   * cache serves lists of at most MIN_CLAUSES_FOR_INDEX live clauses, so a linear search of at most that many keys
+   * finds a call's entry in fewer instructions than one Map lookup (about 85 in V8, c-gate-first-reading-1106).
    */
-  // am[implements a-petta-speed-1105.goal.select-once]
-  private primaryScans: Map<Key, Scan | null> | null = null;
+  // am[implements a-petta-speed-1105.goal.select-once] am[implements a-petta-cell-store.select]
+  private primaryKeys: Key[] | null = null;
+  private primaryHits: (Scan | null | undefined)[] = [];
   private primaryOther: Scan | null = null;
-  private headKeys: Set<Key> | null = null;
 
   constructor(
     private readonly root: SwiIndex,
@@ -372,13 +376,10 @@ class ClauseList {
         // The primary key scan, unless its first two candidates both carry exactly the call's key.
         const pkey = termKey(deref(args[pindex]!));
         if (pkey !== null) {
-          if (this.root.staticLike()) {
-            const s = this.cachedPrimaryScan(pkey);
-            if (s !== null) return s;
-          } else {
-            fast = this.primaryScan(pkey);
-            if (fast === NO_CLAUSES || !this.bothExact(fast)) return fast;
-          }
+          const s = this.cachedPrimaryScan(pkey);
+          if (s !== null) return s;
+          // Its first two candidates both carry exactly the key: a dynamic list falls back to this scan below.
+          if (!this.root.staticLike()) fast = this.primaryScan(pkey);
         }
       }
       // pl-index.c existing_hash: the first index whose arguments are all bound in the call, with the call's key.
@@ -453,27 +454,39 @@ class ClauseList {
   }
 
   /**
-   * A static list's primary-key scan for `pkey`, or null when an index is looked for first, as primaryScan and
-   * bothExact decide it; a key no clause carries gets the scan of the variable-key clauses, with a key none carries.
+   * The primary-key scan for `pkey`, or null when an index is looked for first, as primaryScan and bothExact decide
+   * it; a key no live clause carries gets the scan of the variable-key clauses, with a key none carries.
+   * Time: at most k key compares, k = distinct keys of the live clauses (k <= MIN_CLAUSES_FOR_INDEX where it is
+   * called), while the clauses stay the same; O(c) more for the first call after a change, c = clauses.
    */
   private cachedPrimaryScan(pkey: Key): Scan | null {
-    let cache = this.primaryScans;
-    if (cache === null) {
-      cache = this.primaryScans = new Map();
+    let keys = this.primaryKeys;
+    if (keys === null) {
+      keys = this.primaryKeys = [];
+      this.primaryHits = [];
       const keyAt = this.keyAtFn(this.primary);
-      this.headKeys = new Set();
       for (const c of this.clauses) {
+        if (c.died !== Infinity) continue;
         const k = keyAt(c);
-        if (k !== null) this.headKeys.add(k);
+        if (k !== null && !keys.includes(k)) keys.push(k);
       }
     }
-    let s = cache.get(pkey);
-    if (s === undefined) {
-      if (!this.headKeys!.has(pkey)) return (this.primaryOther ??= this.primaryScan(NO_KEY));
-      const p = this.primaryScan(pkey);
-      cache.set(pkey, (s = p === NO_CLAUSES || !this.bothExact(p) ? p : null));
+    for (let i = 0; i < keys.length; i++) {
+      if (keys[i] !== pkey) continue;
+      let s = this.primaryHits[i];
+      if (s === undefined) {
+        const p = this.primaryScan(pkey);
+        this.primaryHits[i] = s = p === NO_CLAUSES || !this.bothExact(p) ? p : null;
+      }
+      return s;
     }
-    return s;
+    return (this.primaryOther ??= this.primaryScan(NO_KEY));
+  }
+
+  /** A clause joined or died, or the array was compacted: the kept primary-key scans no longer describe the clauses. */
+  dropPrimaryScans(): void {
+    this.primaryKeys = null;
+    this.primaryOther = null;
   }
 
   /** pl-index.c nextClauseFromBucket and nextClauseFromList. */
@@ -958,6 +971,7 @@ export class SwiIndex implements ClauseObserver {
     }
     if (atEnd) this.top.added(c, true);
     else this.top.dropRealised();
+    this.top.dropPrimaryScans();
     const nc = this.pred.live;
     if (nc > 0 && (nc & (nc - 1)) === 0) {
       if (this.shrunkPow2) this.shrunkPow2 = false;
@@ -972,12 +986,14 @@ export class SwiIndex implements ClauseObserver {
       return;
     }
     this.top.shrunk(this.pred.live);
+    this.top.dropPrimaryScans();
     const nc = this.pred.live;
     if (!this.shrunkPow2 && nc > 0 && (nc & (nc - 1)) === 0) this.shrunkPow2 = true;
   }
 
   compacted(): void {
     this.top.dropRealised();
+    this.top.dropPrimaryScans();
   }
 }
 
