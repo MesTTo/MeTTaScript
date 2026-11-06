@@ -4,7 +4,8 @@
 
 // Purpose: property tests of the cell term store (heap.ts): encode then decode gives the object term back up to
 // variable renaming with sharing kept; cell unification succeeds exactly when the object machine's does, leaving the
-// same bindings; and undoing the trail returns every cell to what it was.
+// same bindings; and undoing the trail returns every cell to what it was; and both engines bind attributed and plain
+// variables the way SWI-Prolog does.
 // am[verifies a-petta-cell-store.terms]
 
 import fc from "fast-check";
@@ -81,14 +82,17 @@ describe("cell term store", () => {
     fc.assert(
       fc.property(fc.constant(null).chain(() => {
         const vs = pool();
-        return fc.tuple(terms(vs), terms(vs));
-      }), ([a, b]) => {
+        return fc.tuple(fc.constant(vs), terms(vs), terms(vs));
+      }), ([vs, a, b]) => {
         // The object side, on its own copy of the variables.
         const pair = new Struct("p", [a, b]);
         const before = canon(pair);
         const m = new Machine();
         const hp = new Heap();
         const vars = new Map<Var, number>();
+        // The pool's cells in the order its variables were made, so a cell's age is its object variable's: both
+        // engines bind the younger of two attributed variables to the older (c-attvar-bind-swi-1106).
+        for (const v of vs) hp.encode(v, vars);
         const ca = hp.encode(a, vars), cb = hp.encode(b, vars);
         const pairCell = (() => {
           const at = hp.alloc(3);
@@ -116,5 +120,48 @@ describe("cell term store", () => {
       }),
       { numRuns: 400 },
     );
+  });
+
+  // am[verifies c-attvar-bind-swi-1106]
+  it("binds a plain variable to an attributed one, and the younger of two attributed ones, as SWI-Prolog does", () => {
+    // [first made is attributed, second made is attributed, unify(first, second) or unify(second, first)]
+    for (const [oldAttr, newAttr, swap] of [
+      [true, false, false], [true, false, true], [false, true, false], [false, true, true],
+      [true, true, false], [true, true, true],
+    ] as const) {
+      const m = new Machine();
+      const older = mkVar(), younger = mkVar();
+      if (oldAttr) older.attrs = new Map([["m", "o"]]);
+      if (newAttr) younger.attrs = new Map([["m", "y"]]);
+      expect(swap ? m.unify(younger, older) : m.unify(older, younger)).toBe(true);
+      const r = deref(older) as Var;
+      const wakeups = (m as unknown as { wakeups: Term[] }).wakeups.length;
+      const hp = new Heap();
+      const attr = (v: string): number => {
+        const at = hp.alloc(4);
+        hp.h[at] = hp.functor("att", 3);
+        hp.h[at + 1] = hp.atom("m");
+        hp.h[at + 2] = hp.atom(v);
+        hp.h[at + 3] = hp.NIL;
+        return (at << 3) | 1;
+      };
+      const co = oldAttr ? hp.newAttVar(attr("o")) : hp.newVar();
+      const cy = newAttr ? hp.newAttVar(attr("y")) : hp.newVar();
+      expect(swap ? hp.unify(cy, co) : hp.unify(co, cy)).toBe(true);
+      const rc = hp.deref(co);
+      if (oldAttr !== newAttr) {
+        // The attributed one survives, wherever it was made, and nothing wakes.
+        expect(r.attrs?.get("m")).toBe(oldAttr ? "o" : "y");
+        expect(wakeups).toBe(0);
+        expect(rc).toBe(oldAttr ? co : cy);
+        expect(hp.wakeups.length).toBe(0);
+      } else {
+        // The younger is bound to the older, waking the younger's attributes.
+        expect(r).toBe(older);
+        expect(wakeups).toBe(1);
+        expect(rc).toBe(co);
+        expect(hp.wakeups.length).toBe(1);
+      }
+    }
   });
 });
