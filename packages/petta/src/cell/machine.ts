@@ -46,6 +46,15 @@ export const ENV = 5;
  */
 export const CPH = 11;
 
+/**
+ * Calls a run nests on the JS stack before bouncing through the trampoline (callLater). Each nesting adds four frames
+ * (callLater, callw, tryClauses, the clause) that unwind together at the bounce; 4 keep that within the CPU's return
+ * stack predictor while paying the trampoline's indirect call once per 4 calls: against no nesting, 4 runs eloop and
+ * nloop in 9% and 6% fewer instructions at equal or lower time, where 64 cut eloop's instructions as much but took
+ * 15% longer (c-nest-bound-1106).
+ */
+const NEST = 4;
+
 /** A procedure as compiled code calls it: the predicate once one exists, or a native builtin over cells. */
 export class CellProc {
   pred: Pred | undefined = undefined;
@@ -89,6 +98,8 @@ export class CellMachine {
   private pend: CellProc | null = null;
   private pendN = 0;
   private pendCC = -1;
+  /** Calls nested on the JS stack now (callLater). */
+  private nest = 0;
 
   constructor(readonly om: Machine) {
     if (om.db.cellMachine !== null) throw new Error("cell machine: a database has one cell machine, the clauses' code being bound to it");
@@ -222,10 +233,17 @@ export class CellMachine {
   }
 
   /**
-   * A call from compiled code, made by the trampoline once the caller has returned, so a recursion costs no JS stack:
-   * the procedure and the argument count are left pending.
+   * A call from compiled code, which makes it in tail position: the caller returns whatever this returns and does
+   * nothing after. Up to NEST calls deep it runs at once, nested on the JS stack; deeper, it is left pending for the
+   * trampoline, which unwinds the stack, so a recursion of any depth uses at most NEST nestings of stack.
    */
   callLater(p: CellProc, n: number, cc: number): Code {
+    if (this.nest < NEST) {
+      this.nest++;
+      const r = this.callw(p, n, cc);
+      this.nest--;
+      return r as Code;
+    }
     this.pend = p;
     this.pendN = n;
     this.pendCC = cc;
@@ -313,11 +331,13 @@ export class CellMachine {
   solveAll(p: CellProc, n: number, each: (hasChoice: boolean) => boolean | void): void {
     const S = this.S, R = this.R, hp = this.hp;
     const sE = R[RE]!, sCP = R[RCP]!, sB = R[RB]!, sCC = R[RCC]!, sBAR = R[RBAR]!;
+    const sNest = this.nest;
     const bar = this.pushCP(K_BARRIER, sB, sCC, 0);
     R[RBAR] = bar;
     R[RCP] = this.OK;
     try {
       let f: Code | null = () => this.callw(p, n, sCC);
+      this.nest = 0;
       for (;;) {
         while (f !== null) f = f();
         if (!this.result || each(R[RB] !== bar) === false) break;
@@ -332,6 +352,7 @@ export class CellMachine {
       R[RCP] = sCP;
       R[RCC] = sCC;
       R[RBAR] = sBAR;
+      this.nest = sNest;
     }
   }
 
@@ -339,11 +360,13 @@ export class CellMachine {
   solveOnce(p: CellProc, n: number): boolean {
     const R = this.R;
     const sE = R[RE]!, sCP = R[RCP]!, sB = R[RB]!, sCC = R[RCC]!, sBAR = R[RBAR]!;
+    const sNest = this.nest;
     const bar = this.pushCP(K_BARRIER, sB, sCC, 0);
     R[RBAR] = bar;
     R[RCP] = this.OK;
     try {
       let f: Code | null = () => this.callw(p, n, sCC);
+      this.nest = 0;
       while (f !== null) f = f();
       this.cutTo(sB);
       return this.result;
@@ -352,6 +375,7 @@ export class CellMachine {
       R[RCP] = sCP;
       R[RCC] = sCC;
       R[RBAR] = sBAR;
+      this.nest = sNest;
     }
   }
 }
