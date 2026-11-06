@@ -26,6 +26,12 @@ import { ENV, HEADFAIL, K_ALT, type CellMachine, type ClauseFn } from "./machine
  */
 const PART_CHARS = 12000;
 /**
+ * Calls after which a fact compiled with a compact head is recompiled with an inline one. A compact head runs hot
+ * facts 27 to 41% slower (gloop, floop), a few hundred instructions a call, and an inline head costs about 130 us more
+ * to compile on a deep fact, so the recompile pays for itself after about a thousand calls (c-head-tiers-1106).
+ */
+const HOT_AFTER = 1024;
+/**
  * A step allocates at most this many heap cells (a clause's literals and the variables it makes), so a step that starts
  * below HEAP_CELLS minus it cannot write past the heap; the check at the step's start makes a full heap a hard error.
  */
@@ -146,6 +152,49 @@ function runtime(cm: CellMachine): Runtime {
     }
     return true;
   };
+  // get_constant: an atom or small integer is one canonical cell, so any other bound cell clashes; an attributed
+  // variable takes it through unification, which records its wakeup. A box equals another by content.
+  const gc = (c: number, k: number): boolean => {
+    const d = hp.deref(c);
+    if (d === k) return true;
+    const tag = d & 7;
+    if (tag === REF) {
+      hp.bind(d >> 3, k);
+      return true;
+    }
+    return tag === ATV && hp.unify(d, k);
+  };
+  const gb = (c: number, k: number): boolean => {
+    const d = hp.deref(c);
+    if ((d & 7) === REF) {
+      hp.bind(d >> 3, k);
+      return true;
+    }
+    return d === k || hp.unify(d, k);
+  };
+  // get_structure and get_list: an unbound argument gets a new structure, an attributed one through unification,
+  // which binds it and records its wakeup before the arguments are written.
+  const gstr = (c: number, f: number, n: number): number => {
+    const d = hp.deref(c);
+    const tag = d & 7;
+    if (tag === STR) return hp.h[d >> 3] === f ? d >> 3 : 0;
+    if (tag !== REF && tag !== ATV) return 0;
+    const p = hp.alloc(n + 1);
+    hp.h[p] = f;
+    if (tag === REF) hp.bind(d >> 3, (p << 3) | STR);
+    else hp.unify(d, (p << 3) | STR);
+    return -p;
+  };
+  const glis = (c: number): number => {
+    const d = hp.deref(c);
+    const tag = d & 7;
+    if (tag === LIS) return d >> 3;
+    if (tag !== REF && tag !== ATV) return 0;
+    const p = hp.alloc(2);
+    if (tag === REF) hp.bind(d >> 3, (p << 3) | LIS);
+    else hp.unify(d, (p << 3) | LIS);
+    return -p;
+  };
   rt = {
     // A number cell's value; anything else is evaluated by arith.ts on its object term, errors included.
     E: (c0: number): Num => {
@@ -201,6 +250,61 @@ function runtime(cm: CellMachine): Runtime {
       hp.wakeups.length = w;
       return !ok;
     },
+    // The WAM's get and unify instructions for heads (CompactHead): a structure address is positive in read mode and
+    // negative in write mode, where the new structure sits at its absolute value; 0 is a clash.
+    GC: gc,
+    GB: gb,
+    GSTR: gstr,
+    GLIS: glis,
+    UV: (p: number, i: number): number => {
+      if (p < 0) {
+        const a = i - p;
+        hp.h[a] = a << 3;
+        return a << 3;
+      }
+      return hp.h[p + i]!;
+    },
+    UVAL: (p: number, i: number, v: number): boolean => {
+      if (p < 0) {
+        hp.h[i - p] = v;
+        return true;
+      }
+      return hp.unify(hp.h[p + i]!, v);
+    },
+    UVOID: (p: number, i: number): void => {
+      if (p < 0) hp.h[i - p] = (i - p) << 3;
+    },
+    UC: (p: number, i: number, k: number): boolean => {
+      if (p < 0) {
+        hp.h[i - p] = k;
+        return true;
+      }
+      return gc(hp.h[p + i]!, k);
+    },
+    UB: (p: number, i: number, k: number): boolean => {
+      if (p < 0) {
+        hp.h[i - p] = k;
+        return true;
+      }
+      return gb(hp.h[p + i]!, k);
+    },
+    USTR: (p: number, i: number, f: number, n: number): number => {
+      if (p < 0) {
+        const q = hp.alloc(n + 1);
+        hp.h[q] = f;
+        hp.h[i - p] = (q << 3) | STR;
+        return -q;
+      }
+      return gstr(hp.h[p + i]!, f, n);
+    },
+    ULIS: (p: number, i: number): number => {
+      if (p < 0) {
+        const q = hp.alloc(2);
+        hp.h[i - p] = (q << 3) | LIS;
+        return -q;
+      }
+      return glis(hp.h[p + i]!);
+    },
     OVF: (): never => {
       throw new Error("cell heap exhausted");
     },
@@ -211,7 +315,7 @@ function runtime(cm: CellMachine): Runtime {
   runtimes.set(cm, rt);
   return rt;
 }
-const RT_NAMES = ["E", "NUM", "CMP", "ISVAR", "ISATOM", "ISNUM", "ISINT", "ISFLOAT", "ISATOMIC", "ISCOMPOUND", "ISCALLABLE", "ISLIST", "GROUND", "IDENT", "NUNIFY", "OVF", "WAKE"];
+const RT_NAMES = ["E", "NUM", "CMP", "ISVAR", "ISATOM", "ISNUM", "ISINT", "ISFLOAT", "ISATOMIC", "ISCOMPOUND", "ISCALLABLE", "ISLIST", "GROUND", "IDENT", "NUNIFY", "GC", "GB", "GSTR", "GLIS", "UV", "UVAL", "UVOID", "UC", "UB", "USTR", "ULIS", "OVF", "WAKE"];
 
 /** Statements building terms at the local heap top `t`, and whether there are any. */
 class Build {
@@ -515,14 +619,85 @@ class BodyCompiler {
 }
 
 /**
- * Head unification as straight-line code over the argument registers: a slot's first occurrence takes the argument
- * as it is, a later one unifies; a constant is compared as a cell; a compound template matches a bound argument of
- * its shape argument by argument (read mode) or is built and bound to an unbound one (write mode). Every clash
- * returns the head-failure sign.
+ * Head unification as WAM get and unify instructions over the argument registers, each a runtime helper whose mode,
+ * reading a bound argument or writing a new term for an unbound one, is the sign of the structure address it returns
+ * (WAM get_structure and unify_*), so a template node costs one short call at any depth where inline read and write
+ * paths cost 500 to 1000 characters a node (c-cold-compile-cost-1106). A slot's first occurrence takes its cell, a
+ * later one unifies; a constant compares as a cell, a box by content. Slots go in the machine's slot array V, which
+ * the body copies what it needs from. Every clash returns the head-failure sign. A fact's first compile gets it, for
+ * its compile cost (c-head-tiers-1106).
  */
-class HeadCompiler {
+class CompactHead {
   readonly lines: string[] = [];
   readonly set = new Set<number>();
+  /** Slots are left in the machine's slot array V. */
+  readonly inV = true;
+  private names = 0;
+  constructor(
+    private readonly hp: Heap,
+    private readonly singleton: (i: number) => boolean,
+  ) {}
+
+  /** The get instructions for head argument template t0 against the cell expression `src`. */
+  arg(t0: Term, src: string): void {
+    const t = t0 instanceof Ground ? t0.t : t0;
+    if (t instanceof Slot) {
+      if (this.singleton(t.i)) return;
+      if (!this.set.has(t.i)) {
+        this.set.add(t.i);
+        this.lines.push(`V[${t.i}] = ${src};`);
+      } else this.lines.push(`if (!hp.unify(V[${t.i}], ${src})) return HF;`);
+      return;
+    }
+    if (t instanceof Cons || (t instanceof Struct && t.args.length > 0)) {
+      const p = `p${this.names++}`;
+      this.lines.push(t instanceof Cons ? `const ${p} = GLIS(${src});` : `const ${p} = GSTR(${src}, ${this.hp.functor(t.name, t.args.length)}, ${t.args.length});`);
+      this.lines.push(`if (${p} === 0) return HF;`);
+      this.unify(t, p);
+      return;
+    }
+    const k = atomicCell(this.hp, t);
+    this.lines.push(`if (!${(k & 7) === BOX ? "GB" : "GC"}(${src}, ${k})) return HF;`);
+  }
+
+  /** The unify instructions for compound t's arguments, at the signed structure address `p` names. */
+  private unify(t: Cons | Struct, p: string): void {
+    const kids = t instanceof Cons ? [t.head, t.tail] : t.args;
+    const base = t instanceof Cons ? 0 : 1;
+    kids.forEach((a0, j) => {
+      const i = base + j;
+      const a = a0 instanceof Ground ? a0.t : a0;
+      if (a instanceof Slot) {
+        if (this.singleton(a.i)) this.lines.push(`UVOID(${p}, ${i});`);
+        else if (!this.set.has(a.i)) {
+          this.set.add(a.i);
+          this.lines.push(`V[${a.i}] = UV(${p}, ${i});`);
+        } else this.lines.push(`if (!UVAL(${p}, ${i}, V[${a.i}])) return HF;`);
+      } else if (a instanceof Cons || (a instanceof Struct && a.args.length > 0)) {
+        const q = `p${this.names++}`;
+        this.lines.push(a instanceof Cons ? `const ${q} = ULIS(${p}, ${i});` : `const ${q} = USTR(${p}, ${i}, ${this.hp.functor(a.name, a.args.length)}, ${a.args.length});`);
+        this.lines.push(`if (${q} === 0) return HF;`);
+        this.unify(a, q);
+      } else {
+        const k = atomicCell(this.hp, a);
+        this.lines.push(`if (!${(k & 7) === BOX ? "UB" : "UC"}(${p}, ${i}, ${k})) return HF;`);
+      }
+    });
+  }
+}
+
+/**
+ * Head unification as straight-line code over the argument registers, for hot clauses: a slot's first occurrence
+ * takes the argument as it is into its local, a later one unifies; a constant is compared as a cell; a compound
+ * template matches a bound argument of its shape argument by argument (read mode) or is built at the local heap top
+ * and bound to an unbound one (write mode). Every clash returns the head-failure sign. Its code is 500 to 1000
+ * characters a template node, so a fact gets it only once hot (CompactHead, c-head-tiers-1106).
+ */
+class InlineHead {
+  readonly lines: string[] = [];
+  readonly set = new Set<number>();
+  /** Slots are left in locals v<i>; the code builds at the local heap top t. */
+  readonly inV = false;
   private names = 0;
   constructor(private readonly hp: Heap) {}
 
@@ -627,13 +802,14 @@ function freshOutputs(body: Term, seen: Set<number>): Map<Term, number> {
  * body when a continuation or choicepoint resumes it, its environment current. Time: linear in the clause, plus V8
  * compiling the source on its first run.
  */
-export function compileCellClause(cm: CellMachine, c: Clause): ClauseFn {
+export function compileCellClause(cm: CellMachine, c: Clause, hot: boolean): ClauseFn {
   const hp = cm.hp;
   const count = new Array<number>(c.nvars).fill(0);
   for (const i of [...slotsOf(c.head), ...slotsOf(c.body)]) count[i]!++;
   const singleton = (i: number): boolean => i < c.nvars && count[i] === 1;
   const bc = new BodyCompiler(cm, c.nvars, singleton);
-  const hc = new HeadCompiler(hp);
+  const hc = hot ? new InlineHead(hp) : new CompactHead(hp, singleton);
+  if (c.nvars > cm.vals.length) cm.vals = new Int32Array(2 * c.nvars);
   if (c.head instanceof Struct) c.head.args.forEach((t, i) => hc.arg(t, `A[${i}]`));
   const fact = c.body === "true";
   // Body steps start at 1; pc 0 is the head.
@@ -740,6 +916,19 @@ export function compileCellClause(cm: CellMachine, c: Clause): ClauseFn {
         return "return cm.fail();";
     }
   };
+  // The head's code: its slots in V for a compact head, copied to the locals the body reads.
+  const headCode = hc.inV ? `const V = cm.vals; ${hc.lines.join(" ")}` : `{ let t = hp.top; ${hc.lines.join("")} hp.top = t; }`;
+  const fromV = hc.inV ? [...hc.set].filter((i) => !singleton(i)).map((i) => `v${i} = V[${i}];`).join(" ") : "";
+  if (fact) {
+    // A compact fact counts its calls and has itself recompiled with an inline head once hot.
+    const count = hot ? "" : `if (++${bc.k({ n: 0 })}.n > ${HOT_AFTER}) return cm.retier(${bc.k(c)}, b0, cc);`;
+    const locals = hc.inV || c.nvars === 0 ? "" : `let ${Array.from({ length: c.nvars }, (_, i) => `v${i}`).join(", ")};`;
+    const src = `return [(function fact(b0, cc, pc) { ${count} const H = hp.h; ${locals} ${headCode} if (hp.wakeups.length !== 0) WAKE(); return CODE[R[1]]; })];`;
+    if (DUMP !== undefined) appendFileSync(DUMP, `// ${c.pred.name}/${c.pred.arity} clause ${c.seq}\n${src}\n\n`);
+    const rt = runtime(cm);
+    const factory = new Function("cm", "hp", "A", "S", "R", "CODE", "K", "HF", "P", ...RT_NAMES, src) as (...a: unknown[]) => ClauseFn[];
+    return factory(cm, hp, cm.A, cm.S, cm.R, cm.CODE, bc.consts, HEADFAIL, [], ...RT_NAMES.map((k) => rt[k]))[0]!;
+  }
   const nparts = partOf[n - 1]! + 1;
   const declare = nslots > 0 ? `let ${Array.from({ length: nslots }, (_, i) => `v${i}`).join(", ")};` : "";
   // Every step's code first: generating it registers the resume points the parts' entries list.
@@ -749,7 +938,7 @@ export function compileCellClause(cm: CellMachine, c: Clause): ClauseFn {
   for (let k = 0; k < nparts; k++) {
     const out: string[] = [`(function part${k}(b0, cc, pc) {`, "const H = hp.h;", "let e = -1;", declare];
     if (k === 0) {
-      out.push("if (pc === 0) {", `{ let t = hp.top; ${hc.lines.join("")} hp.top = t; }`, "if (hp.wakeups.length !== 0) WAKE();");
+      out.push("if (pc === 0) {", headCode, "if (hp.wakeups.length !== 0) WAKE();", fromV);
       if (made.length > 0) out.push(`{ let t = hp.top; ${made.map((i) => `v${i} = (H[t] = t << 3, t++ << 3);`).join(" ")} hp.top = t; }`);
       if (env) out.push(`e = cm.allocate(${nslots}, b0, cc);`, ...[...perm].filter((i) => i < c.nvars && (hc.set.has(i) || made.includes(i))).map((i) => `S[e + ${ENV + i}] = v${i};`));
       out.push("pc = 1;", "} else {", "e = R[0]; b0 = S[e + 2]; cc = S[e + 4];", "}");

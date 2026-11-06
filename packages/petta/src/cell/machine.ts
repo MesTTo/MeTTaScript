@@ -15,6 +15,7 @@ import type { Machine } from "../machine";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "../swi-index";
 import { CellArgs } from "./args";
 import { bridgeBuiltin } from "./bridge";
+import { headProgram, runHead, type HeadProgram } from "./headprog";
 import { Heap } from "./heap";
 
 /** Code the trampoline runs: the code to run next, or null at a run's exit. */
@@ -54,6 +55,17 @@ export const CPH = 11;
  * 15% longer (c-nest-bound-1106).
  */
 const NEST = 4;
+/**
+ * Tries before a fact gets generated code; until then its head runs from its head program, which V8 need not compile
+ * (c-cold-plan-facts-1106). The object engine compiles a clause on the same try (machine.ts COMPILE_AFTER).
+ */
+const COMPILE_AFTER = 32;
+
+/** A fact not yet compiled: its head program and how often it has been tried. */
+interface ColdFact {
+  readonly prog: HeadProgram;
+  tries: number;
+}
 
 /** A procedure as compiled code calls it: the predicate once one exists, or a native builtin over cells. */
 export class CellProc {
@@ -87,7 +99,7 @@ export class CellMachine {
   private readonly args: CellArgs;
   private readonly procs = new Map<string, CellProc>();
   /** The clause compiler (compile.ts), set by it, so this module does not import it. */
-  compile: ((cm: CellMachine, c: Clause) => ClauseFn) | null = null;
+  compile: ((cm: CellMachine, c: Clause, hot: boolean) => ClauseFn) | null = null;
   private result = false;
   readonly OK: number;
   readonly NO: number;
@@ -100,6 +112,9 @@ export class CellMachine {
   private pendCC = -1;
   /** Calls nested on the JS stack now (callLater). */
   private nest = 0;
+  /** Head slots, of compiled heads (compile.ts) and cold facts' head programs (headprog.ts); grown to the most slots a clause has. */
+  vals = new Int32Array(64);
+  private readonly next = new Int32Array(1);
 
   constructor(readonly om: Machine) {
     if (om.db.cellMachine !== null) throw new Error("cell machine: a database has one cell machine, the clauses' code being bound to it");
@@ -311,9 +326,8 @@ export class CellMachine {
         cp = -1;
       }
       const mark = hp.tr, h0 = hp.top;
-      let fn = c.cell as ClauseFn | null;
-      if (fn === null) c.cell = fn = this.compile!(this, c);
-      const r = fn(h, cc, 0);
+      const fn = c.cell;
+      const r = typeof fn === "function" ? (fn as ClauseFn)(h, cc, 0) : this.cold(c, h, cc);
       if (r !== HEADFAIL) return r;
       hp.undo(mark);
       hp.top = h0;
@@ -354,6 +368,33 @@ export class CellMachine {
       R[RBAR] = sBAR;
       this.nest = sNest;
     }
+  }
+
+  /**
+   * Try clause `c`, which has no code yet: a rule is compiled now; a fact runs its head program until its
+   * COMPILE_AFTERth try, when it is compiled. Returns what the clause's code would.
+   */
+  private cold(c: Clause, h: number, cc: number): Code | null {
+    let st = c.cell as ColdFact | null;
+    // A rule is compiled with an inline head at once; a fact first with a compact one (compile.ts, c-head-tiers-1106).
+    const rule = c.body !== "true";
+    if (rule || (st !== null && ++st.tries >= COMPILE_AFTER)) {
+      const fn = this.compile!(this, c, rule);
+      c.cell = fn;
+      return fn(h, cc, 0);
+    }
+    if (st === null) c.cell = st = { prog: headProgram(this.hp, c), tries: 1 };
+    if (c.nvars > this.vals.length) this.vals = new Int32Array(2 * c.nvars);
+    if (!runHead(this.hp, st.prog, this.A, this.vals, this.next)) return HEADFAIL;
+    if (this.hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
+    return this.proceed();
+  }
+
+  /** Recompile hot clause `c` with an inline head and run it from its head, as its compact code was asked to. */
+  retier(c: Clause, b0: number, cc: number): Code | null {
+    const fn = this.compile!(this, c, true);
+    c.cell = fn;
+    return fn(b0, cc, 0);
   }
 
   /** Solve the goal predicate `p` with A[0..n) once; bindings persist on success. */
