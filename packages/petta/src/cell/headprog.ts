@@ -47,6 +47,49 @@ function callSlots(t: Term): Term {
   return t;
 }
 
+/**
+ * Append template t0's program to `out`: a slot occurring once in its clause (`singleton`) matches anything, a slot in
+ * `seen` unifies with its value, any other takes the cell and joins `seen`. Time: the template's size.
+ */
+function emitTerm(hp: Heap, t0: Term, out: number[], singleton: (i: number) => boolean, seen: Set<number>): void {
+  const t = t0 instanceof Ground ? t0.t : t0;
+  if (t instanceof Slot) {
+    if (singleton(t.i)) out.push(VOID);
+    else if (seen.has(t.i)) out.push(VARN, t.i);
+    else {
+      seen.add(t.i);
+      out.push(VAR1, t.i);
+    }
+  } else if (t instanceof Cons) {
+    const at = out.length;
+    out.push(LIST, 0);
+    emitTerm(hp, t.head, out, singleton, seen);
+    emitTerm(hp, t.tail, out, singleton, seen);
+    out[at + 1] = out.length;
+  } else if (t instanceof Struct && t.args.length > 0) {
+    const at = out.length;
+    out.push(STRC, hp.functor(t.name, t.args.length), t.args.length, 0);
+    for (const a of t.args) emitTerm(hp, a, out, singleton, seen);
+    out[at + 3] = out.length;
+  } else if (typeof t === "string") out.push(CONST, hp.atom(t));
+  else if (t === NIL) out.push(CONST, hp.NIL);
+  else if (typeof t === "number" || typeof t === "bigint") {
+    const k = hp.int(t);
+    out.push((k & 7) === BOX ? BOXC : CONST, k);
+  } else if (t instanceof Float || t instanceof Str) out.push(BOXC, hp.box(t));
+  else throw new Error(`cell head program: no cell for ${String(t)}`);
+}
+
+/**
+ * The program of one template for compiled code (compile.ts) to match or build where the template is too large to
+ * compile node by node: slots in `seen` read their values from the slot array, and the others it sets join `seen`.
+ */
+export function termProgram(hp: Heap, t: Term, singleton: (i: number) => boolean, seen: Set<number>): Int32Array {
+  const out: number[] = [];
+  emitTerm(hp, t, out, singleton, seen);
+  return Int32Array.from(out);
+}
+
 /** The program of clause `c`'s head, and of its body for a rule. Time: linear in the clause. */
 export function headProgram(hp: Heap, c: Clause): HeadProgram {
   const count = new Map<number, number>();
@@ -60,45 +103,15 @@ export function headProgram(hp: Heap, c: Clause): HeadProgram {
   };
   countSlots(c.head);
   countSlots(c.body);
+  const singleton = (i: number): boolean => count.get(i) === 1;
   const seen = new Set<number>();
-  const emitter = (out: number[]): ((t0: Term) => void) => {
-    const emit = (t0: Term): void => {
-      const t = t0 instanceof Ground ? t0.t : t0;
-      if (t instanceof Slot) {
-        if (count.get(t.i) === 1) out.push(VOID);
-        else if (seen.has(t.i)) out.push(VARN, t.i);
-        else {
-          seen.add(t.i);
-          out.push(VAR1, t.i);
-        }
-      } else if (t instanceof Cons) {
-        const at = out.length;
-        out.push(LIST, 0);
-        emit(t.head);
-        emit(t.tail);
-        out[at + 1] = out.length;
-      } else if (t instanceof Struct && t.args.length > 0) {
-        const at = out.length;
-        out.push(STRC, hp.functor(t.name, t.args.length), t.args.length, 0);
-        t.args.forEach(emit);
-        out[at + 3] = out.length;
-      } else if (typeof t === "string") out.push(CONST, hp.atom(t));
-      else if (t === NIL) out.push(CONST, hp.NIL);
-      else if (typeof t === "number" || typeof t === "bigint") {
-        const k = hp.int(t);
-        out.push((k & 7) === BOX ? BOXC : CONST, k);
-      } else if (t instanceof Float || t instanceof Str) out.push(BOXC, hp.box(t));
-      else throw new Error(`cell head program: no cell for ${String(t)}`);
-    };
-    return emit;
-  };
   const head: number[] = [];
   const args = c.head instanceof Struct ? c.head.args : [];
-  args.forEach(emitter(head));
+  for (const a of args) emitTerm(hp, a, head, singleton, seen);
   let body: Int32Array | null = null;
   if (c.body !== "true") {
     const b: number[] = [];
-    emitter(b)(callSlots(c.body));
+    emitTerm(hp, callSlots(c.body), b, singleton, seen);
     body = Int32Array.from(b);
   }
   return { code: Int32Array.from(head), arity: args.length, body };
@@ -213,6 +226,11 @@ function match(hp: Heap, code: Int32Array, pc: number, c0: number, vals: Int32Ar
     }
   }
   throw new Error(`cell head program: opcode ${code[pc]}`);
+}
+
+/** Whether the one-template program `code` (termProgram) matches cell c, its slots in `vals`. */
+export function matchTerm(hp: Heap, code: Int32Array, c: number, vals: Int32Array, next: Int32Array): boolean {
+  return match(hp, code, 0, c, vals, next) >= 0;
 }
 
 /** Unify the head whose program is `prog` with argument cells A[0..arity); `vals` holds the slots. */

@@ -20,6 +20,7 @@ import { Ground, Slot, type Clause } from "../db";
 import { Cons, Float, NIL, Str, Struct, type Term } from "../terms";
 import { compareCells } from "./builtins";
 import { ATM, ATV, BOX, HEAP_CELLS, INT, LIS, REF, STR, type Heap } from "./heap";
+import { build, matchTerm, termProgram } from "./headprog";
 import { ENV, HEADFAIL, K_ALT, type CellMachine, type ClauseFn } from "./machine";
 
 /**
@@ -38,6 +39,14 @@ const HOT_AFTER = 1024;
  * below HEAP_CELLS minus it cannot write past the heap; the check at the step's start makes a full heap a hard error.
  */
 const STEP_CELLS = 1 << 20;
+/**
+ * Compound nodes a template may have for its head or building code to be generated node by node; a larger one runs as
+ * a head program (headprog.ts termProgram) through MATCH and BUILD, as the object compiler routes templates past its
+ * BUILD_NODES (24) through unifyHead and inst. Code per node made each of peano's depth-300 numeral facts hundreds of
+ * kilobytes of JavaScript, 29% of a depth-100 run compiling it (i-cell-peano-slow-1106).
+ * am[addresses i-cell-peano-slow-1106]
+ */
+const BUILD_NODES = 24;
 /** A file each compiled clause's source is appended to (PETTA_CELL_DUMP), for reading what was generated. */
 const DUMP = process.env.PETTA_CELL_DUMP;
 /** Goals that only test their arguments: they bind nothing and leave no choicepoint, so a condition of them needs none. */
@@ -93,6 +102,21 @@ function slotsOf(t: Term): number[] {
     else if (x instanceof Cons) st.push(x.head, x.tail);
   }
   return out;
+}
+
+/** Whether template t0 is a compound of more than BUILD_NODES compound nodes. Time: at most BUILD_NODES + 1 nodes. */
+function large(t0: Term): boolean {
+  let n = 0;
+  const st: Term[] = [t0];
+  while (st.length > 0) {
+    const x = st.pop()!;
+    const t = x instanceof Ground ? x.t : x;
+    if (t instanceof Cons) st.push(t.head, t.tail);
+    else if (t instanceof Struct && t.args.length > 0) st.push(...t.args);
+    else continue;
+    if (++n > BUILD_NODES) return true;
+  }
+  return false;
 }
 
 /** The cell of an atomic template. */
@@ -180,6 +204,7 @@ function runtime(cm: CellMachine): Runtime {
     else hp.unify(d, (p << 3) | LIS);
     return -p;
   };
+  const next = new Int32Array(1);
   rt = {
     // A number cell's value; anything else is evaluated by arith.ts on its object term, errors included.
     E: (c0: number): Num => {
@@ -293,11 +318,14 @@ function runtime(cm: CellMachine): Runtime {
     OVF: (): never => {
       throw new Error("cell heap exhausted");
     },
+    // A large template's head program matched against a cell, or built, its slots in the machine's slot array.
+    MATCH: (code: Int32Array, c: number): boolean => matchTerm(hp, code, c, cm.vals, next),
+    BUILD: (code: Int32Array): number => build(hp, code, 0, cm.vals, next),
   };
   runtimes.set(cm, rt);
   return rt;
 }
-const RT_NAMES = ["E", "NUM", "CMP", "ISVAR", "ISATOM", "ISNUM", "ISINT", "ISFLOAT", "ISATOMIC", "ISCOMPOUND", "ISCALLABLE", "ISLIST", "GROUND", "IDENT", "NUNIFY", "GC", "GB", "GSTR", "GLIS", "UV", "UVAL", "UVOID", "UC", "UB", "USTR", "ULIS", "OVF"];
+const RT_NAMES = ["E", "NUM", "CMP", "ISVAR", "ISATOM", "ISNUM", "ISINT", "ISFLOAT", "ISATOMIC", "ISCOMPOUND", "ISCALLABLE", "ISLIST", "GROUND", "IDENT", "NUNIFY", "GC", "GB", "GSTR", "GLIS", "UV", "UVAL", "UVOID", "UC", "UB", "USTR", "ULIS", "OVF", "MATCH", "BUILD"];
 
 /**
  * Make the goals compiled code runs inline also run natively when called through a procedure, as a meta-call or
@@ -405,6 +433,16 @@ class BodyCompiler {
       return ref(t.i);
     }
     const hp = this.cm.hp;
+    // A large template is built by its head program, every slot in it already set (a body variable exists before the
+    // body runs, a fresh output from its step on) and given to it through the slot array, the heap top handed over.
+    if (large(t)) {
+      b.heap = true;
+      const q = `q${this.names++}`;
+      const set = new Set(slotsOf(t).filter((i) => !this.singleton(i)));
+      const prog = this.k(termProgram(hp, t, this.singleton, new Set(set)));
+      b.lines.push(`${[...set].map((i) => `cm.vals[${i}] = ${ref(i)};`).join(" ")} hp.top = t; const ${q} = BUILD(${prog}); t = hp.top;`);
+      return q;
+    }
     if (t instanceof Cons) {
       b.heap = true;
       const q = `q${this.names++}`;
@@ -646,11 +684,16 @@ class CompactHead {
   constructor(
     private readonly hp: Heap,
     private readonly singleton: (i: number) => boolean,
+    private readonly bc: BodyCompiler,
   ) {}
 
   /** The get instructions for head argument template t0 against the cell expression `src`. */
   arg(t0: Term, src: string): void {
     const t = t0 instanceof Ground ? t0.t : t0;
+    if (large(t)) {
+      this.lines.push(`if (!MATCH(${this.bc.k(termProgram(this.hp, t, this.singleton, this.set))}, ${src})) return HF;`);
+      return;
+    }
     if (t instanceof Slot) {
       if (this.singleton(t.i)) return;
       if (!this.set.has(t.i)) {
@@ -709,7 +752,11 @@ class InlineHead {
   /** Slots are left in locals v<i>; the code builds at the local heap top t. */
   readonly inV = false;
   private names = 0;
-  constructor(private readonly hp: Heap) {}
+  constructor(
+    private readonly hp: Heap,
+    private readonly singleton: (i: number) => boolean,
+    private readonly bc: BodyCompiler,
+  ) {}
 
   arg(t: Term, src: string): void {
     this.lines.push(this.get(t, src));
@@ -743,6 +790,15 @@ class InlineHead {
   }
   private get(t0: Term, src: string): string {
     const t = t0 instanceof Ground ? t0.t : t0;
+    // A large template matches through its head program: the slots set before it go in through the slot array and the
+    // ones it sets come back out, the heap top handed over.
+    if (large(t)) {
+      const before = new Set(this.set);
+      const prog = this.bc.k(termProgram(this.hp, t, this.singleton, this.set));
+      const ins = [...new Set(slotsOf(t))].filter((i) => before.has(i)).map((i) => `cm.vals[${i}] = v${i};`).join(" ");
+      const outs = [...this.set].filter((i) => !before.has(i)).map((i) => `v${i} = cm.vals[${i}];`).join(" ");
+      return `{ ${ins} hp.top = t; if (!MATCH(${prog}, ${src})) return HF; t = hp.top; ${outs} } `;
+    }
     if (t instanceof Slot) {
       if (!this.set.has(t.i)) {
         this.set.add(t.i);
@@ -818,7 +874,7 @@ export function compileCellClause(cm: CellMachine, c: Clause, hot: boolean): Cla
   for (const i of [...slotsOf(c.head), ...slotsOf(c.body)]) count[i]!++;
   const singleton = (i: number): boolean => i < c.nvars && count[i] === 1;
   const bc = new BodyCompiler(cm, c.nvars, singleton);
-  const hc = hot ? new InlineHead(hp) : new CompactHead(hp, singleton);
+  const hc = hot ? new InlineHead(hp, singleton, bc) : new CompactHead(hp, singleton, bc);
   if (c.nvars > cm.vals.length) cm.vals = new Int32Array(2 * c.nvars);
   if (c.head instanceof Struct) c.head.args.forEach((t, i) => hc.arg(t, `A[${i}]`));
   const fact = c.body === "true";

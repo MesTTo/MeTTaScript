@@ -20,9 +20,11 @@ import { installConsult } from "../consult";
 import { installLibrary } from "../library";
 import { Machine } from "../machine";
 import { readClauses } from "../prolog-reader";
-import { Cons, Float, NIL, Struct, Var, deref, listToArray, mkVar, type Term } from "../terms";
+import { groundHash } from "../db";
+import { Cons, Float, NIL, Str, Struct, Var, deref, listToArray, mkVar, type Term } from "../terms";
 import { installTermBuiltins } from "./builtins";
 import { compileCellClause, installInlineBuiltins } from "./compile";
+import { Heap } from "./heap";
 import { CellMachine } from "./machine";
 
 const MAX_ANSWERS = 40;
@@ -326,6 +328,59 @@ describe("cell engine against the object machine", () => {
     // tg trails 200000 bindings under one choicepoint, past the trail's first 65536 entries, then undoes them all.
     expect(onCells(cm, "tg", [mkVar()])).toStrictEqual(onObjects(m, "tg", [mkVar()]));
     expect(onCells(cm, "tg", [mkVar()]).answers).toStrictEqual(['"unbound"']);
+  });
+
+  // am[verifies a-petta-cell-store.compile.steps] am[verifies a-petta-speed-1105.outliers.spaces]
+  it("runs deep templates and many-clause ground calls as the object machine does, cold and compiled", () => {
+    // Templates past BUILD_NODES compound nodes match and build through head programs; dpf has deep facts, dpr a deep
+    // rule head, dp3 a deep body term, each holding a variable 30 levels down. key/2 has 40 facts, so a call with a
+    // ground argument visits only its hash's positions, a retry included.
+    const deep = (d: number, inner: string): string => (d === 0 ? inner : `s(${deep(d - 1, inner)})`);
+    const keys = Array.from({ length: 40 }, (_, i) => `key(k${i % 7}, ${i}). key(${deep(26, `k${i % 3}`)}, d${i}).${i === 20 ? " key(V, open(V))." : ""}`).join("\n");
+    const src = `
+      dpf(${deep(30, "z")}).
+      dpf(${deep(30, "w")}).
+      dpf(${deep(29, "z")}).
+      dpr(${deep(30, "A")}, A) :- A = q.
+      dp1(X) :- dpf(X).
+      dp2(X) :- dpf(${deep(30, "X")}).
+      dp3(X) :- Y = ${deep(30, "X")}, dpf(Y).
+      dp4(X) :- dpr(${deep(30, "X")}, B), B == q.
+      dp5(X) :- X = f(${deep(28, "g(X1, X2)")}, X1), X1 = a, X2 = b.
+      ${keys}
+      kq1(X) :- key(k3, X).
+      kq2(X) :- key(${deep(26, "k1")}, X).
+      kq3(X) :- key(${deep(26, "k9")}, X).
+      kq4(X-Y) :- key(X, Y), Y > 37.
+    `;
+    const { m, cm } = machines();
+    for (const c of readClauses(src)) m.addClause(c, true);
+    for (let round = 0; round < 40; round++)
+      for (const name of ["dp1", "dp2", "dp3", "dp4", "dp5", "kq1", "kq2", "kq3", "kq4"]) {
+        const args = [mkVar()];
+        expect(onCells(cm, name, args), `${name} round ${round}`).toStrictEqual(onObjects(m, name, args));
+      }
+  });
+
+  // am[verifies a-petta-speed-1105.outliers.spaces]
+  it("hashes a ground cell term as db.ts groundHash hashes its object term", () => {
+    const hp = new Heap();
+    const leaf = fc.oneof(
+      fc.constantFrom<Term>("a", "[]", "Ã©", "", NIL, new Str("s"), new Str(""), new Float(1.5), new Float(-0), new Float(1)),
+      fc.integer({ min: -(2 ** 31), max: 2 ** 31 }) as fc.Arbitrary<Term>,
+      fc.bigInt({ min: -(2n ** 70n), max: 2n ** 70n }).filter((b) => b > BigInt(Number.MAX_SAFE_INTEGER) || b < BigInt(Number.MIN_SAFE_INTEGER)) as fc.Arbitrary<Term>,
+    );
+    const { t: ground } = fc.letrec((tie) => ({
+      t: fc.oneof({ depthSize: "small" }, leaf, tie("s"), tie("l")),
+      s: fc.tuple(fc.constantFrom("f", "g", "[|]"), fc.array(tie("t"), { minLength: 1, maxLength: 3 })).map(([n, a]) => new Struct(n, a as Term[]) as Term),
+      l: fc.tuple(tie("t"), tie("t")).map(([h, t]) => new Cons(h as Term, t as Term) as Term),
+    }));
+    fc.assert(
+      fc.property(ground as fc.Arbitrary<Term>, (t) => {
+        expect(hp.groundHash(hp.encode(t, new Map()))).toBe(groundHash(t));
+      }),
+      { numRuns: 500 },
+    );
   });
 
   it("runs recursive programs as the object machine does", () => {

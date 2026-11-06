@@ -294,6 +294,55 @@ export class Heap {
     return c;
   }
 
+  /**
+   * db.ts groundHash of the term at cell c0: the same FNV-1a over the same text as of its decoded object term, null
+   * where it has a variable, so a ground call argument is compared with the hashes stored for clause arguments
+   * (db.ts ArgHashIndex). Time: the term's size.
+   * am[implements a-petta-speed-1105.outliers.spaces]
+   */
+  groundHash(c0: number): number | null {
+    let h = 0x811c9dc5;
+    const mix = (s: string): void => {
+      for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 0x01000193);
+      }
+    };
+    const st: number[] = [c0];
+    while (st.length > 0) {
+      const c = this.deref(st.pop()!);
+      switch (c & 7) {
+        case ATM:
+          mix(c === this.NIL ? "n" : "a" + this.atomNames[c >> 3] + "\u0000");
+          break;
+        case INT:
+          mix("i" + (c >> 3) + "\u0000");
+          break;
+        case BOX: {
+          const v = this.boxes[c >> 3];
+          if (typeof v === "number" || typeof v === "bigint") mix("i" + v + "\u0000");
+          else if (v instanceof Float) mix("f" + (Object.is(v.v, -0) ? "-0" : String(v.v)) + "\u0000");
+          else if (v instanceof Str) mix("s" + v.s.length + ":" + v.s);
+          else return null;
+          break;
+        }
+        case LIS:
+          mix("l");
+          st.push(this.h[(c >> 3) + 1]!, this.h[c >> 3]!);
+          break;
+        case STR: {
+          const p = c >> 3, f = this.h[p]! >> 3, n = this.funArity[f]!;
+          mix("c" + this.funNames[f] + "/" + n + "\u0000");
+          for (let i = n; i >= 1; i--) st.push(this.h[p + i]!);
+          break;
+        }
+        default:
+          return null;
+      }
+    }
+    return h >>> 0;
+  }
+
   // ---- the bridge to object terms ----
 
   /**

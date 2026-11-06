@@ -10,7 +10,7 @@
 // place of objects (c-cell-control-design-1106).
 // am[implements a-petta-cell-store.control]
 
-import type { Clause, Pred } from "../db";
+import { argHashIndex, clauseArgHash, type Clause, type Pred } from "../db";
 import { copyTerm, type Builtin, type Machine } from "../machine";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "../swi-index";
 import { Halt, NIL, PrologError, Struct, existenceError, instantiationError, mkList, typeError, type Term } from "../terms";
@@ -49,8 +49,8 @@ export const ENV = 5;
 /**
  * A choicepoint at b: S[b] previous, S[b+1] kind, S[b+2] trail top, S[b+3] E, S[b+4] CP, S[b+5] cut barrier,
  * S[b+6] catch context, S[b+7] next candidate, S[b+8] the alternative's code id, S[b+9] heap top, S[b+10] the saved
- * argument count, the argument cells after; SO[b] and SO[b+1] a Clauses choicepoint's scan and predicate, GEN[b] its
- * generation.
+ * argument count, the argument cells after; SO[b], SO[b+1] and SO[b+2] a Clauses choicepoint's scan, predicate and
+ * call argument hashes, GEN[b] its generation.
  */
 export const CPH = 11;
 
@@ -80,6 +80,30 @@ const CONTROL = new Set([",/2", ";/2", "->/2", "*->/2", "\\+/1", "call/1", "once
 interface ColdFact {
   readonly prog: HeadProgram;
   tries: number;
+}
+
+const EMPTY_POS: number[] = [];
+
+/** The first index of ascending `a` holding a value at least x. Time: log of a's length. */
+function lowerBound(a: number[], x: number): number {
+  let lo = 0, hi = a.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (a[mid]! < x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/** Whether some argument is ground on both sides with different hashes, so the head cannot unify (Machine's hashesDiffer). */
+function hashesDiffer(call: (number | null)[], c: Clause): boolean {
+  for (let k = 0; k < call.length; k++) {
+    const a = call[k];
+    if (a === null || a === undefined) continue;
+    const b = clauseArgHash(c, k);
+    if (b !== null && a !== b) return true;
+  }
+  return false;
 }
 
 /** An error leaving a solve with its ball copied, attributes kept, as the object machine copies its balls. */
@@ -842,13 +866,52 @@ export class CellMachine {
     const h = cp < 0 ? R[RB]! : S[cp]!;
     const cands = scan.list, len = cands.length, key = scan.key;
     const keyAt = key === null ? null : scan.keyAt;
+    // On a long scan, ground call arguments are hashed once, kept with a choicepoint for its retries, and the scan
+    // visits only the positions where the argument with the fewest can match: those holding its hash or a non-ground
+    // argument (db.ts ArgHashIndex), skipping exactly the clauses hashesDiffer rules out, so the lookahead below sees
+    // what it saw before and choicepoints stay where SWI's do (Machine.tryClauses, a-petta-speed-1105.outliers.spaces).
+    // am[implements a-petta-speed-1105.outliers.spaces]
+    const callHashes = cp >= 0 ? (this.SO[cp + 2] as (number | null)[] | null) : len - start > 8 ? this.groundArgHashes(pred.arity) : null;
+    let posA: number[] | null = null;
+    let posB: number[] = EMPTY_POS;
+    let ia = 0;
+    let ib = 0;
+    if (callHashes !== null) {
+      let best = Infinity;
+      for (let p = 0; p < callHashes.length; p++) {
+        const hc = callHashes[p];
+        if (hc === null || hc === undefined) continue;
+        const ix = argHashIndex(cands, p);
+        const b = ix.byHash.get(hc);
+        const a = b === undefined ? EMPTY_POS : typeof b === "number" ? [b] : b;
+        const n = a.length + ix.open.length;
+        if (n < best) {
+          best = n;
+          posA = a;
+          posB = ix.open;
+        }
+      }
+      if (posA !== null) {
+        ia = lowerBound(posA, start);
+        ib = lowerBound(posB, start);
+      }
+    }
     for (let i = start; i < len; i++) {
+      if (posA !== null) {
+        while (ia < posA.length && posA[ia]! < i) ia++;
+        while (ib < posB.length && posB[ib]! < i) ib++;
+        const na = ia < posA.length ? posA[ia]! : len;
+        const nb = ib < posB.length ? posB[ib]! : len;
+        i = na < nb ? na : nb;
+        if (i >= len) break;
+      }
       const c = cands[i]!;
       if (c.born > gen || c.died <= gen) continue;
       if (keyAt !== null) {
         const k = keyAt(c);
         if (k !== null && k !== key) continue;
       }
+      if (callHashes !== null && hashesDiffer(callHashes, c)) continue;
       let j = i + 1;
       for (let budget = MAX_LOOKAHEAD; j < len; j++) {
         const d = cands[j]!;
@@ -864,6 +927,7 @@ export class CellMachine {
           cp = this.pushCP(K_CLAUSES, h, cc, pred.arity);
           this.SO[cp] = scan;
           this.SO[cp + 1] = pred;
+          this.SO[cp + 2] = callHashes;
           this.GEN[cp] = gen;
         } else hp.hb = hp.top;
         S[cp + 7] = j;
@@ -882,6 +946,18 @@ export class CellMachine {
     }
     if (cp >= 0) this.popCP(cp);
     return undefined;
+  }
+
+  /** groundHash of each of A[0..n), or null when none is ground (Machine's groundArgHashes). Time: their size. */
+  private groundArgHashes(n: number): (number | null)[] | null {
+    let any = false;
+    const out = new Array<number | null>(n);
+    for (let i = 0; i < n; i++) {
+      const h = this.hp.groundHash(this.A[i]!);
+      if (h !== null) any = true;
+      out[i] = h;
+    }
+    return any ? out : null;
   }
 
   /** Run the trampoline from `f` until a run's exit, a thrown ball unwinding to its catch (unwind). */
