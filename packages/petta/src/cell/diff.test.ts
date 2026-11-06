@@ -120,6 +120,8 @@ function operand(pool: Var[]): fc.Arbitrary<Term> {
   return fc.oneof(fc.constantFrom<Term>(...pool), fc.integer({ min: 0, max: 3 }) as fc.Arbitrary<Term>);
 }
 const conj = (gs: Term[]): Term => (gs.length === 0 ? "true" : gs.reduceRight((acc, g) => new Struct(",", [g, acc])));
+/** Goal t with every cut replaced by true. */
+const noCut = (t: Term): Term => (t === "!" ? "true" : t instanceof Struct ? new Struct(t.name, t.args.map(noCut)) : t);
 
 /** A body goal of predicate p<i> over `pool`; calls go only to later predicates, so every query terminates. */
 function goal(i: number, preds: number, pool: Var[], depth: number): fc.Arbitrary<Term> {
@@ -159,7 +161,9 @@ function goal(i: number, preds: number, pool: Var[], depth: number): fc.Arbitrar
     { weight: 1, arbitrary: body.map((g) => new Struct("\\+", [g]) as Term) },
     // Meta-calls: a goal run by call/1, and one bound to a variable and then run, its cut local to it.
     { weight: 1, arbitrary: body.map((g) => new Struct("call", [g]) as Term) },
-    { weight: 1, arbitrary: fc.tuple(fc.constantFrom<Term>(...pool), body).map(([v, g]) => new Struct(",", [new Struct("=", [v, g]), v]) as Term) },
+    // A goal bound to a variable and then run: without cut, since the object machine lets a cut in such a goal cut
+    // its clause where SWI keeps it local (i-obj-varcall-cut-1106).
+    { weight: 1, arbitrary: fc.tuple(fc.constantFrom<Term>(...pool), body).map(([v, g]) => new Struct(",", [new Struct("=", [v, noCut(g)]), v]) as Term) },
     { weight: 1, arbitrary: fc.tuple(body, fc.constantFrom<Term>(...pool)).map(([g, v]) => new Struct("call", [new Struct(",", [g, "!"]), v]) as Term) },
   );
 }

@@ -6,13 +6,12 @@
 // bindings and errors (builtins.ts, library.ts) without decoding its arguments: the standard order (compare/3, @</2
 // and the rest, ==/2), variance (=@=/2), subsumes_term/2, functor/3, arg/3, =../2, copy_term/2, cyclic_term/1,
 // term_variables/2,3, length/2 and the sorts. A mode that needs a generator (arg/3 with an unbound index, length/2 of a
-// partial list with an unbound length) goes to the object builtin through the bridge.
+// partial list with an unbound length) goes to the object builtin's generator through the bridge.
 // am[implements a-petta-cell-store.builtins.terms]
 
 import { compareNum, type Num } from "../arith";
 import { cmpStr } from "../builtins";
 import { Float, NIL, Str, domainError, instantiationError, typeError } from "../terms";
-import { bridgeBuiltin } from "./bridge";
 import { ATM, ATV, BOX, HEAP_CELLS, INT, LIS, REF, STR, boxEq, type Heap } from "./heap";
 import { copyTerm } from "../machine";
 import type { Term } from "../terms";
@@ -276,10 +275,19 @@ export function installTermBuiltins(cm: CellMachine): void {
   const def = (name: string, arity: number, f: () => boolean): void => {
     cm.proc(name, arity).det = f;
   };
-  const viaBridge = (name: string, arity: number): ((cm: CellMachine, n: number) => boolean) => {
-    const b = cm.om.builtins.get(`${name}/${arity}`);
-    if (b === undefined) throw new Error(`cell builtins: no object builtin ${name}/${arity}`);
-    return bridgeBuiltin(`${name}/${arity}`, b);
+  // A builtin deterministic in some modes: f answers those (true or false), null leaves the call to the object
+  // builtin's generator through the bridge (Machine.callNondet).
+  const detOr = (name: string, arity: number, f: () => boolean | null): void => {
+    const key = `${name}/${arity}`;
+    const b = cm.om.builtins.get(key);
+    if (b === undefined) throw new Error(`cell builtins: no object builtin ${key}`);
+    cm.proc(name, arity).ctl = (m, n, cc) => {
+      const r = f();
+      if (r === null) return m.callNondet(key, b, n, cc);
+      if (!r) return m.fail();
+      if (hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
+      return m.proceed();
+    };
   };
   const unify = (x: number, y: number): boolean => hp.unify(x, y);
   const cmp = (): number => compareCells(hp, A[0]!, A[1]!);
@@ -332,8 +340,7 @@ export function installTermBuiltins(cm: CellMachine): void {
     return unify(A[1]!, d) && unify(A[2]!, hp.int(0));
   });
 
-  const argBridge = viaBridge("arg", 3);
-  def("arg", 3, () => {
+  detOr("arg", 3, () => {
     const d = hp.deref(A[1]!);
     if ((d & 7) !== STR && (d & 7) !== LIS) throw typeError("compound", culprit(hp, d));
     const nd = hp.deref(A[0]!);
@@ -344,7 +351,7 @@ export function installTermBuiltins(cm: CellMachine): void {
       return k >= 1 && k <= n && unify(A[2]!, H[p + k - 1]!);
     }
     // An unbound index enumerates the arguments: the object builtin's generator.
-    if (isVarTag(nd)) return argBridge(cm, 3);
+    if (isVarTag(nd)) return null;
     return false;
   });
 
@@ -374,8 +381,7 @@ export function installTermBuiltins(cm: CellMachine): void {
   def("term_variables", 2, () => unify(A[1]!, listCells(hp, varsOf(hp, A[0]!), hp.NIL)));
   def("term_variables", 3, () => unify(A[1]!, listCells(hp, varsOf(hp, A[0]!), A[2]!)));
 
-  const lengthBridge = viaBridge("length", 2);
-  def("length", 2, () => {
+  detOr("length", 2, () => {
     let t = hp.deref(A[0]!);
     let count = 0;
     while ((t & 7) === LIS) {
@@ -393,7 +399,7 @@ export function installTermBuiltins(cm: CellMachine): void {
       return unify(t, listCells(hp, extra, hp.NIL));
     }
     // A partial list of unbound length enumerates lengths: the object builtin's generator.
-    return lengthBridge(cm, 2);
+    return null;
   });
 
   // Sorting: Array.prototype.sort is stable, as the object builtins rely on.

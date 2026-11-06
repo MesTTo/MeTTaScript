@@ -58,6 +58,8 @@ export class Heap {
   readonly funArity: number[] = [];
   /** The empty list, an atom id of its own: SWI 7 keeps [] apart from the atom '[]'. */
   readonly NIL: number;
+  /** The object compounds encode is inside of now, each with the cell built for it, which a cycle back to it takes. */
+  private readonly encoding = new Map<object, number>();
   /** The compounds decode is inside of now, each with the variable standing for it once a cycle reaches it. */
   private readonly onPath = new Map<number, Var | null>();
   /** Attributes woken by bindings since the machine last ran them. */
@@ -256,26 +258,38 @@ export class Heap {
       return c;
     }
     if (t instanceof Cons) {
+      // An object compound met again on its own path is a cycle: it encodes to the cell built for it.
+      const seen = this.encoding.get(t);
+      if (seen !== undefined) return seen;
       // A list spine is laid out cell pair by cell pair, iteratively, so a long list costs no JS stack.
       const first = this.alloc(2);
+      const spine: Cons[] = [t];
+      this.encoding.set(t, (first << 3) | LIS);
       this.h[first] = this.encode(t.head, vars);
       let last = first;
       let rest = derefObj(t.tail);
-      while (rest instanceof Cons) {
+      while (rest instanceof Cons && !this.encoding.has(rest)) {
         const a = this.alloc(2);
         this.h[last + 1] = (a << 3) | LIS;
+        spine.push(rest);
+        this.encoding.set(rest, (a << 3) | LIS);
         this.h[a] = this.encode(rest.head, vars);
         last = a;
         rest = derefObj(rest.tail);
       }
       this.h[last + 1] = this.encode(rest, vars);
+      for (const c of spine) this.encoding.delete(c);
       return (first << 3) | LIS;
     }
     if (t instanceof Struct) {
+      const seen = this.encoding.get(t);
+      if (seen !== undefined) return seen;
       const n = t.args.length;
       const a = this.alloc(n + 1);
       this.h[a] = this.functor(t.name, n);
+      this.encoding.set(t, (a << 3) | STR);
       for (let i = 0; i < n; i++) this.h[a + 1 + i] = this.encode(t.args[i]!, vars);
+      this.encoding.delete(t);
       return (a << 3) | STR;
     }
     // Float and Str.

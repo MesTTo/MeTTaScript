@@ -2,8 +2,8 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Purpose: differential property test of the native term builtins on cells (builtins.ts) against the object machine's
-// builtins: random arguments over shared and attributed variables, small and big integers, floats with -0.0 and NaN,
+// Purpose: differential property test of the native term builtins on cells (builtins.ts), and of the text builtins
+// through the bridge (bridge.ts), against the object machine's builtins: random arguments over shared and attributed variables, small and big integers, floats with -0.0 and NaN,
 // strings, atoms with '[]' and [], compounds, proper and partial lists and pairs, each call run on both engines, its
 // answers compared in order with the arguments' bindings and, when it throws, the error term. A call the cell engine
 // can only answer with a generator it does not have yet is skipped.
@@ -59,6 +59,9 @@ function run(solve: (each: () => boolean) => void, show: () => string): Outcome 
     return { answers, error: null };
   } catch (e) {
     if (e instanceof PrologError) return { answers, error: canon([e.ball]) };
+    // A JS error the object builtin raises itself (atom_length/2 of a code beyond Unicode raises RangeError) must
+    // be raised alike; one the cell engine raises for what it lacks is no outcome.
+    if (e instanceof Error && !/not built yet/.test(e.message)) return { answers, error: `js ${e.name}` };
     throw e;
   }
 }
@@ -131,7 +134,8 @@ function atomic(): fc.Arbitrary<Term> {
   );
 }
 function term(vs: Var[], depth: number): fc.Arbitrary<Term> {
-  const leaf = fc.oneof({ weight: 3, arbitrary: atomic() }, { weight: 2, arbitrary: fc.constantFrom<Term>(...vs) });
+  // An empty pool gives ground terms.
+  const leaf = vs.length === 0 ? atomic() : fc.oneof({ weight: 3, arbitrary: atomic() }, { weight: 2, arbitrary: fc.constantFrom<Term>(...vs) });
   if (depth <= 0) return leaf;
   const sub = term(vs, depth - 1);
   return fc.oneof(
@@ -172,7 +176,37 @@ const CASES: [string, (vs: Var[]) => fc.Arbitrary<Term>[]][] = [
   ["msort", (vs) => [fc.oneof(list(term(vs, 1), vs), term(vs, 1)), term(vs, 1)]],
   ["sort", (vs) => [fc.oneof(list(term(vs, 1), vs), term(vs, 1)), term(vs, 1)]],
   ["keysort", (vs) => [fc.oneof(list(term(vs, 1), vs), list(fc.tuple(term(vs, 1), term(vs, 1)).map(([k, v]) => new Struct("-", [k, v]) as Term), vs)), term(vs, 1)]],
+  // Text builtins run through the bridge (bridge.ts): their results must come back as the object builtin gives them.
+  ["atom_length", (vs) => [fc.oneof(text(vs), term(vs, 1)), fc.oneof(fc.integer({ min: -1, max: 4 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs), atomic())]],
+  ["atom_chars", (vs) => [fc.oneof(text(vs), fc.constantFrom<Term>(...vs)), fc.oneof(chars(vs), fc.constantFrom<Term>(...vs))]],
+  ["atom_codes", (vs) => [fc.oneof(text(vs), fc.constantFrom<Term>(...vs)), fc.oneof(codes(vs), fc.constantFrom<Term>(...vs))]],
+  ["char_code", (vs) => [fc.oneof(fc.constantFrom<Term>("a", "é", "ab"), fc.constantFrom<Term>(...vs)), fc.oneof(fc.integer({ min: 96, max: 99 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs))]],
+  ["atom_number", (vs) => [fc.oneof(fc.constantFrom<Term>("12", "1.5", "x", "0x1f", "-3"), fc.constantFrom<Term>(...vs)), fc.oneof(fc.integer({ min: -3, max: 12 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs))]],
+  ["number_codes", (vs) => [fc.oneof(fc.integer({ min: -3, max: 30 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs)), fc.oneof(codes(vs), fc.constantFrom<Term>(...vs))]],
+  // Deterministic modes: the first two arguments bound (splitting an atom needs the generator).
+  ["atom_concat", (vs) => [text(vs), text(vs), fc.oneof(text(vs), fc.constantFrom<Term>(...vs))]],
+  ["atom_string", (vs) => [fc.oneof(text(vs), fc.constantFrom<Term>(...vs)), fc.oneof(text(vs), fc.constantFrom<Term>(...vs))]],
+  ["string_concat", (vs) => [text(vs), text(vs), fc.oneof(text(vs), fc.constantFrom<Term>(...vs))]],
+  ["string_chars", (vs) => [fc.oneof(text(vs), fc.constantFrom<Term>(...vs)), fc.oneof(chars(vs), fc.constantFrom<Term>(...vs))]],
+  ["string_codes", (vs) => [fc.oneof(text(vs), fc.constantFrom<Term>(...vs)), fc.oneof(codes(vs), fc.constantFrom<Term>(...vs))]],
+  ["upcase_atom", (vs) => [fc.oneof(text(vs), fc.constantFrom<Term>(...vs)), fc.oneof(text(vs), fc.constantFrom<Term>(...vs))]],
+  // Deterministic modes: the start and the length given.
+  ["sub_atom", (vs) => [text(vs), fc.integer({ min: 0, max: 3 }) as fc.Arbitrary<Term>, fc.integer({ min: 0, max: 3 }) as fc.Arbitrary<Term>, fc.oneof(fc.integer({ min: 0, max: 3 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs)), fc.oneof(text(vs), fc.constantFrom<Term>(...vs))]],
+  // A written unbound variable is named by its engine's numbering, so a written term is ground.
+  ["term_to_atom", (vs) => [fc.oneof(term([], 2), fc.constantFrom<Term>(...vs)), fc.oneof(fc.constantFrom<Term>("f(X, Y, X)", "[1, 2 | T]", "'a b'", "g(", "\"s\""), fc.constantFrom<Term>(...vs))]],
 ];
+
+/** Text arguments: atoms with letters, digits, spaces and accents, strings, numbers. */
+function text(_vs: Var[]): fc.Arbitrary<Term> {
+  return fc.oneof(fc.constantFrom<Term>("", "a", "ab", "abc", "a b", "é", "12", "x1", "[]", NIL), fc.constantFrom<Term>(new Str(""), new Str("ab"), new Str("é z")), fc.integer({ min: -3, max: 30 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(new Float(1.5)));
+}
+/** Character and code lists, some partial or with a wrong element. */
+function chars(vs: Var[]): fc.Arbitrary<Term> {
+  return list(fc.oneof(fc.constantFrom<Term>("a", "b", "é", " ", "1"), fc.constantFrom<Term>(...vs), fc.constantFrom<Term>("ab", 3)), vs);
+}
+function codes(vs: Var[]): fc.Arbitrary<Term> {
+  return list(fc.oneof(fc.integer({ min: 48, max: 122 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs), fc.constantFrom<Term>("a", -1)), vs);
+}
 
 describe("native term builtins on cells", () => {
   for (const [name, gen] of CASES)

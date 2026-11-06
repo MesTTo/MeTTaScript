@@ -11,11 +11,11 @@
 // am[implements a-petta-cell-store.control]
 
 import type { Clause, Pred } from "../db";
-import type { Machine } from "../machine";
+import { copyTerm, type Builtin, type Machine } from "../machine";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "../swi-index";
-import { NIL, Struct, existenceError, instantiationError, typeError } from "../terms";
+import { NIL, PrologError, Struct, existenceError, instantiationError, typeError } from "../terms";
 import { CellArgs } from "./args";
-import { bridgeBuiltin } from "./bridge";
+import { bridgeBuiltin, nextSolution, objectTrailMark, startNondet, takeSolution, type BridgeRun } from "./bridge";
 import { headProgram, runHead, type HeadProgram } from "./headprog";
 import { ATM, ATV, Heap, REF, STR } from "./heap";
 
@@ -28,6 +28,8 @@ export const HEADFAIL = Object.freeze({ headFailed: true }) as unknown as Code;
 /** Choicepoint kinds at S[b + 1]. */
 export const K_CLAUSES = 0;
 export const K_ALT = 1;
+/** A nondeterministic builtin's generator (bridge.ts): SO[b] its run, S[b + 7] the object trail mark. */
+export const K_BRIDGE = 2;
 export const K_BARRIER = 7;
 
 // Registers, as indexes of R: E, CP, B, CC, the run's barrier, the cut barrier a clause is entered with.
@@ -68,6 +70,11 @@ const CONTROL = new Set([",/2", ";/2", "->/2", "*->/2", "\\+/1", "call/1", "once
 interface ColdFact {
   readonly prog: HeadProgram;
   tries: number;
+}
+
+/** An error leaving a solve with its ball copied, plain variables for attributed ones, as the object machine's are. */
+function copiedBall(e: unknown): unknown {
+  return e instanceof PrologError ? new PrologError(copyTerm(e.ball)) : e;
 }
 
 /** A procedure as compiled code calls it: the predicate once one exists, or a native builtin over cells. */
@@ -354,6 +361,23 @@ export class CellMachine {
           R[RCP] = S[b + 4]!;
           this.lastAlt = b;
           return this.CODE[S[b + 8]!]!;
+        case K_BRIDGE: {
+          // The generator's next solution: none pops this choicepoint and backtracks further; the last pops it and
+          // goes on; another keeps it. A solution the cells do not take backtracks again.
+          R[RE] = S[b + 3]!;
+          R[RCP] = S[b + 4]!;
+          const run = this.SO[b] as BridgeRun;
+          const r = nextSolution(this, run);
+          if (r === 0) {
+            this.popCP(b);
+            continue;
+          }
+          if (r === 1) this.popCP(b);
+          else hp.hb = hp.top;
+          if (!takeSolution(this, run, S[b + 7]!)) continue;
+          if (hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
+          return this.CODE[R[RCP]!]!;
+        }
         default:
           throw new Error(`cell machine: choicepoint kind ${S[b + 1]} is not built yet`);
       }
@@ -523,6 +547,28 @@ export class CellMachine {
     return this.callw(this.funProc(f), total, cc);
   }
 
+  /**
+   * Call nondeterministic object builtin `b` named `key` on A[0..n) through the bridge: its first solution, with a
+   * choicepoint (K_BRIDGE) resuming its generator when more may follow.
+   */
+  callNondet(key: string, b: Builtin, n: number, cc: number): Code | null {
+    const run = startNondet(this, key, b, n);
+    if (run === false) return this.fail();
+    if (run !== true) {
+      const mark = objectTrailMark(this);
+      const r = nextSolution(this, run);
+      if (r === 0) return this.fail();
+      if (r === 2) {
+        const bp = this.pushCP(K_BRIDGE, 0, cc, 0);
+        this.SO[bp] = run;
+        this.S[bp + 7] = mark;
+      }
+      if (!takeSolution(this, run, mark)) return this.fail();
+    }
+    if (this.hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
+    return this.proceed();
+  }
+
   /** Call `p` with A[0..n), the continuation being the current one. */
   callw(p: CellProc, n: number, cc: number): Code | null {
     if (p.det !== undefined) {
@@ -536,7 +582,8 @@ export class CellMachine {
       // A builtin comes before a predicate of its key, as the object machine resolves calls (Machine.callCell).
       const b = this.om.builtins.get(p.key);
       if (b !== undefined) {
-        p.det = bridgeBuiltin(p.key, b);
+        if (b.nondet !== undefined) p.ctl = (cm, k, c) => cm.callNondet(p.key, b, k, c);
+        else p.det = bridgeBuiltin(p.key, b);
         return this.callw(p, n, cc);
       }
       pred = p.pred = this.om.db.preds.get(p.key);
@@ -621,6 +668,8 @@ export class CellMachine {
         if (!this.result || each(R[RB] !== bar) === false) break;
         f = this.fail();
       }
+    } catch (e) {
+      throw copiedBall(e);
     } finally {
       hp.undo(S[bar + 2]!);
       hp.top = S[bar + 9]!;
@@ -677,6 +726,8 @@ export class CellMachine {
       while (f !== null) f = f();
       this.cutTo(sB);
       return this.result;
+    } catch (e) {
+      throw copiedBall(e);
     } finally {
       R[RE] = sE;
       R[RCP] = sCP;
