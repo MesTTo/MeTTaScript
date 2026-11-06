@@ -332,6 +332,32 @@ describe("cell engine against the object machine", () => {
     expect(onCells(cm, "tg", [mkVar()]).answers).toStrictEqual(['"unbound"']);
   });
 
+  // am[verifies a-petta-cell-store.runtime.rest]
+  it("answers tabled predicates from tables as the object machine does", () => {
+    const src = `
+      fib(0, 0).
+      fib(1, 1).
+      fib(N, F) :- N > 1, N1 is N - 1, N2 is N - 2, fib(N1, F1), fib(N2, F2), F is F1 + F2.
+      tdup(X) :- mem(X, [a, b, a, c, b]).
+      tvar(X-Y) :- mem(X-Y, [1-_, 2-b, 1-_]).
+      mem(X, [X|_]).
+      mem(X, [_|T]) :- mem(X, T).
+      tb1(F) :- fib(15, F).
+      tb2(F) :- fib(15, F), fib(10, G), fib(15, H), F == H, G == 55.
+      tb3(X) :- tdup(X).
+      tb4(L) :- findall(X, tvar(X), L).
+      tb5(X) :- tdup(X), !.
+    `;
+    for (const name of ["tb1", "tb2", "tb3", "tb4", "tb5"]) {
+      const a = machines(), b = machines();
+      for (const m of [a.m, b.m]) {
+        for (const c of readClauses(src)) m.addClause(c, true);
+        for (const k of ["fib/2", "tdup/1", "tvar/1"]) m.tabled.add(k);
+      }
+      expect(onCells(b.cm, name, [mkVar()]), name).toStrictEqual(onObjects(a.m, name, [mkVar()]));
+    }
+  });
+
   // am[verifies a-petta-cell-store.compile.steps] am[verifies a-petta-speed-1105.outliers.spaces]
   it("runs deep templates and many-clause ground calls as the object machine does, cold and compiled", () => {
     // Templates past BUILD_NODES compound nodes match and build through head programs; dpf has deep facts, dpr a deep

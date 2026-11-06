@@ -1808,7 +1808,7 @@ export class Machine {
 }
 
 /** A string identifying a term up to variable renaming, for table keys. */
-function variantKeyOf(t: Term): string {
+export function variantKeyOf(t: Term): string {
   const names = new Map<Var, number>();
   const go = (x: Term): string => {
     x = deref(x);

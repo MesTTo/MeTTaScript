@@ -11,7 +11,7 @@
 // am[implements a-petta-cell-store.control]
 
 import { argHashIndex, clauseArgHash, type Clause, type Pred } from "../db";
-import { copyTerm, type Builtin, type Machine } from "../machine";
+import { copyTerm, variantKeyOf, type Builtin, type Machine } from "../machine";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "../swi-index";
 import { Halt, NIL, PrologError, Struct, existenceError, instantiationError, mkList, typeError, type Term } from "../terms";
 import { CellArgs } from "./args";
@@ -837,21 +837,96 @@ export class CellMachine {
         }
         return this.callw(p, n, cc);
       }
-      // A tabled predicate answers from its tables (Machine.callTabled), which the cell engine does not run yet.
-      const om = this.om;
-      if (om.tabled.size > 0 && om.tabled.has(p.key)) throw new Error(`cell engine: the tabled predicate ${p.key} is not built yet`);
-      pred = p.pred = om.db.preds.get(p.key);
-      // An undefined predicate a library exports loads that library (SWI's autoloader, Machine.autoload); one still
-      // undefined fails under the unknown flag's fail and raises existence_error otherwise, as Machine.callCell does.
-      if (pred === undefined && om.autoload !== null && om.autoload(p.name, p.arity)) pred = p.pred = om.db.preds.get(p.key);
-      if (pred === undefined) {
-        if (om.flags.get("unknown") === "fail") return this.fail();
-        throw existenceError("procedure", new Struct("/", [p.name, p.arity]));
+      // A tabled predicate answers from its tables (Machine.callTabled).
+      if (this.om.tabled.size > 0 && this.om.tabled.has(p.key)) {
+        p.ctl = (cm, k, c) => cm.tabledCall(p, k, c);
+        return this.callw(p, n, cc);
       }
+      const r = this.resolve(p);
+      if (r === undefined) return this.fail();
+      pred = r;
     }
     const scan = clauseScan(pred, this.args);
     const r = this.tryClauses(pred, scan, scan.start, this.om.db.generation, cc, -1);
     return r === undefined ? this.fail() : r;
+  }
+
+  /**
+   * The predicate `p` calls, cached on it: an undefined predicate a library exports loads that library (SWI's
+   * autoloader, Machine.autoload); one still undefined is undefined under the unknown flag's fail and raises
+   * existence_error otherwise, as Machine.callCell does.
+   */
+  private resolve(p: CellProc): Pred | undefined {
+    const om = this.om;
+    let pred = (p.pred = om.db.preds.get(p.key));
+    if (pred === undefined && om.autoload !== null && om.autoload(p.name, p.arity)) pred = p.pred = om.db.preds.get(p.key);
+    if (pred === undefined && om.flags.get("unknown") !== "fail") throw existenceError("procedure", new Struct("/", [p.name, p.arity]));
+    return pred;
+  }
+
+  /**
+   * A call of tabled predicate `p` with A[0..n), as Machine.callTabled answers it: the first call of a variant solves
+   * it to completion on cells with `p` untabled, so its own recursive calls run the clauses, keeping its distinct
+   * answers up to variance in the object machine's tables, which both engines share; every call then answers from
+   * its variant's table as a nondeterministic builtin would. While its table fills, `p` is untabled and a call of it
+   * runs its clauses. Time: the solve once per variant, then the answers each call tries.
+   * am[implements a-petta-cell-store.runtime.rest]
+   */
+  tabledCall(p: CellProc, n: number, cc: number): Code | null {
+    const om = this.om, hp = this.hp, H = hp.h, A = this.A;
+    if (!om.tabled.has(p.key)) {
+      const pred = p.pred ?? this.resolve(p);
+      if (pred === undefined) return this.fail();
+      const scan = clauseScan(pred, this.args);
+      const r = this.tryClauses(pred, scan, scan.start, om.db.generation, cc, -1);
+      return r === undefined ? this.fail() : r;
+    }
+    const args: Term[] = [];
+    for (let i = 0; i < n; i++) args.push(hp.decode(A[i]!, new Map()));
+    const vkey = variantKeyOf(new Struct(p.name, args));
+    let answers = om.tables.get(vkey);
+    if (answers === undefined) {
+      om.tables.set(vkey, (answers = []));
+      if (om.db.get(p.name, n) !== undefined) {
+        // The call as a goal cell; the solve undoes every binding it makes, so the caller's arguments stay as they are.
+        let g: number;
+        if (n === 0) g = hp.atom(p.name);
+        else {
+          const q = hp.alloc(n + 1);
+          H[q] = hp.functor(p.name, n);
+          for (let i = 0; i < n; i++) H[q + 1 + i] = A[i]!;
+          g = (q << 3) | STR;
+        }
+        const seen = new Set<string>();
+        const found: Term[] = [];
+        // The solve reuses the argument registers, which the answering below reads.
+        const saved = A.slice(0, n);
+        om.tabled.delete(p.key);
+        try {
+          this.solveEach(g, () => {
+            const a = copyTerm(hp.decode(g, new Map()));
+            const k = variantKeyOf(a);
+            if (!seen.has(k)) {
+              seen.add(k);
+              found.push(a);
+            }
+          });
+        } finally {
+          om.tabled.add(p.key);
+          A.set(saved);
+        }
+        answers.push(...found);
+      }
+    }
+    const list = answers.slice(), name = p.name;
+    const table: Builtin = {
+      nondet: function* (m: Machine, as: Term[]) {
+        const goal = new Struct(name, as);
+        for (const a of list) if (m.unify(goal, copyTerm(a))) yield;
+        return false;
+      },
+    };
+    return this.callNondet(p.key, table, n, cc);
   }
 
   /**
