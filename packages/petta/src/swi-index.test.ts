@@ -12,8 +12,10 @@ import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { Ground, Slot, type Clause } from "./db";
 import { Machine } from "./machine";
-import { clauseScan, type Scan } from "./swi-index";
+import { clauseScan, type Args, type Scan } from "./swi-index";
 import { Cons, Float, NIL, Str, Struct, Var, mkVar, type Term } from "./terms";
+import { CellArgs } from "./cell/args";
+import { Heap } from "./cell/heap";
 
 const atomic = fc.oneof(
   fc.constantFrom<Term>("a", "b", "[]", NIL, new Float(1), new Float(-0), new Str("s"), 2n ** 70n),
@@ -79,6 +81,7 @@ describe("clause selection on a changing dynamic predicate", () => {
     fc.assert(
       fc.property(fc.array(op, { minLength: 1, maxLength: 48 }), (ops) => {
         const m = new Machine();
+        const hp = new Heap();
         for (const o of ops) {
           if (o.k === "z" || o.k === "a") m.addClause(new Struct("p", [o.x, o.y]), o.k === "z");
           const pred = m.db.preds.get("p/2");
@@ -89,8 +92,9 @@ describe("clause selection on a changing dynamic predicate", () => {
             continue;
           }
           if (o.k !== "c") continue;
-          {
-            const args = [o.x, o.y];
+          const vars = new Map();
+          const cells = new CellArgs(hp, new Int32Array([hp.encode(o.x, vars), hp.encode(o.y, vars)]), 0);
+          for (const args of [[o.x, o.y], cells] as Args[]) {
             const got = admitted(clauseScan(pred, args));
             const want = live.filter((c) => headArgs(c).every((h, i) => compatible(h, i === 0 ? o.x : o.y)));
             expect(want.every((c) => got.includes(c))).toBe(true);
