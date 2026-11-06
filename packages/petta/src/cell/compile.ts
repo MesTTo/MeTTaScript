@@ -17,7 +17,8 @@ import { appendFileSync } from "node:fs";
 import { BINARY_FNS, UNARY_FNS, evalArith, numCompare, type Num } from "../arith";
 import { Ground, Slot, type Clause } from "../db";
 import { Cons, Float, NIL, Str, Struct, type Term } from "../terms";
-import { ATM, ATV, BOX, HEAP_CELLS, INT, LIS, REF, STR, boxEq, type Heap } from "./heap";
+import { compareCells } from "./builtins";
+import { ATM, ATV, BOX, HEAP_CELLS, INT, LIS, REF, STR, type Heap } from "./heap";
 import { ENV, HEADFAIL, K_ALT, type CellMachine, type ClauseFn } from "./machine";
 
 /**
@@ -133,25 +134,8 @@ function runtime(cm: CellMachine): Runtime {
     const t = hp.deref(c) & 7;
     return t === STR || t === LIS;
   };
-  // Identity (==/2): equal cells, or compounds of one functor whose arguments are identical; boxes by content.
-  // Time: the cells visited.
-  const ident = (x0: number, y0: number): boolean => {
-    const st = [x0, y0];
-    while (st.length > 0) {
-      const y = hp.deref(st.pop()!), x = hp.deref(st.pop()!);
-      if (x === y) continue;
-      const tx = x & 7;
-      if (tx !== (y & 7)) return false;
-      if (tx === STR) {
-        const px = x >> 3, py = y >> 3, f = hp.h[px]!;
-        if (f !== hp.h[py]) return false;
-        for (let i = hp.funArity[f >> 3]!; i >= 1; i--) st.push(hp.h[px + i]!, hp.h[py + i]!);
-      } else if (tx === LIS) {
-        st.push(hp.h[(x >> 3) + 1]!, hp.h[(y >> 3) + 1]!, hp.h[x >> 3]!, hp.h[y >> 3]!);
-      } else if (tx !== BOX || !boxEq(hp.boxes[x >> 3], hp.boxes[y >> 3])) return false;
-    }
-    return true;
-  };
+  // Identity (==/2) is equality in the standard order, as builtins.ts termEq is.
+  const ident = (x: number, y: number): boolean => compareCells(hp, x, y) === 0;
   // get_constant: an atom or small integer is one canonical cell, so any other bound cell clashes; an attributed
   // variable takes it through unification, which records its wakeup. A box equals another by content.
   const gc = (c: number, k: number): boolean => {

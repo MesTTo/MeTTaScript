@@ -110,7 +110,7 @@ export function compareTerms(a: Term, b: Term): number {
  * where spreading both strings into arrays allocated a string per character (2.6% of strict_tuple_types).
  * am[implements a-petta-speed-1105.goal]
  */
-function cmpStr(x: string, y: string): number {
+export function cmpStr(x: string, y: string): number {
   if (x === y) return 0;
   const n = Math.min(x.length, y.length);
   let i = 0;

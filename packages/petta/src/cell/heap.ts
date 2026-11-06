@@ -58,6 +58,8 @@ export class Heap {
   readonly funArity: number[] = [];
   /** The empty list, an atom id of its own: SWI 7 keeps [] apart from the atom '[]'. */
   readonly NIL: number;
+  /** The compounds decode is inside of now, each with the variable standing for it once a cycle reaches it. */
+  private readonly onPath = new Map<number, Var | null>();
   /** Attributes woken by bindings since the machine last ran them. */
   wakeups: Wakeup[] = [];
 
@@ -288,6 +290,16 @@ export class Heap {
   decode(c0: number, vars: Map<number, Var>): Term {
     const h = this.h;
     const c = this.deref(c0);
+    // A compound met again on its own path is a cycle: it decodes to a variable bound to that compound's term once
+    // built, as an object machine holds a cyclic term (i-bridge-cyclic-decode-1106).
+    if ((c & 7) === STR || (c & 7) === LIS) {
+      const onPath = this.onPath;
+      if (onPath.has(c)) {
+        let v = onPath.get(c) ?? null;
+        if (v === null) onPath.set(c, (v = mkVar()));
+        return v;
+      }
+    }
     switch (c & 7) {
       case REF:
       case ATV: {
@@ -315,20 +327,33 @@ export class Heap {
         return this.boxes[c >> 3] as Term;
       case LIS: {
         const items: Term[] = [];
+        const cells: number[] = [];
         let l = c;
-        while ((l & 7) === LIS) {
+        while ((l & 7) === LIS && !this.onPath.has(l)) {
+          this.onPath.set(l, null);
+          cells.push(l);
           items.push(this.decode(h[l >> 3]!, vars));
           l = this.deref(h[(l >> 3) + 1]!);
         }
         let out: Term = this.decode(l, vars);
-        for (let i = items.length - 1; i >= 0; i--) out = new Cons(items[i]!, out);
+        for (let i = items.length - 1; i >= 0; i--) {
+          out = new Cons(items[i]!, out);
+          const v = this.onPath.get(cells[i]!);
+          this.onPath.delete(cells[i]!);
+          if (v) v.ref = out;
+        }
         return out;
       }
       case STR: {
         const p = c >> 3, f = h[p]! >> 3, n = this.funArity[f]!;
+        this.onPath.set(c, null);
         const args = new Array<Term>(n);
         for (let i = 0; i < n; i++) args[i] = this.decode(h[p + 1 + i]!, vars);
-        return new Struct(this.funNames[f]!, args);
+        const t = new Struct(this.funNames[f]!, args);
+        const v = this.onPath.get(c);
+        this.onPath.delete(c);
+        if (v) v.ref = t;
+        return t;
       }
     }
     throw new Error(`cell ${c}: a functor cell is not a term`);

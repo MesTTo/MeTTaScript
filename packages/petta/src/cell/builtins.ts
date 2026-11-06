@@ -1,0 +1,439 @@
+// SPDX-FileCopyrightText: 2026 MesTTo
+//
+// SPDX-License-Identifier: MIT
+
+// Purpose: the term builtins on cells (a-petta-cell-store.builtins.terms), each giving the object builtin's answers,
+// bindings and errors (builtins.ts, library.ts) without decoding its arguments: the standard order (compare/3, @</2
+// and the rest, ==/2), variance (=@=/2), subsumes_term/2, functor/3, arg/3, =../2, copy_term/2, cyclic_term/1,
+// term_variables/2,3, length/2 and the sorts. A mode that needs a generator (arg/3 with an unbound index, length/2 of a
+// partial list with an unbound length) goes to the object builtin through the bridge.
+// am[implements a-petta-cell-store.builtins.terms]
+
+import { compareNum, type Num } from "../arith";
+import { cmpStr } from "../builtins";
+import { Float, NIL, Str, domainError, instantiationError, typeError } from "../terms";
+import { bridgeBuiltin } from "./bridge";
+import { ATM, ATV, BOX, HEAP_CELLS, INT, LIS, REF, STR, boxEq, type Heap } from "./heap";
+import { copyTerm } from "../machine";
+import type { Term } from "../terms";
+import type { CellMachine } from "./machine";
+
+const isVarTag = (c: number): boolean => (c & 7) === REF || (c & 7) === ATV;
+
+/**
+ * The object term of cell c as an error's culprit: copied with plain variables, as the object machine's thrown ball
+ * is (Machine.copyTerm drops attributes).
+ */
+const culprit = (hp: Heap, c: number): Term => copyTerm(hp.decode(c, new Map()));
+
+/** Rank in the standard order: variable 0, number 1, atom 3, string 4, compound 5 (builtins.ts typeRank). */
+function rank(hp: Heap, c: number): number {
+  switch (c & 7) {
+    case REF:
+    case ATV:
+      return 0;
+    case INT:
+      return 1;
+    case ATM:
+      return 3;
+    case BOX:
+      return hp.boxes[c >> 3] instanceof Str ? 4 : 1;
+  }
+  return 5;
+}
+
+/** A number cell's value. */
+const numOf = (hp: Heap, c: number): Num => ((c & 7) === INT ? c >> 3 : (hp.boxes[c >> 3] as Num));
+
+/** An atom cell's text as the standard order reads it: [] as "[]" (builtins.ts compareTerms). */
+const atomText = (hp: Heap, c: number): string => (c === hp.NIL ? "[]" : hp.atomNames[c >> 3]!);
+
+/** A compound cell's arity, name and the address of its first argument. */
+function compound(hp: Heap, c: number): [number, string, number] {
+  if ((c & 7) === LIS) return [2, "[|]", c >> 3];
+  const p = c >> 3, f = hp.h[p]! >> 3;
+  return [hp.funArity[f]!, hp.funNames[f]!, p + 1];
+}
+
+/**
+ * compare/3's standard order on cells, as builtins.ts compareTerms orders object terms: variables by age (heap
+ * address, as object variables by id), numbers by value with a float before an equal integer, atoms and strings by
+ * code point, compounds by arity, name, then arguments left to right. Time: the cells of the common prefix; a stack,
+ * so a long list compares without deep recursion.
+ */
+export function compareCells(hp: Heap, a0: number, b0: number): number {
+  const st = [a0, b0];
+  while (st.length > 0) {
+    const b = hp.deref(st.pop()!), a = hp.deref(st.pop()!);
+    if (a === b) continue;
+    const ra = rank(hp, a), rb = rank(hp, b);
+    if (ra !== rb) return ra - rb;
+    let c = 0;
+    if (ra === 0) c = (a >> 3) - (b >> 3);
+    else if (ra === 1) {
+      const x = numOf(hp, a), y = numOf(hp, b);
+      c = compareNum(x, y);
+      if (c === 0) {
+        const fx = x instanceof Float, fy = y instanceof Float;
+        c = fx === fy ? 0 : fx ? -1 : 1;
+      }
+    } else if (ra === 3) c = cmpStr(atomText(hp, a), atomText(hp, b));
+    else if (ra === 4) c = cmpStr((hp.boxes[a >> 3] as Str).s, (hp.boxes[b >> 3] as Str).s);
+    else {
+      const [na, fa, pa] = compound(hp, a), [nb, fb, pb] = compound(hp, b);
+      if (na !== nb) return na - nb;
+      c = cmpStr(fa, fb);
+      if (c !== 0) return c;
+      for (let i = na - 1; i >= 0; i--) st.push(hp.h[pa + i]!, hp.h[pb + i]!);
+      continue;
+    }
+    if (c !== 0) return c;
+  }
+  return 0;
+}
+
+/** =@=/2: equal up to a consistent renaming of variables (builtins.ts variant). Time: the cells visited. */
+export function variantCells(hp: Heap, a0: number, b0: number): boolean {
+  const m1 = new Map<number, number>(), m2 = new Map<number, number>();
+  const st = [a0, b0];
+  while (st.length > 0) {
+    const y = hp.deref(st.pop()!), x = hp.deref(st.pop()!);
+    if (isVarTag(x) || isVarTag(y)) {
+      if (!(isVarTag(x) && isVarTag(y))) return false;
+      const px = m1.get(x), py = m2.get(y);
+      if (px === undefined && py === undefined) {
+        m1.set(x, y);
+        m2.set(y, x);
+      } else if (px !== y || py !== x) return false;
+      continue;
+    }
+    const tx = x & 7;
+    if (tx !== (y & 7)) return false;
+    if (tx === STR || tx === LIS) {
+      const [na, fa, pa] = compound(hp, x), [nb, fb, pb] = compound(hp, y);
+      if (na !== nb || fa !== fb) return false;
+      for (let i = na - 1; i >= 0; i--) st.push(hp.h[pa + i]!, hp.h[pb + i]!);
+    } else if (x !== y && (tx !== BOX || !boxEq(hp.boxes[x >> 3], hp.boxes[y >> 3]))) return false;
+  }
+  return true;
+}
+
+/** A copy of the term at c with fresh plain variables, attributes dropped as Machine.copyTerm drops them. */
+function copyCells(hp: Heap, c0: number, map: Map<number, number>): number {
+  const c = hp.deref(c0);
+  const tag = c & 7;
+  if (tag === REF || tag === ATV) {
+    let v = map.get(c);
+    if (v === undefined) {
+      const a = hp.alloc(1);
+      hp.h[a] = v = a << 3;
+      map.set(c, v);
+    }
+    return v;
+  }
+  if (tag === LIS) {
+    // A list copies along its spine without recursion on the tail.
+    const first = hp.alloc(2);
+    let last = first;
+    let rest = c;
+    for (;;) {
+      hp.h[last] = copyCells(hp, hp.h[rest >> 3]!, map);
+      rest = hp.deref(hp.h[(rest >> 3) + 1]!);
+      if ((rest & 7) !== LIS) break;
+      const next = hp.alloc(2);
+      hp.h[last + 1] = (next << 3) | LIS;
+      last = next;
+    }
+    hp.h[last + 1] = copyCells(hp, rest, map);
+    return (first << 3) | LIS;
+  }
+  if (tag === STR) {
+    const p = c >> 3, n = hp.funArity[hp.h[p]! >> 3]!;
+    const q = hp.alloc(n + 1);
+    hp.h[q] = hp.h[p]!;
+    for (let i = 1; i <= n; i++) hp.h[q + i] = copyCells(hp, hp.h[p + i]!, map);
+    return (q << 3) | STR;
+  }
+  return c;
+}
+
+/** cyclic_term/1: whether a compound is reached again on its own path. Time: linear in the distinct compounds. */
+function cyclicCells(hp: Heap, c0: number): boolean {
+  const onPath = new Set<number>(), done = new Set<number>();
+  const st: number[] = [c0, 0];
+  while (st.length > 0) {
+    const exit = st.pop()!, x = hp.deref(st.pop()!);
+    const tag = x & 7;
+    if (tag !== STR && tag !== LIS) continue;
+    if (exit === 1) {
+      onPath.delete(x);
+      done.add(x);
+      continue;
+    }
+    if (onPath.has(x)) return true;
+    if (done.has(x)) continue;
+    onPath.add(x);
+    st.push(x, 1);
+    const [n, , p] = compound(hp, x);
+    for (let i = n - 1; i >= 0; i--) st.push(hp.h[p + i]!, 0);
+  }
+  return false;
+}
+
+/** The distinct unbound variables of the term at c, depth first and left to right (builtins.ts collectVars). */
+function varsOf(hp: Heap, c0: number): number[] {
+  const seen = new Set<number>(), out: number[] = [];
+  const st = [c0];
+  while (st.length > 0) {
+    const x = hp.deref(st.pop()!);
+    if (isVarTag(x)) {
+      if (!seen.has(x)) {
+        seen.add(x);
+        out.push(x);
+      }
+    } else if ((x & 7) === STR || (x & 7) === LIS) {
+      const [n, , p] = compound(hp, x);
+      for (let i = n - 1; i >= 0; i--) st.push(hp.h[p + i]!);
+    }
+  }
+  return out;
+}
+
+/** The list of cells `items` ending in `tail`, built on the heap. */
+function listCells(hp: Heap, items: readonly number[], tail: number): number {
+  let t = tail;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const q = hp.alloc(2);
+    hp.h[q] = items[i]!;
+    hp.h[q + 1] = t;
+    t = (q << 3) | LIS;
+  }
+  return t;
+}
+
+/** The elements of a proper list, or null when it is partial or not a list (terms.ts listToArray). */
+function properCells(hp: Heap, c0: number): number[] | null {
+  const out: number[] = [];
+  let c = hp.deref(c0);
+  while ((c & 7) === LIS) {
+    out.push(hp.h[c >> 3]!);
+    c = hp.deref(hp.h[(c >> 3) + 1]!);
+  }
+  return c === hp.NIL ? out : null;
+}
+
+/** A proper list's elements, or instantiation_error for a partial one and type_error(list, L) otherwise (properList). */
+function properListArg(hp: Heap, c: number): number[] {
+  const items = properCells(hp, c);
+  if (items !== null) return items;
+  const d = hp.deref(c);
+  if (isVarTag(d)) throw instantiationError();
+  throw typeError("list", culprit(hp, d));
+}
+
+/** An integer argument as intArg reads it: a JS number, or instantiation_error or type_error(integer, T). */
+function intArg(hp: Heap, c0: number): number {
+  const c = hp.deref(c0);
+  if (isVarTag(c)) throw instantiationError();
+  if ((c & 7) === INT) return c >> 3;
+  if ((c & 7) === BOX && typeof hp.boxes[c >> 3] === "number") return hp.boxes[c >> 3] as number;
+  throw typeError("integer", culprit(hp, c));
+}
+
+/** An atom argument as atomArg reads it: its name, [] as "[]", or instantiation_error or type_error(atom, T). */
+function atomArg(hp: Heap, c0: number): string {
+  const c = hp.deref(c0);
+  if (isVarTag(c)) throw instantiationError();
+  if ((c & 7) === ATM) return atomText(hp, c);
+  throw typeError("atom", culprit(hp, c));
+}
+
+/** Name(Args...) as terms.ts mkCompound builds it: the name's atom for no arguments, a list cell for '[|]'/2. */
+function mkCompoundCell(hp: Heap, name: string, args: readonly number[]): number {
+  if (args.length === 0) return hp.atom(name);
+  if (name === "[|]" && args.length === 2) {
+    const q = hp.alloc(2);
+    hp.h[q] = args[0]!;
+    hp.h[q + 1] = args[1]!;
+    return (q << 3) | LIS;
+  }
+  const q = hp.alloc(args.length + 1);
+  hp.h[q] = hp.functor(name, args.length);
+  args.forEach((a, i) => (hp.h[q + 1 + i] = a));
+  return (q << 3) | STR;
+}
+
+/** A fresh unbound variable cell. */
+function freshVar(hp: Heap): number {
+  const a = hp.alloc(1);
+  hp.h[a] = a << 3;
+  return a << 3;
+}
+
+/** Install the term builtins on `cm`: each a det function over the argument registers (CellProc.det). */
+export function installTermBuiltins(cm: CellMachine): void {
+  const hp = cm.hp, A = cm.A, H = hp.h;
+  const def = (name: string, arity: number, f: () => boolean): void => {
+    cm.proc(name, arity).det = f;
+  };
+  const viaBridge = (name: string, arity: number): ((cm: CellMachine, n: number) => boolean) => {
+    const b = cm.om.builtins.get(`${name}/${arity}`);
+    if (b === undefined) throw new Error(`cell builtins: no object builtin ${name}/${arity}`);
+    return bridgeBuiltin(`${name}/${arity}`, b);
+  };
+  const unify = (x: number, y: number): boolean => hp.unify(x, y);
+  const cmp = (): number => compareCells(hp, A[0]!, A[1]!);
+
+  def("compare", 3, () => {
+    const c = compareCells(hp, A[1]!, A[2]!);
+    return unify(A[0]!, hp.atom(c < 0 ? "<" : c > 0 ? ">" : "="));
+  });
+  def("@<", 2, () => cmp() < 0);
+  def("@>", 2, () => cmp() > 0);
+  def("@=<", 2, () => cmp() <= 0);
+  def("@>=", 2, () => cmp() >= 0);
+  def("==", 2, () => cmp() === 0);
+  def("\\==", 2, () => cmp() !== 0);
+  def("=@=", 2, () => variantCells(hp, A[0]!, A[1]!));
+  def("\\=@=", 2, () => !variantCells(hp, A[0]!, A[1]!));
+
+  // subsumes_term(G, S): G unifies with S leaving S a variant of what it was; every binding of the trial is undone.
+  def("subsumes_term", 2, () => {
+    const before = copyCells(hp, A[1]!, new Map());
+    const hb = hp.hb, mark = hp.tr, w = hp.wakeups.length;
+    hp.hb = HEAP_CELLS;
+    let ok = false;
+    try {
+      ok = hp.unify(A[0]!, A[1]!) && variantCells(hp, before, A[1]!);
+    } finally {
+      hp.undo(mark);
+      hp.hb = hb;
+      hp.wakeups.length = w;
+    }
+    return ok;
+  });
+
+  def("functor", 3, () => {
+    const d = hp.deref(A[0]!);
+    if (isVarTag(d)) {
+      const name = hp.deref(A[1]!);
+      const ar = intArg(hp, A[2]!);
+      if (ar === 0) return unify(d, name);
+      if (isVarTag(name)) throw instantiationError();
+      const args: number[] = [];
+      for (let i = 0; i < ar; i++) args.push(freshVar(hp));
+      if ((name & 7) !== ATM || name === hp.NIL) throw typeError("atomic", culprit(hp, name));
+      return unify(d, mkCompoundCell(hp, hp.atomNames[name >> 3]!, args));
+    }
+    if ((d & 7) === STR || (d & 7) === LIS) {
+      const [n, f] = compound(hp, d);
+      return unify(A[1]!, hp.atom(f)) && unify(A[2]!, hp.int(n));
+    }
+    return unify(A[1]!, d) && unify(A[2]!, hp.int(0));
+  });
+
+  const argBridge = viaBridge("arg", 3);
+  def("arg", 3, () => {
+    const d = hp.deref(A[1]!);
+    if ((d & 7) !== STR && (d & 7) !== LIS) throw typeError("compound", culprit(hp, d));
+    const nd = hp.deref(A[0]!);
+    const isNum = (nd & 7) === INT || ((nd & 7) === BOX && typeof hp.boxes[nd >> 3] === "number");
+    if (isNum) {
+      const k = numOf(hp, nd) as number;
+      const [n, , p] = compound(hp, d);
+      return k >= 1 && k <= n && unify(A[2]!, H[p + k - 1]!);
+    }
+    // An unbound index enumerates the arguments: the object builtin's generator.
+    if (isVarTag(nd)) return argBridge(cm, 3);
+    return false;
+  });
+
+  def("=..", 2, () => {
+    const d = hp.deref(A[0]!);
+    if (isVarTag(d)) {
+      const items = properCells(hp, A[1]!);
+      if (items === null) throw instantiationError();
+      if (items.length === 0) throw domainError("non_empty_list", NIL);
+      const h = hp.deref(items[0]!);
+      if (items.length === 1) return unify(d, h);
+      if ((h & 7) !== ATM || h === hp.NIL) throw typeError("atom", culprit(hp, h));
+      return unify(d, mkCompoundCell(hp, hp.atomNames[h >> 3]!, items.slice(1)));
+    }
+    if ((d & 7) === STR || (d & 7) === LIS) {
+      const [n, f, p] = compound(hp, d);
+      const items = [hp.atom(f)];
+      for (let i = 0; i < n; i++) items.push(H[p + i]!);
+      return unify(A[1]!, listCells(hp, items, hp.NIL));
+    }
+    return unify(A[1]!, listCells(hp, [d], hp.NIL));
+  });
+
+  def("copy_term", 2, () => unify(A[1]!, copyCells(hp, A[0]!, new Map())));
+  def("cyclic_term", 1, () => cyclicCells(hp, A[0]!));
+  def("acyclic_term", 1, () => !cyclicCells(hp, A[0]!));
+  def("term_variables", 2, () => unify(A[1]!, listCells(hp, varsOf(hp, A[0]!), hp.NIL)));
+  def("term_variables", 3, () => unify(A[1]!, listCells(hp, varsOf(hp, A[0]!), A[2]!)));
+
+  const lengthBridge = viaBridge("length", 2);
+  def("length", 2, () => {
+    let t = hp.deref(A[0]!);
+    let count = 0;
+    while ((t & 7) === LIS) {
+      count++;
+      t = hp.deref(H[(t >> 3) + 1]!);
+    }
+    if (t === hp.NIL) return unify(A[1]!, hp.int(count));
+    if (!isVarTag(t)) throw typeError("list", culprit(hp, A[0]!));
+    const nd = hp.deref(A[1]!);
+    if ((nd & 7) === INT || ((nd & 7) === BOX && typeof hp.boxes[nd >> 3] === "number")) {
+      const k = numOf(hp, nd) as number;
+      if (k < count) return false;
+      const extra: number[] = [];
+      for (let i = count; i < k; i++) extra.push(freshVar(hp));
+      return unify(t, listCells(hp, extra, hp.NIL));
+    }
+    // A partial list of unbound length enumerates lengths: the object builtin's generator.
+    return lengthBridge(cm, 2);
+  });
+
+  // Sorting: Array.prototype.sort is stable, as the object builtins rely on.
+  def("msort", 2, () => unify(A[1]!, listCells(hp, properListArg(hp, A[0]!).sort((x, y) => compareCells(hp, x, y)), hp.NIL)));
+  def("sort", 2, () => {
+    const sorted = properListArg(hp, A[0]!).sort((x, y) => compareCells(hp, x, y));
+    const out: number[] = [];
+    for (const t of sorted) if (out.length === 0 || compareCells(hp, out[out.length - 1]!, t) !== 0) out.push(t);
+    return unify(A[1]!, listCells(hp, out, hp.NIL));
+  });
+  def("sort", 4, () => {
+    const key = intArg(hp, A[0]!);
+    const order = atomArg(hp, A[1]!);
+    const keyOf = (t: number): number => {
+      if (key === 0) return t;
+      const d = hp.deref(t);
+      if ((d & 7) !== STR && (d & 7) !== LIS) return t;
+      const [n, , p] = compound(hp, d);
+      return key - 1 < n ? H[p + key - 1]! : t;
+    };
+    const sign = order === "@<" || order === "@=<" ? 1 : -1;
+    const sorted = properListArg(hp, A[2]!)
+      .map((t, i) => ({ t, i }))
+      .sort((a, b) => sign * compareCells(hp, keyOf(a.t), keyOf(b.t)) || a.i - b.i)
+      .map((x) => x.t);
+    const dedup = order === "@<" || order === "@>";
+    const out: number[] = [];
+    for (const t of sorted) if (!dedup || out.length === 0 || compareCells(hp, keyOf(out[out.length - 1]!), keyOf(t)) !== 0) out.push(t);
+    return unify(A[3]!, listCells(hp, out, hp.NIL));
+  });
+  const minus = hp.functor("-", 2);
+  def("keysort", 2, () => {
+    const items = properCells(hp, A[0]!);
+    if (items === null) throw instantiationError();
+    const keyOf = (t: number): number => {
+      const d = hp.deref(t);
+      if ((d & 7) !== STR || H[d >> 3] !== minus) throw typeError("pair", culprit(hp, d));
+      return H[(d >> 3) + 1]!;
+    };
+    const sorted = items.map((t, i) => ({ t, i })).sort((a, b) => compareCells(hp, keyOf(a.t), keyOf(b.t)) || a.i - b.i);
+    return unify(A[1]!, listCells(hp, sorted.map((x) => x.t), hp.NIL));
+  });
+}

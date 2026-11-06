@@ -226,6 +226,20 @@ export class CellMachine {
     });
     this.PROCEED = def(() => this.proceed());
     for (let n = 1; n <= 8; n++) this.proc("call", n).ctl = (cm, k, cc) => cm.callN(k, cc);
+    // A control construct called as a procedure, as call/N or a caller of ','/2 calls it, runs as that goal's
+    // meta-call: built from the registers and interpreted, its cut local to it.
+    for (const key of CONTROL) {
+      const at = key.lastIndexOf("/");
+      const name = key.slice(0, at), n = Number(key.slice(at + 1));
+      if (name === "call") continue;
+      const f = hp.functor(name, n);
+      this.proc(name, n).ctl = (cm, _k, cc) => {
+        const q = cm.hp.alloc(n + 1);
+        cm.hp.h[q] = f;
+        for (let i = 0; i < n; i++) cm.hp.h[q + 1 + i] = cm.A[i]!;
+        return cm.goal((q << 3) | STR, cm.R[RB]!, cc);
+      };
+    }
     // The machine has one module, so M:G runs G (consult.ts's :/2), its cut local as call/1's.
     this.proc(":", 2).ctl = (cm, _k, cc) => cm.goal(cm.A[1]!, cm.R[RB]!, cc);
     this.RETRY = def(() => {
@@ -511,7 +525,11 @@ export class CellMachine {
 
   /** Call `p` with A[0..n), the continuation being the current one. */
   callw(p: CellProc, n: number, cc: number): Code | null {
-    if (p.det !== undefined) return p.det(this, n) ? this.proceed() : this.fail();
+    if (p.det !== undefined) {
+      if (!p.det(this, n)) return this.fail();
+      if (this.hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
+      return this.proceed();
+    }
     if (p.ctl !== undefined) return p.ctl(this, n, cc);
     let pred = p.pred;
     if (pred === undefined) {
@@ -591,6 +609,7 @@ export class CellMachine {
     const S = this.S, R = this.R, hp = this.hp;
     const sE = R[RE]!, sCP = R[RCP]!, sB = R[RB]!, sCC = R[RCC]!, sBAR = R[RBAR]!;
     const sNest = this.nest;
+    const sWake = this.hp.wakeups.length;
     const bar = this.pushCP(K_BARRIER, sB, sCC, 0);
     R[RBAR] = bar;
     R[RCP] = this.OK;
@@ -612,6 +631,7 @@ export class CellMachine {
       R[RCC] = sCC;
       R[RBAR] = sBAR;
       this.nest = sNest;
+      this.hp.wakeups.length = sWake;
     }
   }
 
@@ -647,6 +667,7 @@ export class CellMachine {
     const R = this.R;
     const sE = R[RE]!, sCP = R[RCP]!, sB = R[RB]!, sCC = R[RCC]!, sBAR = R[RBAR]!;
     const sNest = this.nest;
+    const sWake = this.hp.wakeups.length;
     const bar = this.pushCP(K_BARRIER, sB, sCC, 0);
     R[RBAR] = bar;
     R[RCP] = this.OK;
@@ -662,6 +683,7 @@ export class CellMachine {
       R[RCC] = sCC;
       R[RBAR] = sBAR;
       this.nest = sNest;
+      this.hp.wakeups.length = sWake;
     }
   }
 }
