@@ -562,8 +562,15 @@ export class Machine {
       let x = deref(stack.pop()!);
       if (x === y) continue;
       if (x instanceof Var) {
-        if (y instanceof Var && y.id > x.id) {
-          this.bindAttr(y, x);
+        if (y instanceof Var) {
+          // SWI-Prolog binds a plain variable to an attributed one whatever their ages, waking nothing, and otherwise
+          // the younger to the older, waking the younger's attributes (c-attvar-bind-swi-1106).
+          // am[rests-on c-attvar-bind-swi-1106]
+          const xa = x.attrs !== null && x.attrs.size > 0;
+          const ya = y.attrs !== null && y.attrs.size > 0;
+          if (xa !== ya) this.bind(xa ? y : x, xa ? x : y);
+          else if (y.id > x.id) this.bindAttr(y, x);
+          else this.bindAttr(x, y);
           continue;
         }
         this.bindAttr(x, y);
