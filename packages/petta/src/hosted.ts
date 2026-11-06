@@ -17,6 +17,7 @@ import { installProcess } from "./process";
 import { installJanus } from "./janus";
 import { consultFile, installConsult, mainGoalOf, markLoaded } from "./consult";
 import { engineHash, loadImage, readImage } from "./image";
+import { installSpecCache } from "./spec-cache";
 import { installLibrary } from "./library";
 import { Machine, profileReport } from "./machine";
 import { errorMessage } from "./messages";
@@ -105,10 +106,13 @@ export class HostedPetta {
       const image = readImage(p.image, p.root, engineHash(p.bundle), opts.argv);
       if (image !== null) {
         loadImage(m, image, p.root);
+        installSpecCache(m);
         return;
       }
     }
     this.consultSource();
+    // am[implements a-petta-spec-cache]
+    installSpecCache(m);
   }
 
   /** Consult PeTTa's main.pl and everything it loads, as SWI does when run.sh starts it. */

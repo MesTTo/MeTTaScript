@@ -65,6 +65,12 @@ export class Pred {
   file: string | null = null;
   /** The clause selection state, made on the first call; null again whenever it must be rebuilt. */
   observer: ClauseObserver | null = null;
+  /**
+   * Answers a call from a table instead of the clauses when it accepts the call's arguments (spec-cache.ts), leaving
+   * the choicepoints the clauses would leave; null for an ordinary predicate.
+   * am[implements a-petta-spec-cache]
+   */
+  memo: Memo | null = null;
   constructor(
     public readonly name: string,
     public readonly arity: number,
@@ -95,6 +101,17 @@ export class Pred {
 interface TxLog {
   readonly added: Clause[];
   readonly removed: Clause[];
+}
+
+/**
+ * A predicate's answer table (Pred.memo): `accepts` says from the arguments alone whether the table answers this call;
+ * `answers` then yields each solution as a nondeterministic builtin does, returning true at a last solution that
+ * leaves no choicepoint.
+ * am[implements a-petta-spec-cache]
+ */
+export interface Memo {
+  accepts(args: readonly Term[]): boolean;
+  answers(m: unknown, args: readonly Term[]): Iterator<unknown>;
 }
 
 export class Database {
