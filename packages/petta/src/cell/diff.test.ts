@@ -208,6 +208,31 @@ describe("cell engine against the object machine", () => {
     );
   });
 
+  // am[verifies a-petta-cell-store.builtins.db]
+  it("runs the database builtins as the object machine does, each engine on its own database", () => {
+    const src = `
+      db1(X) :- assertz(cnt(1)), assertz(cnt(2)), cnt(X).
+      db2(X) :- assertz(cnt2(1)), retract(cnt2(1)), ( cnt2(X) -> true ; X = none ).
+      db3(X) :- asserta(q3(1)), asserta(q3(2)), q3(X).
+      db4(X) :- assertz((r4(Y) :- Y = 5)), r4(X).
+      db5(X) :- assertz(s5(a)), assertz(s5(b)), retract(s5(X)).
+      db6(X) :- assertz(t6(1)), assertz(t6(2)), clause(t6(X), true).
+      db7(X) :- ( current_predicate(db7/1) -> X = yes ; X = no ).
+      db8(X) :- retractall(u8(_)), assertz(u8(1)), retractall(u8(_)), ( u8(_) -> X = some ; X = none ).
+      db9(X) :- assertz(v9(1)), v9(A), assertz(v9(2)), findall_free(A, X).
+      findall_free(A, A).
+      db10(X) :- assertz(w10(1)), w10(X), retract(w10(X)), \\+ w10(_).
+    `;
+    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10"]) {
+      const a = machines(), b = machines();
+      for (const c of readClauses(src)) {
+        a.m.addClause(c, true);
+        b.m.addClause(c, true);
+      }
+      expect(onCells(b.cm, name, [mkVar()]), name).toStrictEqual(onObjects(a.m, name, [mkVar()]));
+    }
+  });
+
   it("runs recursive programs as the object machine does", () => {
     const src = `
       app([], L, L).
