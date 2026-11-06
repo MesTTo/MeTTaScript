@@ -439,7 +439,7 @@ export function captureOutput<T>(m: Machine, fn: () => T): [T, string] {
   }
 }
 
-function sinkText(m: Machine, sink: Term, text: string): boolean {
+export function sinkText(m: Machine, sink: Term, text: string): boolean {
   const s = deref(sink);
   if (s instanceof Struct && s.args.length === 1) {
     switch (s.name) {
@@ -1911,7 +1911,7 @@ function dedupSorted(items: Term[]): Term[] {
   return out;
 }
 
-function mergeSort<T>(items: T[], cmp: (a: T, b: T) => number): T[] {
+export function mergeSort<T>(items: T[], cmp: (a: T, b: T) => number): T[] {
   if (items.length <= 1) return items.slice();
   const mid = items.length >> 1;
   const a = mergeSort(items.slice(0, mid), cmp);

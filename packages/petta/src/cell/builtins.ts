@@ -11,11 +11,12 @@
 // am[implements a-petta-cell-store.builtins.terms]
 
 import { compareNum, type Num } from "../arith";
-import { cmpStr } from "../builtins";
-import { Float, NIL, PrologError, Str, Struct, domainError, existenceError, instantiationError, mkVar, typeError } from "../terms";
+import { captureOutput, cmpStr, mergeSort, sinkText } from "../builtins";
+import { Float, NIL, PrologError, Str, Struct, domainError, existenceError, instantiationError, mkList, mkVar, typeError } from "../terms";
 import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, INT, LIS, REF, STR, boxEq, type Heap } from "./heap";
 import { copyTerm } from "../machine";
 import type { Term } from "../terms";
+import { onObjects } from "./bridge";
 import type { CellMachine } from "./machine";
 
 const isVarTag = (c: number): boolean => (c & 7) === REF || (c & 7) === ATV;
@@ -448,10 +449,72 @@ export function installAttrBuiltins(cm: CellMachine): void {
   });
 }
 
+/**
+ * The builtins that solve a goal inside them, run on cells so the goal sees the cell engine's global variables and
+ * attributes, the bridge refusing their object versions: findnsols/4's first chunk, with_output_to/2, predsort/3,
+ * transaction/1 and assertion/1, each with its object version's answers and errors (builtins.ts).
+ * am[implements a-petta-cell-store.runtime.solving]
+ */
+export function installSolvingBuiltins(cm: CellMachine): void {
+  const hp = cm.hp, A = cm.A, H = hp.h;
+  const go = (m: CellMachine, cc: number): ReturnType<CellMachine["proceed"]> => (hp.wakeups.length !== 0 ? m.wake(cc) : m.proceed());
+  cm.proc("findnsols", 4).ctl = (m, _n, cc) => {
+    const limit = intArg(hp, A[0]!), t = A[1]!, g = A[2]!, l = A[3]!;
+    const found: Term[] = [];
+    if (limit > 0) m.solveEach(g, () => (found.push(hp.decode(t, new Map())), found.length < limit));
+    return hp.unify(l, hp.encode(mkList(found), new Map())) ? go(m, cc) : m.fail();
+  };
+  cm.proc("with_output_to", 2).ctl = (m, _n, cc) => {
+    const sink = A[0]!, g = A[1]!;
+    const [ok, text] = captureOutput(cm.om, () => m.solveCell(g));
+    return ok && onObjects(m, [sink], (om, [s]) => sinkText(om, s!, text)) ? go(m, cc) : m.fail();
+  };
+  const F_CALL4 = hp.functor("call", 4), LT = hp.atom("<"), GT = hp.atom(">");
+  cm.proc("predsort", 3).ctl = (m, _n, cc) => {
+    const p = A[0]!, items = properListArg(hp, A[1]!), s = A[2]!;
+    const order = (a: number, b: number): number => {
+      const o = freshVar(hp), q = hp.alloc(5);
+      H[q] = F_CALL4;
+      H[q + 1] = p;
+      H[q + 2] = o;
+      H[q + 3] = a;
+      H[q + 4] = b;
+      if (!m.solveCell((q << 3) | STR)) throw new PrologError("predsort_failed");
+      const r = hp.deref(o);
+      return r === LT ? -1 : r === GT ? 1 : 0;
+    };
+    // predsort drops elements its order calls equal.
+    const out: number[] = [];
+    for (const t of mergeSort(items, order)) if (out.length === 0 || order(out[out.length - 1]!, t) !== 0) out.push(t);
+    return hp.unify(s, listCells(hp, out, hp.NIL)) ? go(m, cc) : m.fail();
+  };
+  // transaction/1: once(Goal); a failure or an exception rolls back the clause changes Goal made.
+  cm.proc("transaction", 1).ctl = (m, _n, cc) => {
+    const g = A[0]!, db = cm.om.db;
+    db.beginTransaction();
+    let ok: boolean;
+    try {
+      ok = m.solveCell(g);
+    } catch (e) {
+      db.rollbackTransaction();
+      throw e;
+    }
+    if (ok) db.commitTransaction();
+    else db.rollbackTransaction();
+    return ok ? go(m, cc) : m.fail();
+  };
+  cm.proc("assertion", 1).ctl = (m, _n, cc) => {
+    const g = A[0]!;
+    if (m.solveCell(g)) return go(m, cc);
+    throw new PrologError(new Struct("assertion_failed", [copyTerm(hp.decode(g, new Map()))]));
+  };
+}
+
 /** Install the term builtins on `cm`: each a det function over the argument registers (CellProc.det). */
 export function installTermBuiltins(cm: CellMachine): void {
   installGlobalBuiltins(cm);
   installAttrBuiltins(cm);
+  installSolvingBuiltins(cm);
   const hp = cm.hp, A = cm.A, H = hp.h;
   const def = (name: string, arity: number, f: () => boolean): void => {
     cm.proc(name, arity).det = f;

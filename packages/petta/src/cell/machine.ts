@@ -974,6 +974,11 @@ export class CellMachine {
     return fn(b0, cc, 0);
   }
 
+  /** Solve goal cell `g` for every solution, its cut local, calling `each` after each; `each` returning false stops. */
+  solveEach(g: number, each: () => boolean | void): void {
+    this.solveAllFrom(() => this.goal(g, this.R[RB]!, this.R[RCC]!), each);
+  }
+
   /** Solve goal cell `g` once, its cut local; bindings persist on success. */
   solveCell(g: number): boolean {
     return this.solveFrom(() => this.goal(g, this.R[RB]!, this.R[RCC]!));

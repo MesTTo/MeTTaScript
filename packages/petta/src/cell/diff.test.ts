@@ -249,11 +249,22 @@ describe("cell engine against the object machine", () => {
       ns5(X) :- catch(setarg(1, foo, x), error(E, _), X = E).
       ns6(X) :- T = f(a), ( setarg(3, T, b) -> X = set ; X = range ).
       ns7(X) :- T = f(a), nb_setarg(1, T, g(Y)), Y = 1, X = T.
+      fn1(L) :- findnsols(2, X, mem(X, [a, b, c]), L).
+      fn2(L) :- nb_setval(cnt2, 0), findnsols(5, X, (mem(X, [1, 2]), nb_getval(cnt2, C), C1 is C + 1, nb_setval(cnt2, C1)), L0), nb_getval(cnt2, N), L = L0-N.
+      wo1(S) :- with_output_to(atom(S), (write(a), write(1))).
+      wo2(S) :- nb_setval(kw, hello), with_output_to(atom(S), (nb_getval(kw, V), write(V))).
+      wo3(S) :- with_output_to(codes(S), (mem(X, [p, q]), write(X))).
+      ps1(L) :- predsort(cmpn, [3, 1, 2, 1], L).
+      cmpn(O, A, B) :- compare(O, A, B).
+      tr1(X) :- ( transaction((assertz(tq1(1)), fail)) -> true ; true ), ( tq1(_) -> X = kept ; X = rolled ).
+      tr2(X) :- transaction(assertz(tq2(1))), ( tq2(_) -> X = kept ; X = rolled ).
+      as1(X) :- catch(assertion(fail), E, X = E).
+      as2(X) :- assertion(true), X = ok.
       mem(X, [X|_]).
       mem(X, [_|T]) :- mem(X, T).
       db10(X) :- assertz(w10(1)), w10(X), retract(w10(X)), \\+ w10(_).
     `;
-    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7", "gv8", "gv9", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7"]) {
+    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7", "gv8", "gv9", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7", "fn1", "fn2", "wo1", "wo2", "wo3", "ps1", "tr1", "tr2", "as1", "as2"]) {
       const a = machines(), b = machines();
       for (const c of readClauses(src)) {
         a.m.addClause(c, true);

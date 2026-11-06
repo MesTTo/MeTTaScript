@@ -36,6 +36,35 @@ interface ObjectState {
 const REFUSED = new Set(["setarg/3", "nb_setarg/3", "nb_linkarg/3", "b_setval/2"]);
 
 /**
+ * Object builtins that may solve goals on the object machine: loading a file runs its directives there, which change
+ * only the database, flags and operators the cell engine shares. Any other builtin solving a goal there (findnsols/4,
+ * with_output_to/2 and their kind) would run program code out of the cell engine's sight, missing its global
+ * variables and attributes, so it is refused as not built yet and gets a cell version instead (i-cell-load-globals-1106).
+ */
+const SOLVES = new Set(["consult/1", "ensure_loaded/1", "use_module/1", "use_module/2", "load_files/2", "reexport/1", "reexport/2"]);
+let refusing = "";
+const refuseSolve = (): never => {
+  throw new Error(`cell engine: ${refusing} solves goals on the object machine, out of the cell engine's sight, so it needs a cell version, which is not built yet`);
+};
+
+/** Run `fn`, a step of object builtin `key`, with the object machine's solves refused unless `key` may solve. */
+function guarded<T>(cm: CellMachine, key: string, fn: () => T): T {
+  if (SOLVES.has(key)) return fn();
+  const om = cm.om as unknown as { solveAll: unknown; solveOnce: unknown };
+  const sa = om.solveAll, so = om.solveOnce, prev = refusing;
+  refusing = key;
+  om.solveAll = refuseSolve;
+  om.solveOnce = refuseSolve;
+  try {
+    return fn();
+  } finally {
+    om.solveAll = sa;
+    om.solveOnce = so;
+    refusing = prev;
+  }
+}
+
+/**
  * The det function a CellProc runs for builtin `b` named `key`. Time: the arguments' size to decode, the bound
  * variables' values to encode, plus the builtin's own.
  */
@@ -54,9 +83,9 @@ export function bridgeBuiltin(key: string, b: Builtin): (cm: CellMachine, n: num
     om.trailBoundary = Infinity;
     try {
       let ok: boolean;
-      if (b.det !== undefined) ok = b.det(m, args);
+      if (b.det !== undefined) ok = guarded(cm, key, () => b.det!(m, args));
       else if (b.detMode !== undefined) {
-        const r = b.detMode(m, args);
+        const r = guarded(cm, key, () => b.detMode!(m, args));
         if (r === null) throw new Error(`cell engine: ${key} in this mode needs its generator, which is not built yet`);
         ok = r;
       } else throw new Error(`cell engine: the nondeterministic builtin ${key} reached the det bridge`);
@@ -78,6 +107,25 @@ export function bridgeBuiltin(key: string, b: Builtin): (cm: CellMachine, n: num
       om.wakeups.length = woken;
     }
   };
+}
+
+/**
+ * Run `fn` on the object terms of cells `cells` as the bridge runs a det builtin: its bindings and attribute changes
+ * come back to the cells, the object machine's trail cut back after. Returns whether it succeeded and the cells unify.
+ */
+export function onObjects(cm: CellMachine, cells: readonly number[], fn: (m: Machine, args: Term[]) => boolean): boolean {
+  const hp = cm.hp, om = cm.om as unknown as ObjectState;
+  const back = new Map<number, Var>();
+  const args = cells.map((c) => hp.decode(c, back));
+  const mark = om.trail.length, boundary = om.trailBoundary, woken = om.wakeups.length;
+  om.trailBoundary = Infinity;
+  try {
+    return fn(cm.om, args) && bindBack(cm, back, mark);
+  } finally {
+    om.undoTo(mark);
+    om.trailBoundary = boundary;
+    om.wakeups.length = woken;
+  }
 }
 
 /**
@@ -156,7 +204,7 @@ export function startNondet(cm: CellMachine, key: string, b: Builtin, n: number)
     om.trailBoundary = Infinity;
     try {
       // detMode looks at the arguments only, binding nothing when it leaves the call to the generator (null).
-      const r = b.detMode(cm.om, args);
+      const r = guarded(cm, key, () => b.detMode!(cm.om, args));
       if (r !== null) return r && bindBack(cm, back, mark);
     } finally {
       om.undoTo(mark);
@@ -177,7 +225,7 @@ export function nextSolution(cm: CellMachine, run: BridgeRun): 0 | 1 | 2 {
   om.trailBoundary = Infinity;
   let r: IteratorResult<unknown, boolean>;
   try {
-    r = run.gen.next();
+    r = guarded(cm, run.key, () => run.gen.next());
   } finally {
     om.trailBoundary = boundary;
     // The cells wake their own hooks when takeSolution binds them.
