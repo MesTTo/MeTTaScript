@@ -298,7 +298,7 @@ export class CellMachine {
     // alternative), leave the frame and run the then-branch.
     const then = (soft: boolean): Code => () => {
       const S = this.S, R = this.R, e = R[RE]!;
-      const g = S[e + ENV]!, b = S[e + ENV + 1]!, cb = S[e + 2]!, cc = S[e + 4]!;
+      const g = S[e + ENV]!, b = S[e + ENV + 1]! >> 3, cb = S[e + 2]!, cc = S[e + 4]!;
       R[RCP] = S[e + 1]!;
       R[RE] = S[e]!;
       if (soft) S[b + 8] = this.FAILC;
@@ -310,7 +310,7 @@ export class CellMachine {
     // The negated goal succeeded: cut back past the negation's choicepoint and fail.
     this.NOT = def(() => {
       const S = this.S, R = this.R, e = R[RE]!;
-      const b = S[e + ENV]!;
+      const b = S[e + ENV]! >> 3;
       R[RCP] = S[e + 1]!;
       R[RE] = S[e]!;
       this.cutTo(S[b]!);
@@ -319,7 +319,7 @@ export class CellMachine {
     // once/1's goal succeeded: cut its choicepoints and go on.
     this.ONCE = def(() => {
       const S = this.S, R = this.R, e = R[RE]!;
-      const b = S[e + ENV]!;
+      const b = S[e + ENV]! >> 3;
       R[RCP] = S[e + 1]!;
       R[RE] = S[e]!;
       this.cutTo(b);
@@ -336,7 +336,7 @@ export class CellMachine {
     // The goal under setup_call_cleanup/3 exited: a deterministic exit runs the cleanup now.
     this.SCC_EXIT = def(() => {
       const S = this.S, R = this.R, e = R[RE]!;
-      const b = S[e + ENV]!;
+      const b = S[e + ENV]! >> 3;
       R[RCP] = S[e + 1]!;
       R[RE] = S[e]!;
       if (R[RB] === b) {
@@ -364,7 +364,7 @@ export class CellMachine {
     // catch/3's goal exited: a deterministic exit drops the catch choicepoint, as SWI drops its frame.
     this.CATCH_EXIT = def(() => {
       const S = this.S, R = this.R, e = R[RE]!;
-      const b = S[e + ENV]!;
+      const b = S[e + ENV]! >> 3;
       R[RCP] = S[e + 1]!;
       R[RE] = S[e]!;
       if (R[RB] === b) this.popCP(b);
@@ -435,6 +435,8 @@ export class CellMachine {
     S[e + 2] = cb;
     S[e + 3] = n;
     S[e + 4] = cc;
+    // Its slots start as cell 0, which no term uses, so the collector reads every slot as a cell (gc.ts).
+    for (let i = e + ENV, end = i + n; i < end; i++) S[i] = 0;
     R[RE] = e;
     return e;
   }
@@ -639,10 +641,10 @@ export class CellMachine {
       case this.F_CALL1:
         return this.goal(H[p + 1]!, R[RB]!, cc);
       case this.F_ONCE: {
-        const e = this.allocate(1, cb, cc);
-        S[e + ENV] = R[RB]!;
+        const e = this.allocate(1, cb, cc), b = R[RB]!;
+        S[e + ENV] = (b << 3) | INT;
         R[RCP] = this.ONCE;
-        return this.goal(H[p + 1]!, S[e + ENV]!, cc);
+        return this.goal(H[p + 1]!, b, cc);
       }
       case this.F_IGNORE:
         return this.ifThenElse(H[p + 1]!, this.A_TRUE, this.A_TRUE, false, cb, cc);
@@ -670,7 +672,7 @@ export class CellMachine {
     S[b + 8] = this.DISJ;
     const fr = this.allocate(2, cb, cc);
     S[fr + ENV] = t;
-    S[fr + ENV + 1] = b;
+    S[fr + ENV + 1] = (b << 3) | INT;
     this.R[RCP] = soft ? this.ITE_SOFT : this.ITE_THEN;
     return this.goal(c, b, cc);
   }
@@ -681,7 +683,7 @@ export class CellMachine {
     const b = this.pushCP(K_ALT, cb, cc, 0);
     S[b + 8] = this.PROCEED;
     const e = this.allocate(1, cb, cc);
-    S[e + ENV] = b;
+    S[e + ENV] = (b << 3) | INT;
     this.R[RCP] = this.NOT;
     return this.goal(g, b, cc);
   }
@@ -933,7 +935,7 @@ export class CellMachine {
     const b = this.pushCP(K_CLEANUP, R[RB]!, cc, 1);
     this.cleanups++;
     const e = this.allocate(1, b, cc);
-    S[e + ENV] = b;
+    S[e + ENV] = (b << 3) | INT;
     R[RCP] = this.SCC_EXIT;
     return this.goal(g, b, cc);
   }
@@ -970,7 +972,7 @@ export class CellMachine {
     A[1] = A[2]!;
     const b = this.pushCP(K_CATCH, R[RB]!, cc, 2);
     const e = this.allocate(1, b, cc);
-    S[e + ENV] = b;
+    S[e + ENV] = (b << 3) | INT;
     R[RCP] = this.CATCH_EXIT;
     R[RCC] = b;
     return this.goal(g, b, b);

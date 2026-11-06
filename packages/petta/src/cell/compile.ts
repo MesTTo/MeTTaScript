@@ -981,22 +981,23 @@ export function compileCellClause(cm: CellMachine, c: Clause, hot: boolean): Cla
         const regs = s.args.map((_, i) => `A[${i}] = a${i};`).join(" ");
         return withHeap(s.b, values, `${regs} ${t < 0 ? leave : `R[1] = ${idOf(t)};`} return cm.callLater(${s.proc}, ${s.args.length}, cc);`);
       }
+      // A choicepoint index kept in a slot is an INT cell, so the collector reads every slot as a cell (gc.ts).
       case "cut":
-        return `cm.cutTo(${sub(s.cb)});`;
+        return s.cb === "b0" ? "cm.cutTo(b0);" : `cm.cutTo(${sub(s.cb)} >> 3);`;
       case "jump":
         return goto(s.to.pc, k);
       case "cp":
-        return `{ const b = cm.pushCP(${K_ALT}, 0, cc, 0); S[b + 8] = ${idOf(s.alt.pc)}; ${s.h >= 0 ? `${vx(s.h)} = b;` : ""} }`;
+        return `{ const b = cm.pushCP(${K_ALT}, 0, cc, 0); S[b + 8] = ${idOf(s.alt.pc)}; ${s.h >= 0 ? `${vx(s.h)} = (b << 3) | ${INT};` : ""} }`;
       case "mark":
-        return `${vx(s.h)} = R[2];`;
+        return `${vx(s.h)} = (R[2] << 3) | ${INT};`;
       case "cutto":
-        return `cm.cutTo(${vx(s.h)});`;
+        return `cm.cutTo(${vx(s.h)} >> 3);`;
       case "commit":
-        return `cm.cutTo(S[${vx(s.h)}]);`;
+        return `cm.cutTo(S[${vx(s.h)} >> 3]);`;
       case "softcut":
-        return `S[${vx(s.h)} + 8] = ${cm.FAILC};`;
+        return `S[(${vx(s.h)} >> 3) + 8] = ${cm.FAILC};`;
       case "nafail":
-        return `cm.cutTo(S[${vx(s.h)}]); return cm.fail();`;
+        return `cm.cutTo(S[${vx(s.h)} >> 3]); return cm.fail();`;
       case "succeed":
         return `${leave} return CODE[R[1]];`;
       case "fail":
