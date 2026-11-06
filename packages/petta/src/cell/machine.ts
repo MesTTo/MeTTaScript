@@ -722,7 +722,17 @@ export class CellMachine {
       const b = this.om.builtins.get(p.key);
       if (b !== undefined) {
         if (b.nondet !== undefined) p.ctl = (cm, k, c) => cm.callNondet(p.key, b, k, c);
-        else p.det = bridgeBuiltin(p.key, b);
+        else {
+          // A bridged det builtin answers true or false, or a goal cell it pushed, run next with its cut local.
+          const run = bridgeBuiltin(p.key, b);
+          p.ctl = (cm, k, c) => {
+            const r = run(cm, k);
+            if (r === false) return cm.fail();
+            if (r !== true) return cm.goal(r, cm.R[RB]!, c);
+            if (cm.hp.wakeups.length !== 0) throw new Error("cell engine: attribute wakeups are not built yet");
+            return cm.proceed();
+          };
+        }
         return this.callw(p, n, cc);
       }
       pred = p.pred = this.om.db.preds.get(p.key);

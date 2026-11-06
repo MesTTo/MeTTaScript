@@ -6,21 +6,22 @@
 // cell to an object term, unbound cells to variables keyed by their heap address, runs the builtin deterministically
 // (det, or detMode where the call's mode makes it so), then gives each variable the builtin bound the encoding of its
 // value at its own cell, those still unbound standing for their own cells; the object machine's trail is cut back to
-// where it was. A builtin whose generator must run, that pushes goals or wakes attributes, or whose effect a decoded
-// copy cannot carry (setarg/3, attributes, b_setval/2) is refused as not built yet. The frequent builtins run natively
+// where it was; goals it pushed come back as one goal cell to run next. A builtin that wakes attributes, or whose
+// effect a decoded copy cannot carry (setarg/3, attributes, b_setval/2), is refused as not built yet. The frequent builtins run natively
 // instead (builtins.ts, c-builtin-calls-1106); the text builtins stay here, their text work outweighing the bridge's.
 // am[implements a-petta-cell-store.gate2]
 
 import type { Builtin, Machine } from "../machine";
-import type { Term, Var } from "../terms";
+import { Struct, type Term, type Var } from "../terms";
 import type { CellMachine } from "./machine";
 
 /** The object machine's state a bridged call must leave as it found it, read through its private fields. */
 interface ObjectState {
   trail: unknown[];
+  /** The goal stack; a builtin like phrase/2 pushes the goals it leaves to run (Machine.pushGoal). */
   /** Variables older than this are trailed; outside a solve nothing is, so the bridge raises it to trail all. */
   trailBoundary: number;
-  goals: unknown;
+  goals: { readonly goal: unknown; readonly next: unknown } | null;
   wakeups: unknown[];
   undoTo(mark: number): void;
 }
@@ -35,11 +36,11 @@ const REFUSED = new Set(["setarg/3", "nb_setarg/3", "nb_linkarg/3", "put_attr/3"
  * The det function a CellProc runs for builtin `b` named `key`. Time: the arguments' size to decode, the bound
  * variables' values to encode, plus the builtin's own.
  */
-export function bridgeBuiltin(key: string, b: Builtin): (cm: CellMachine, n: number) => boolean {
+export function bridgeBuiltin(key: string, b: Builtin): (cm: CellMachine, n: number) => boolean | number {
   if (REFUSED.has(key)) return () => {
     throw new Error(`cell engine: ${key} needs a native cell version, which is not built yet`);
   };
-  return (cm: CellMachine, n: number): boolean => {
+  return (cm: CellMachine, n: number): boolean | number => {
     const hp = cm.hp;
     const m: Machine = cm.om;
     const om = cm.om as unknown as ObjectState;
@@ -56,10 +57,18 @@ export function bridgeBuiltin(key: string, b: Builtin): (cm: CellMachine, n: num
         if (r === null) throw new Error(`cell engine: ${key} in this mode needs its generator, which is not built yet`);
         ok = r;
       } else throw new Error(`cell engine: the nondeterministic builtin ${key} reached the det bridge`);
-      if (om.goals !== goals) throw new Error(`cell engine: ${key} pushed goals, which is not built yet`);
       if (om.wakeups.length !== woken) throw new Error(`cell engine: ${key} woke attributes, which is not built yet`);
+      // Goals the builtin pushed (phrase/2, :/2 and other call-like builtins) run next on the cell machine, the newest
+      // pushed first, as one conjunction encoded over the same variables.
+      const pushed: Term[] = [];
+      for (let f = om.goals; f !== goals && f !== null; f = f.next as typeof f) pushed.push(f.goal as Term);
       if (!ok) return false;
-      return bindBack(cm, back);
+      if (!bindBack(cm, back)) return false;
+      if (pushed.length === 0) return true;
+      const vars = new Map<Var, number>();
+      for (const [a2, v2] of back) if (v2.ref === null) vars.set(v2, cm.hp.h[a2]!);
+      const conj = pushed.reduceRight<Term>((acc, g) => (acc === "true" ? g : new Struct(",", [g, acc])), "true");
+      return cm.hp.encode(conj, vars);
     } finally {
       om.undoTo(mark);
       om.trailBoundary = boundary;
