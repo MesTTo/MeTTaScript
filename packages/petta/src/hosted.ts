@@ -24,6 +24,9 @@ import { errorMessage } from "./messages";
 import { readClauses } from "./prolog-reader";
 import { Halt, PrologError, Str, Struct, deref, listToArray, mkList, mkStruct, mkVar, NIL, textOf, type Term } from "./terms";
 import { writeTerm } from "./writer";
+import { installTermBuiltins } from "./cell/builtins";
+import { compileCellClause, installInlineBuiltins } from "./cell/compile";
+import { CellMachine } from "./cell/machine";
 
 export interface HostedOptions {
   /** The command-line arguments main.pl reads from the argv flag: files, then flags. */
@@ -138,7 +141,7 @@ export class HostedPetta {
     const g = mainGoalOf(this.m);
     if (g === null) throw new Error(`${this.srcDir}/main.pl declares no initialization(main, main) goal`);
     try {
-      if (this.m.solveOnce(g)) return 0;
+      if (process.env.PETTA_ENGINE === "cell" ? this.solveOnCells(g) : this.m.solveOnce(g)) return 0;
       this.m.err("Warning: goal (initialization) failed\n");
       return 1;
     } catch (e) {
@@ -153,6 +156,20 @@ export class HostedPetta {
       }
       throw e;
     }
+  }
+
+  /**
+   * Solve the main goal on the cell engine, which PETTA_ENGINE=cell selects until the cell engine replaces the object
+   * machine's run (a-petta-cell-store.verify, a-petta-cell-store.land): the clauses the object machine consulted are
+   * compiled to cell code as they are called, and its errors, halts and failure end the run as the object machine's do.
+   * am[implements a-petta-cell-store.verify]
+   */
+  private solveOnCells(g: Term): boolean {
+    const cm = new CellMachine(this.m);
+    cm.compile = compileCellClause;
+    installInlineBuiltins(cm);
+    installTermBuiltins(cm);
+    return cm.solveCell(cm.hp.encode(g, new Map()));
   }
 
   /**
