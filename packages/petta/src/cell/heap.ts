@@ -31,7 +31,9 @@ export const INT_MAX = (1 << 28) - 1;
 export const HEAP_CELLS = 1 << 28;
 /** Global variable slots reserved at the heap's bottom (b_setval/2): PeTTa names a few dozen globals. */
 export const GLOBAL_SLOTS = 4096;
-const TRAIL_CELLS = 1 << 24;
+/** Trail entries at first; the trail doubles when full, up to TRAIL_MAX (a-petta-cell-store.control.bounds). */
+const TRAIL_START = 1 << 16;
+const TRAIL_MAX = 1 << 28;
 
 /** A woken attribute: the attributed variable's attribute list and the value it was bound to (attr_unify_hook). */
 export interface Wakeup {
@@ -41,7 +43,7 @@ export interface Wakeup {
 
 /**
  * The heap with its tables. Cell 0 is never used, so no cell's address is 0; ids start at 0 in each table.
- * Fields are read by generated code (h, top, hb, tr, trail), which reloads them after any call that can allocate.
+ * Fields are read by generated code (h, top, hb, tr), which reloads them after any call that can allocate.
  */
 export class Heap {
   readonly h = new Int32Array(HEAP_CELLS);
@@ -50,9 +52,10 @@ export class Heap {
   top = 1 + GLOBAL_SLOTS;
   /** HB: the heap top when the newest choicepoint was pushed; a binding of a cell below it is trailed. */
   hb = 1 + GLOBAL_SLOTS;
-  readonly trail = new Int32Array(TRAIL_CELLS);
+  /** Each trail entry's address; only bind, undo and tidy touch the trail, so growing replaces it. */
+  private trail = new Int32Array(TRAIL_START);
   /** Each trail entry's old cell, which undo puts back: a variable's self-reference, or a global slot's value. */
-  readonly trailOld = new Int32Array(TRAIL_CELLS);
+  private trailOld = new Int32Array(TRAIL_START);
   /** TR: the first free trail entry. */
   tr = 0;
   /** BOX cells' values: numbers beyond 29 bits, bigints, Floats and Strs. */
@@ -147,10 +150,47 @@ export class Heap {
    */
   bind(a: number, v: number): void {
     if (a < this.hb) {
+      if (this.tr === this.trail.length) this.growTrail();
       this.trailOld[this.tr] = this.h[a]!;
       this.trail[this.tr++] = a;
     }
     this.h[a] = v;
+  }
+
+  /**
+   * Double the trail, a typed array dropping writes past its end (i-cell-bounds-unchecked-1106); past TRAIL_MAX
+   * entries the run fails hard, as a full heap does. Time: the entries copied, amortized one per entry.
+   * am[implements a-petta-cell-store.control.bounds]
+   */
+  private growTrail(): void {
+    const n = this.trail.length * 2;
+    if (n > TRAIL_MAX) throw new Error("cell trail exhausted");
+    const t = new Int32Array(n), o = new Int32Array(n);
+    t.set(this.trail);
+    o.set(this.trailOld);
+    this.trail = t;
+    this.trailOld = o;
+  }
+
+  /**
+   * Drop the trail entries since `mark` for cells at or above HB: a cut back to the choicepoint whose trail mark and
+   * heap top these are made their assignments unconditional, since backtracking there frees those cells, so a
+   * deterministic loop committing a choicepoint each time leaves its trail as it found it (Aït-Kaci 5.11, the
+   * object machine's tidyTrail). Time: the entries since `mark`.
+   * am[implements a-petta-cell-store.control.tidy]
+   */
+  tidy(mark: number): void {
+    const trail = this.trail, old = this.trailOld, hb = this.hb, tr = this.tr;
+    let w = mark;
+    for (let r = mark; r < tr; r++) {
+      const a = trail[r]!;
+      if (a < hb) {
+        trail[w] = a;
+        old[w] = old[r]!;
+        w++;
+      }
+    }
+    this.tr = w;
   }
 
   /** Undo the assignments trailed since `mark`, newest first, each cell taking its old cell back. */

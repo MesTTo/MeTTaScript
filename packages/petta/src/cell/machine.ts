@@ -67,6 +67,12 @@ const NEST = 4;
  * (c-cold-plan-facts-1106). The object engine compiles a clause on the same try (machine.ts COMPILE_AFTER).
  */
 const COMPILE_AFTER = 32;
+/**
+ * Control stack cells: environments and choicepoints. A frame that would pass the end fails the run hard, as a full
+ * heap does, where a typed array would drop the writes (i-cell-bounds-unchecked-1106).
+ * am[implements a-petta-cell-store.control.bounds]
+ */
+const S_LIMIT = 1 << 24;
 /** The goals the meta-call interpreter runs itself (goal) when call/N builds one. */
 const CONTROL = new Set([",/2", ";/2", "->/2", "*->/2", "\\+/1", "call/1", "once/1", "ignore/1", "forall/2"]);
 
@@ -103,13 +109,13 @@ export type ClauseFn = (b0: number, cc: number, pc: number) => Code | null;
 
 export class CellMachine {
   readonly hp = new Heap();
-  readonly S = new Int32Array(1 << 24);
+  readonly S = new Int32Array(S_LIMIT);
   readonly R = new Int32Array(8);
   /** Argument registers A[0..n): a call's argument cells. */
   readonly A = new Int32Array(256);
   /** Choicepoint data that is not a number: a Clauses choicepoint's scan and predicate. */
   readonly SO: unknown[] = [];
-  readonly GEN = new Float64Array(1 << 24);
+  readonly GEN = new Float64Array(S_LIMIT);
   readonly CODE: Code[] = [];
   /** The argument registers as clause selection reads them. */
   private readonly args: CellArgs;
@@ -344,6 +350,7 @@ export class CellMachine {
   /** Push an environment of `n` cell slots whose continuation is the current one. */
   allocate(n: number, cb: number, cc: number): number {
     const S = this.S, R = this.R, e = this.top();
+    if (e + ENV + n > S_LIMIT) throw new Error("cell control stack exhausted");
     S[e] = R[RE]!;
     S[e + 1] = R[RCP]!;
     S[e + 2] = cb;
@@ -356,6 +363,7 @@ export class CellMachine {
   /** Push a choicepoint saving the continuation, the heap and trail tops and A[0..n); returns its index. */
   pushCP(kind: number, cb: number, cc: number, n: number): number {
     const S = this.S, R = this.R, hp = this.hp, b = this.top();
+    if (b + CPH + n > S_LIMIT) throw new Error("cell control stack exhausted");
     S[b] = R[RB]!;
     S[b + 1] = kind;
     S[b + 2] = hp.tr;
@@ -384,7 +392,9 @@ export class CellMachine {
     // A cut past setup_call_cleanup's choicepoint runs its cleanup (Machine.cutTo).
     if (this.cleanups > 0) this.cleanupsAbove(b0, false);
     this.R[RB] = b0;
-    this.hp.hb = this.S[b0 + 9]!;
+    const hp = this.hp, mark = this.S[b0 + 2]!;
+    hp.hb = this.S[b0 + 9]!;
+    if (hp.tr > mark) hp.tidy(mark);
   }
 
   /** Go on with the continuation. */

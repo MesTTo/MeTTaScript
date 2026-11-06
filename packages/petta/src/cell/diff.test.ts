@@ -280,6 +280,34 @@ describe("cell engine against the object machine", () => {
     expect(onObjects(a.m, "hot", [mkVar()])).toStrictEqual({ answers: ["2200"], threw: false });
   });
 
+  // am[verifies a-petta-cell-store.control.tidy] am[verifies a-petta-cell-store.control.bounds]
+  it("tidies the trail when a cut commits, and grows it past its first size with backtracking intact", () => {
+    const src = `
+      loopc([]).
+      loopc([V|T]) :- ( V = 1 -> true ; true ), loopc(T).
+      td(X) :- length(L, 5000), loopc(L), X = done.
+      bindall([]).
+      bindall([1|T]) :- bindall(T).
+      tg(X) :- length(L, 200000), ( bindall(L), fail ; true ), ( L = [V|_], var(V), last(L, W), var(W) -> X = unbound ; X = bound ).
+      last([X], X) :- !.
+      last([_|T], X) :- last(T, X).
+    `;
+    const { m, cm } = machines();
+    for (const c of readClauses(src)) m.addClause(c, true);
+    // Each of td's 5000 if-then-else commits binds a variable older than its choicepoint; the cut leaves none on the trail.
+    const x = cm.hp.encode(mkVar(), new Map());
+    cm.A[0] = x;
+    let trAt = -1;
+    cm.solveAll(cm.proc("td", 1), 1, () => {
+      trAt = cm.hp.tr;
+      return false;
+    });
+    expect(trAt).toBeLessThan(16);
+    // tg trails 200000 bindings under one choicepoint, past the trail's first 65536 entries, then undoes them all.
+    expect(onCells(cm, "tg", [mkVar()])).toStrictEqual(onObjects(m, "tg", [mkVar()]));
+    expect(onCells(cm, "tg", [mkVar()]).answers).toStrictEqual(['"unbound"']);
+  });
+
   it("runs recursive programs as the object machine does", () => {
     const src = `
       app([], L, L).
