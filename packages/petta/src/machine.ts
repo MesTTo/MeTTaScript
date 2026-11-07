@@ -774,6 +774,17 @@ export class Machine {
     if (typeof head === "string") [name, arity] = [head, 0];
     else if (head instanceof Struct) [name, arity] = [head.name, head.args.length];
     else throw typeError("callable", head);
+    const pred = this.clausePred(name, arity);
+    const c = compileClause(head, body);
+    return this.addStoredClause(pred, shareHead(c.head), shareGround(c.body), c.nvars, atEnd);
+  }
+
+  /**
+   * The predicate an asserted clause of name/arity joins, after the checks addClause makes: a protected builtin or a
+   * library predicate refuses it, another builtin of the key is replaced, and the predicate is dynamic unless a
+   * consult adds it.
+   */
+  clausePred(name: string, arity: number): Pred {
     const key = name + "/" + arity;
     // SWI protects ISO and boot-defined predicates; a user definition of any other builtin (plus/3, succ/2)
     // replaces it in the user module.
@@ -786,8 +797,15 @@ export class Machine {
     // A clause a consult loads is static, as in SWI; assert makes the predicate dynamic.
     if (this.sourceFile === null) pred.dynamic = true;
     else pred.file ??= this.sourceFile;
-    const c = compileClause(head, body);
-    const cl = this.db.addClause(pred, shareHead(c.head), shareGround(c.body), c.nvars, atEnd);
+    return pred;
+  }
+
+  /**
+   * Add a clause already in the stored form (compileClause's slots, shareHead's and shareGround's holders) to `pred`,
+   * as addClause does once it has converted the term; the cell engine converts its own (cell/clause.ts).
+   */
+  addStoredClause(pred: Pred, head: Term, body: Term, nvars: number, atEnd: boolean): Clause {
+    const cl = this.db.addClause(pred, head, body, nvars, atEnd);
     cl.file = this.sourceFile;
     return cl;
   }

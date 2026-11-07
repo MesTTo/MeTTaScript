@@ -17,6 +17,7 @@ import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, INT, LIS, REF, STR, boxEq, typ
 import { copyTerm } from "../machine";
 import type { Term } from "../terms";
 import { onObjects, bridgeBuiltin } from "./bridge";
+import { storedClause } from "./clause";
 import type { CellMachine } from "./machine";
 
 const isVarTag = (c: number): boolean => (c & 7) === REF || (c & 7) === ATV;
@@ -786,6 +787,33 @@ export function installTermBuiltins(cm: CellMachine): void {
       for (let j = 1; j <= hp.funArity[f]!; j++) own.push(hp.h[p + j]!);
       return compoundCells(hp, hp.funNames[f]!, [...own, ...extra]);
     });
+
+  // assert/1, assertz/1 and asserta/1: the clause's cells converted to the stored form in one walk (clause.ts) and
+  // added through the object machine's checks (Machine.clausePred), so its errors and the predicate's state are the
+  // object builtin's. A clause with a module qualification, a head that is not an atom or a compound, or one the walk
+  // cannot convert (cyclic, or too deep) goes to the object builtin before anything is checked, which throws as it does.
+  // am[implements a-petta-cell-store.tune.assert]
+  const F_NECK = hp.functor(":-", 2), F_COLON = hp.functor(":", 2);
+  const assertClause = (atEnd: boolean) => (): boolean | null => {
+    let head = hp.deref(A[0]!), body = -1;
+    if ((head & 7) === STR && hp.h[head >> 3] === F_COLON) return null;
+    if ((head & 7) === STR && hp.h[head >> 3] === F_NECK) {
+      body = hp.h[(head >> 3) + 2]!;
+      head = hp.deref(hp.h[(head >> 3) + 1]!);
+      if ((head & 7) === STR && hp.h[head >> 3] === F_COLON) return null;
+    }
+    if ((head & 7) !== STR && ((head & 7) !== ATM || head === hp.NIL)) return null;
+    const stored = storedClause(hp, head, body);
+    if (stored === null) return null;
+    const f = (head & 7) === STR ? hp.h[head >> 3]! >> 3 : -1;
+    const om = cm.om;
+    const pred = f < 0 ? om.clausePred(hp.atomNames[head >> 3]!, 0) : om.clausePred(hp.funNames[f]!, hp.funArity[f]!);
+    om.addStoredClause(pred, stored.head, stored.body, stored.nvars, atEnd);
+    return true;
+  };
+  detOr("assert", 1, assertClause(true));
+  detOr("assertz", 1, assertClause(true));
+  detOr("asserta", 1, assertClause(false));
 
   // Sorting: Array.prototype.sort is stable, as the object builtins rely on.
   def("msort", 2, () => unify(A[1]!, listCells(hp, properListArg(hp, A[0]!).sort((x, y) => compareCells(hp, x, y)), hp.NIL)));
