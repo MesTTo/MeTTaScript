@@ -65,6 +65,8 @@ export const ATTR_PROGRAMS = `
       at33(X) :- put_attr(V, m, 1), term_attvars(f(V, _, V), X0), length(X0, X).
       at34(X) :- put_attr(V, m, 1), del_attrs(V), ( get_attrs(V, _) -> X = some ; X = none ).
       at35(X) :- put_attr(V, lg, L), [V] = [9], X = L.
+      at36(X) :- put_attr(V, rj, x), ( arg(N, g([a], _), [V, N]) -> X = N ; X = none ).
+      at37(X) :- put_attr(V, rj, x), findall(N, arg(N, g([a], _), [V, N]), X).
     `;
 
 /** SWI-Prolog 10.1.17's answers to each atN(X), all of them in order (ai-tmp/attrprog.pl in petta-cell). */
@@ -74,5 +76,5 @@ export const ATTR_SWI: Readonly<Record<string, string>> = {
       at14: "[p,q,r]", at15: "[got(3)]", at16: "[[o2,o1]]", at17: "[[o2,o1]]", at18: "[a]", at19: "[b]", at20: "[a3]",
       at21: "[shared]", at22: "[1]", at23: "[1]", at24: "[[]]", at25: "[[o1]]", at26: "[[2,3]]", at27: "[2,3]",
       at28: "[got(7)]", at29: "[x,y]", at30: "[still]", at31: "[4,5]", at32: "[4]", at33: "[1]", at34: "[none]",
-      at35: "[got(9)]",
+      at35: "[got(9)]", at36: "[2]", at37: "[[2]]",
     };

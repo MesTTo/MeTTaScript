@@ -35,7 +35,7 @@ function holds(goal: string): boolean {
 }
 
 describe("the object machine's attributed variables", () => {
-  // am[verifies i-obj-head-wake-1106]
+  // am[verifies i-obj-head-wake-1106] am[verifies a-obj-stale-wakeup-1107]
   it("give SWI-Prolog's answers, from interpreted and compiled clauses alike", () => {
     for (const [name, text] of Object.entries(ATTR_SWI)) {
       expect(holds(`findall(X, ${name}(X), L), L =@= ${text}`), name).toBe(true);

@@ -600,11 +600,24 @@ export class Machine {
     this.bindAttr(v, t);
   }
 
-  /** Bind, waking each attribute's attr_unify_hook(Value, Other) as SWI does after the unification. */
+  /**
+   * Bind, waking each attribute's attr_unify_hook(Value, Other) as SWI does after the unification. Undoing a trailed
+   * binding drops the wakeups it queued, so a failed try inside a builtin's generator (eachCandidate) leaves none
+   * queued for the next solution, as a failed unification in SWI wakes nothing.
+   * am[implements a-obj-stale-wakeup-1107]
+   */
   private bindAttr(v: Var, t: Term): void {
+    const tl = this.trail.length;
     this.bind(v, t);
     const a = v.attrs;
-    if (a !== null && a.size > 0) for (const [mod, val] of a) this.wakeups.push(mkStruct("$attr_unify_hook", mod, val, t));
+    if (a === null || a.size === 0) return;
+    const w = this.wakeups, n = w.length;
+    for (const [mod, val] of a) w.push(mkStruct("$attr_unify_hook", mod, val, t));
+    // An untrailed binding is never undone, and a queue flushed or swapped since holds none of these.
+    if (this.trail.length > tl)
+      this.trail.push(() => {
+        if (this.wakeups === w && w.length > n) w.length = n;
+      });
   }
 
   /**
