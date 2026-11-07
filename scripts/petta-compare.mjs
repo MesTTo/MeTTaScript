@@ -51,8 +51,10 @@ const PETTA = args.petta ? resolve(args.petta) : null;
 const REPEAT = Number(args.repeat ?? 1);
 const ROWS = args.rows ? resolve(args.rows) : null;
 const CAP = 65536;
-// GNU time's -q leaves its one format line as the last line of stderr, whatever the command's exit.
-const TIME = "/usr/bin/time";
+// GNU time's -q leaves its one format line as the last line of stderr, whatever the command's exit: /usr/bin/time on
+// Linux, Homebrew's gtime where /usr/bin/time is BSD's (macOS, c-measure-hosts-1107).
+// am[implements a-petta-cell-store.measure]
+const TIME = ["/usr/bin/time", "gtime"].find((t) => spawnSync(t, ["-q", "-f", "%M", "true"]).status === 0) ?? "/usr/bin/time";
 const MEASURE = PETTA !== null;
 if (MEASURE && spawnSync(TIME, ["-q", "-f", "%M", "true"]).status !== 0) throw new Error(`${TIME} is not GNU time with -q`);
 if (ROWS && !MEASURE) throw new Error("--rows needs --petta");
