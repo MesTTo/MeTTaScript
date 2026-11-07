@@ -261,8 +261,15 @@ export class Database {
   }
 
   /** Store a clause, its variables replaced by slots (see compileClause). */
-  addClause(pred: Pred, head: Term, body: Term, nvars: number, atEnd: boolean): Clause {
+  /**
+   * Add a stored clause to `pred` in a new generation. `argHashes`, when given, are the head's argument hashes as
+   * clauseArgHash would compute them, which a caller holding the head as cells computes more cheaply than the stored
+   * terms are walked (cell/clause.ts cellArgHashes); they are in place before the predicate's indexes see the clause.
+   * am[implements a-petta-next-1108.speed.cut.arghash]
+   */
+  addClause(pred: Pred, head: Term, body: Term, nvars: number, atEnd: boolean, argHashes?: Clause["argHashes"]): Clause {
     const c = new Clause(pred, head, body, nvars, ++this.generation, this.seq++);
+    if (argHashes !== undefined) c.argHashes = argHashes;
     pred.add(c, atEnd);
     this.tx[this.tx.length - 1]?.added.push(c);
     return c;

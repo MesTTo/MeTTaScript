@@ -17,7 +17,7 @@ import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, INT, LIS, REF, STR, boxEq, typ
 import { copyTerm } from "../machine";
 import type { Term } from "../terms";
 import { onObjects, bridgeBuiltin } from "./bridge";
-import { storedClause } from "./clause";
+import { cellArgHashes, storedClause } from "./clause";
 import type { CellMachine } from "./machine";
 
 const isVarTag = (c: number): boolean => (c & 7) === REF || (c & 7) === ATV;
@@ -827,7 +827,7 @@ export function installTermBuiltins(cm: CellMachine): void {
     const f = (head & 7) === STR ? hp.h[head >> 3]! >> 3 : -1;
     const om = cm.om;
     const pred = f < 0 ? om.clausePred(hp.atomNames[head >> 3]!, 0) : om.clausePred(hp.funNames[f]!, hp.funArity[f]!);
-    om.addStoredClause(pred, stored.head, stored.body, stored.nvars, atEnd);
+    om.addStoredClause(pred, stored.head, stored.body, stored.nvars, atEnd, f < 0 ? false : cellArgHashes(hp, head));
     return true;
   };
   detOr("assert", 1, assertClause(true));

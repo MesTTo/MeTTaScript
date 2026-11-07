@@ -24,7 +24,7 @@ import { installConsult } from "../consult";
 import { consultLibrary, installLibrary } from "../library";
 import { Machine } from "../machine";
 import { readClauses } from "../prolog-reader";
-import { groundHash } from "../db";
+import { Ground, clauseArgHash, groundHash } from "../db";
 import { Cons, Float, NIL, Str, Struct, Var, deref, listToArray, mkVar, type Term } from "../terms";
 import { installTermBuiltins } from "./builtins";
 import { compileCellClause, installInlineBuiltins } from "./compile";
@@ -566,6 +566,33 @@ describe.each([
     fc.assert(
       fc.property(ground as fc.Arbitrary<Term>, (t) => {
         expect(hp.groundHash(hp.encode(t, new Map()))).toBe(groundHash(t));
+      }),
+      { numRuns: 500 },
+    );
+  });
+
+  // am[verifies a-petta-next-1108.speed.cut.arghash]
+  it("asserts a clause on cells with the argument hashes its stored head gives", () => {
+    const leaf = fc.oneof(
+      fc.constantFrom<Term>("a", "[]", "", NIL, new Str("s"), new Float(1.5), new Float(-0)),
+      fc.integer({ min: -(2 ** 31), max: 2 ** 31 }) as fc.Arbitrary<Term>,
+      fc.constant(null).map(() => mkVar() as Term),
+    );
+    const { t: arg } = fc.letrec((tie) => ({
+      t: fc.oneof({ depthSize: "small" }, leaf, tie("s"), tie("l")),
+      s: fc.tuple(fc.constantFrom("f", "g"), fc.array(tie("t"), { minLength: 1, maxLength: 3 })).map(([n, a]) => new Struct(n, a as Term[]) as Term),
+      l: fc.tuple(tie("t"), tie("t")).map(([h, t]) => new Cons(h as Term, t as Term) as Term),
+    }));
+    const { m, cm } = machines();
+    fc.assert(
+      fc.property(fc.array(arg as fc.Arbitrary<Term>, { minLength: 1, maxLength: 3 }), (args) => {
+        expect(onCells(cm, "assertz", [new Struct("ah", args)]).threw).toBe(false);
+        const c = m.db.get("ah", args.length)!.clauses.at(-1)!;
+        // Computed from the cells at the assert, not walked from the stored head on first use.
+        expect(c.argHashes).not.toBe(undefined);
+        const stored = (c.head as Struct).args;
+        for (let i = 0; i < args.length; i++) expect(clauseArgHash(c, i)).toBe(groundHash(stored[i]!));
+        if (args.length >= 2 && !stored.some((a) => a instanceof Ground || a instanceof Cons || a instanceof Struct)) expect(c.argHashes).toBe(false);
       }),
       { numRuns: 500 },
     );

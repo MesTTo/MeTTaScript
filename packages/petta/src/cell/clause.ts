@@ -8,7 +8,7 @@
 // two rewrites. A term too deep for the walk, or cyclic, is left to the object builtin, which treats it as it does.
 // am[implements a-petta-cell-store.tune.assert]
 
-import { Ground, Slot } from "../db";
+import { Ground, Slot, type Clause } from "../db";
 import { Cons, NIL, Struct, type Term } from "../terms";
 import { ATM, ATV, BOX, INT, LIS, REF, STR, type Heap } from "./heap";
 
@@ -109,6 +109,27 @@ class Converter {
  * numbered over the head and then the body. Null when the walk runs past its budget or out of stack, which leaves the
  * clause to the object builtin. Time: the clause's size.
  */
+/**
+ * The argument hashes of the clause head at cell `head` (a structure), as db.ts clauseArgHash computes them from the
+ * stored head (headArgHashes): one argument's hash itself, false when no argument is compound, else each argument's;
+ * the cell heap's groundHash agrees with the database's. Computed from the cells an assert holds, they spare the
+ * argument index walking the stored terms, 8 percent of matespacefast (c-msf-profile-1108). Time: the head's size.
+ * am[implements a-petta-next-1108.speed.cut.arghash]
+ */
+export function cellArgHashes(hp: Heap, head: number): Clause["argHashes"] {
+  const p = head >> 3, n = hp.funArity[hp.h[p]! >> 3]!;
+  if (n === 1) return hp.groundHash(hp.h[p + 1]!);
+  let compound = false;
+  for (let i = 1; i <= n && !compound; i++) {
+    const t = hp.deref(hp.h[p + i]!) & 7;
+    compound = t === STR || t === LIS;
+  }
+  if (!compound) return false;
+  const out = new Array<number | null>(n);
+  for (let i = 0; i < n; i++) out[i] = hp.groundHash(hp.h[p + 1 + i]!);
+  return out;
+}
+
 export function storedClause(hp: Heap, head: number, body: number): StoredClause | null {
   const cv = new Converter(hp);
   try {

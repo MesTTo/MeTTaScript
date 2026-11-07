@@ -805,10 +805,11 @@ export class Machine {
 
   /**
    * Add a clause already in the stored form (compileClause's slots, shareHead's and shareGround's holders) to `pred`,
-   * as addClause does once it has converted the term; the cell engine converts its own (cell/clause.ts).
+   * as addClause does once it has converted the term; the cell engine converts its own (cell/clause.ts) and gives its
+   * head's argument hashes (Database.addClause).
    */
-  addStoredClause(pred: Pred, head: Term, body: Term, nvars: number, atEnd: boolean): Clause {
-    const cl = this.db.addClause(pred, head, body, nvars, atEnd);
+  addStoredClause(pred: Pred, head: Term, body: Term, nvars: number, atEnd: boolean, argHashes?: Clause["argHashes"]): Clause {
+    const cl = this.db.addClause(pred, head, body, nvars, atEnd, argHashes);
     cl.file = this.sourceFile;
     return cl;
   }
