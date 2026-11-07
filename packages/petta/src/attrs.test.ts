@@ -10,9 +10,9 @@
 import { describe, expect, it } from "vitest";
 import { ATTR_PROGRAMS, ATTR_SWI } from "./attr-fixture";
 import { installBuiltins } from "./builtins";
-import { installClpfd } from "./clpfd";
+import { consultClpfd, installClpfd } from "./clpfd";
 import { installConsult } from "./consult";
-import { installLibrary } from "./library";
+import { consultLibrary, installLibrary } from "./library";
 import { Machine } from "./machine";
 import { readClauses } from "./prolog-reader";
 import type { Struct } from "./terms";
@@ -22,8 +22,10 @@ function holds(goal: string): boolean {
   const m = new Machine();
   installBuiltins(m);
   installLibrary(m);
+  consultLibrary(m);
   installConsult(m);
   installClpfd(m);
+  consultClpfd(m);
   for (const c of readClauses(ATTR_PROGRAMS)) m.addClause(c, true);
   const q = (readClauses(`q :- ${goal}.`)[0] as Struct).args[1]!;
   let ok = false;

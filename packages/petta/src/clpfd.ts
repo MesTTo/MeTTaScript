@@ -175,12 +175,21 @@ const CLPFD_PL = String.raw`
 '$clpfd_wake'([G|Gs]) :- call(G), '$clpfd_wake'(Gs).
 `;
 
+/** Install the constraint builtins, written in code. */
 export function installClpfd(m: Machine): void {
   for (const op of ["#=", "#\\=", "#<", "#>", "#=<", "#>="])
     m.defBuiltin(op, 2, { det: (m2, [l, r]) => post(m2, op, l!, r!) });
   m.defBuiltin("$clpfd_post", 3, {
     det: (m2, [op, l, r]) => post(m2, deref(op!) as string, l!, r!),
   });
+}
+
+/**
+ * Add clpfd's attribute hook clauses (CLPFD_PL), as consulting PeTTa's source does; an image's database holds them
+ * already, so a machine an image loads into skips their parse (i-install-text-1108).
+ * am[implements a-petta-next-1108.startup.cut.installtext]
+ */
+export function consultClpfd(m: Machine): void {
   // Every attribute module adds its own '$attr_unify_hook'/3 clause, so the predicate is shared, not library.
   m.db.ensure("$attr_unify_hook", 3).multifile = true;
   m.db.ensure("$attribute_goals", 4).multifile = true;

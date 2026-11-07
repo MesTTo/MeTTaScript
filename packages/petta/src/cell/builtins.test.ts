@@ -14,7 +14,7 @@ import fc from "fast-check";
 import { beforeEach, describe, expect, it } from "vitest";
 import { installBuiltins } from "../builtins";
 import { installConsult } from "../consult";
-import { installLibrary } from "../library";
+import { consultLibrary, installLibrary } from "../library";
 import { Machine } from "../machine";
 import { Cons, Float, NIL, PrologError, Str, Struct, Var, deref, mkVar, type Term } from "../terms";
 import { installTermBuiltins } from "./builtins";
@@ -72,6 +72,7 @@ function objectMachine(): Machine {
   const m = new Machine();
   installBuiltins(m);
   installLibrary(m);
+  consultLibrary(m);
   installConsult(m);
   return m;
 }

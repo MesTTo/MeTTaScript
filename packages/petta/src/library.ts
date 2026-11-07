@@ -8,7 +8,8 @@
 // Free/Lambda calls, which copy the lambda per call (a lambda
 // in source code is compiled at load time instead, goal-expansion.ts). SWI's library modules
 // (lists, apply, pairs, aggregate, error, ordsets, heaps, ...) are its own sources, vendored under swipl/library
-// and autoloaded by consult.ts.
+// and autoloaded by consult.ts. The Prolog clauses are added by consulting (consultLibrary); a machine an image loads
+// into gets them from the image's database.
 // am[implements a-pe-swi-builtins]
 
 import { Machine, copyTerm } from "./machine";
@@ -38,9 +39,17 @@ setof(T, G, S) :- bagof(T, G, L), sort(L, S).
 '$same_witness'(Rest, _, [], Rest).
 `;
 
-/** Install library predicates and yall's >>/N. */
-export function installLibrary(m: Machine): void {
+/**
+ * Add the library predicates written in Prolog (LIBRARY_PL), as consulting PeTTa's source does; an image's database
+ * holds them already, so a machine an image loads into skips their parse (i-install-text-1108).
+ * am[implements a-petta-next-1108.startup.cut.installtext]
+ */
+export function consultLibrary(m: Machine): void {
   for (const c of readClauses(LIBRARY_PL)) m.addLibraryClause(c);
+}
+
+/** Install yall's >>/N and Free/Lambda, the library predicates written in code. */
+export function installLibrary(m: Machine): void {
   // yall: Params>>Lambda called with N extra arguments copies the lambda (sharing Free in Free/Lambda), binds
   // the copied parameters to the arguments, and calls the copied body with any arguments left over.
   for (let n = 0; n <= 7; n++) {

@@ -14,13 +14,13 @@ import { fileURLToPath } from "node:url";
 import { setFlagsFromString } from "node:v8";
 import { runInNewContext } from "node:vm";
 import { installBuiltins, formatString } from "./builtins";
-import { installClpfd } from "./clpfd";
+import { consultClpfd, installClpfd } from "./clpfd";
 import { installProcess } from "./process";
 import { installJanus } from "./janus";
 import { consultFile, installConsult, mainGoalOf, markLoaded } from "./consult";
 import { engineHash, loadImage, readImage } from "./image";
 import { installSpecCache } from "./spec-cache";
-import { installLibrary } from "./library";
+import { consultLibrary, installLibrary } from "./library";
 import { Machine, profileReport } from "./machine";
 import { errorMessage } from "./messages";
 import { readClauses } from "./prolog-reader";
@@ -120,8 +120,14 @@ export class HostedPetta {
     installSpecCache(m);
   }
 
-  /** Consult PeTTa's main.pl and everything it loads, as SWI does when run.sh starts it. */
+  /**
+   * Consult PeTTa's main.pl and everything it loads, as SWI does when run.sh starts it, after the library and clpfd
+   * clauses written in Prolog, which an image holds instead.
+   * am[implements a-petta-next-1108.startup.cut.installtext]
+   */
   consultSource(): void {
+    consultLibrary(this.m);
+    consultClpfd(this.m);
     markLoaded(this.m, join(this.srcDir, "load_cache.pl"));
     for (const c of readClauses(UNCACHED_LOAD_PL)) this.m.addClause(c, true);
     consultFile(this.m, join(this.srcDir, "main.pl"));
