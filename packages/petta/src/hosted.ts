@@ -179,10 +179,18 @@ export class HostedPetta {
     installInlineBuiltins(cm);
     installTermBuiltins(cm);
     // V8 exposes gc to contexts made after its expose-gc flag is set: a fresh context's gc collects this isolate's
-    // heap, which the machine uses to bound it (CellMachine.boundV8Heap).
+    // heap, which the machine uses to bound it (CellMachine.boundV8Heap). The context, 2.3 M instructions, is made
+    // when the bound first asks for a collection, which a short run never does (c-startup-phases-1108).
     // am[implements a-petta-cell-store.tune.v8bound]
-    setFlagsFromString("--expose-gc");
-    cm.majorGc = runInNewContext("gc") as () => void;
+    // am[implements a-petta-next-1108.startup.cut.cellsetup]
+    let gc: (() => void) | null = null;
+    cm.majorGc = () => {
+      if (gc === null) {
+        setFlagsFromString("--expose-gc");
+        gc = runInNewContext("gc") as () => void;
+      }
+      gc();
+    };
     return cm.solveCell(cm.hp.encode(g, new Map()));
   }
 
