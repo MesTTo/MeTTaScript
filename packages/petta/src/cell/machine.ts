@@ -1400,9 +1400,23 @@ export class CellMachine {
    * existence_error otherwise, as Machine.callCell does.
    */
   private resolve(p: CellProc): Pred | undefined {
-    const om = this.om;
+    const om = this.om, autoload = om.autoload;
     let pred = (p.pred = om.db.preds.get(p.key));
-    if (pred === undefined && om.autoload !== null && om.autoload(p.name, p.arity)) pred = p.pred = om.db.preds.get(p.key);
+    if (pred === undefined && autoload !== null) {
+      // The library's load runs its goals on cells (Machine.solveProgram), whose solves reuse the argument registers
+      // and collect: the call's arguments, A[0..arity), are held across it and put back from where they moved
+      // (i-autoload-args-1108).
+      // am[implements a-petta-errors-fix-1108.stack.args]
+      const A = this.A, n = p.arity;
+      const loaded = this.hold(Array.from(A.subarray(0, n)), (at) => {
+        try {
+          return autoload(p.name, n);
+        } finally {
+          for (let i = 0; i < n; i++) A[i] = at(i);
+        }
+      });
+      if (loaded) pred = p.pred = om.db.preds.get(p.key);
+    }
     if (pred === undefined && om.flags.get("unknown") !== "fail") throw existenceError("procedure", new Struct("/", [p.name, p.arity]));
     return pred;
   }
@@ -1700,6 +1714,24 @@ export class CellMachine {
   /** Solve goal cell `g` once, its cut local; bindings persist on success. */
   solveCell(g: number): boolean {
     return this.solveFrom(() => this.goal(g, this.R[RB]!, this.R[RCC]!));
+  }
+
+  /**
+   * Solve object goal `goal` once on cells, its variables bound to the solution's values on success (db.ts
+   * GoalEngine): the object machine hands here the goals of files loaded at run time and the top level's error
+   * message rules (Machine.solveProgram), so they run under this machine's stack and heap limits and see its global
+   * variables. Time: the goal's encoding and decoding of its variables, plus the solve.
+   * am[implements a-petta-errors-fix-1108.stack.cells]
+   */
+  solveTerm(goal: Term): boolean {
+    const vars = new Map<Var, number>();
+    const g = this.hp.encode(goal, vars);
+    const objs = [...vars.keys()];
+    return this.hold([...vars.values()], (at) => {
+      if (!this.solveCell(g)) return false;
+      const back = new Map<number, Var>();
+      return objs.every((v, i) => this.om.unify(v, this.hp.decode(at(i), back)));
+    });
   }
 
   /** Solve the goal predicate `p` with A[0..n) once; bindings persist on success. */

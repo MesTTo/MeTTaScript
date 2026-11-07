@@ -68,6 +68,16 @@ export class Ground {
   constructor(public readonly t: Term) {}
 }
 
+/**
+ * The engine running a program on a database besides the object machine, as the object machine reaches it: the cell
+ * machine (cell/machine.ts).
+ * am[implements a-petta-errors-fix-1108.stack.cells]
+ */
+export interface GoalEngine {
+  /** Solve object goal `goal` once, its variables bound to the solution's values on success. */
+  solveTerm(goal: Term): boolean;
+}
+
 /** Indexing state that follows a predicate's clauses (swi-index.ts SwiIndex). */
 export interface ClauseObserver {
   added(c: Clause, atEnd: boolean): void;
@@ -144,10 +154,11 @@ export class Database {
   private readonly tx: TxLog[] = [];
   /**
    * The cell machine reading this database (cell/machine.ts), at most one: the code it compiles for a clause is kept
-   * in the clause (Clause.cell) and bound to that machine's heap and registers.
+   * in the clause (Clause.cell) and bound to that machine's heap and registers; it also runs the program's goals the
+   * object machine meets (Machine.solveProgram).
    */
   // am[implements a-petta-cell-store.control]
-  cellMachine: unknown = null;
+  cellMachine: GoalEngine | null = null;
 
   beginTransaction(): void {
     this.tx.push({ added: [], removed: [] });

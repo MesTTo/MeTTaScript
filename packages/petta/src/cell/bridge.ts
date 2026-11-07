@@ -8,7 +8,8 @@
 // att/3 list and each variable it bound the encoding of its value, at their own cells, those still unbound standing
 // for their own cells; binding an attributed cell wakes its hooks on the cells, the object machine's own wakeups being
 // dropped; the object machine's trail is cut back to where it was; goals it pushed come back as one goal cell to run
-// next. A builtin whose effect a decoded copy cannot carry (setarg/3, b_setval/2) is refused as not built yet. The
+// next; a loading builtin, whose file's goals run on the cell machine, has the decoded variables' cells held across
+// them. A builtin whose effect a decoded copy cannot carry (setarg/3, b_setval/2) is refused as not built yet. The
 // frequent builtins run natively instead (builtins.ts, c-builtin-calls-1106); the text builtins stay here, their text
 // work outweighing the bridge's.
 // am[implements a-petta-cell-store.gate2]
@@ -81,11 +82,27 @@ export function bridgeBuiltin(key: string, b: Builtin): (cm: CellMachine, n: num
     for (let i = 0; i < n; i++) args.push(hp.decode(cm.A[i]!, back));
     const mark = om.trail.length, goals = om.goals, woken = om.wakeups.length, boundary = om.trailBoundary;
     om.trailBoundary = Infinity;
+    // A loading builtin runs its file's goals on cells (Machine.solveProgram), whose collections move the decoded
+    // variables' cells: they are held across its run and the map rebuilt from where they moved
+    // (i-bridge-cells-nested-1108).
+    // am[implements a-petta-errors-fix-1108.stack.hold]
+    const run = <T>(fn: () => T): T => {
+      if (!SOLVES.has(key) || back.size === 0) return guarded(cm, key, fn);
+      const vars = [...back.values()];
+      return cm.hold([...back.keys()], (at) => {
+        try {
+          return guarded(cm, key, fn);
+        } finally {
+          back.clear();
+          vars.forEach((v, i) => back.set(at(i), v));
+        }
+      });
+    };
     try {
       let ok: boolean;
-      if (b.det !== undefined) ok = guarded(cm, key, () => b.det!(m, args));
+      if (b.det !== undefined) ok = run(() => b.det!(m, args));
       else if (b.detMode !== undefined) {
-        const r = guarded(cm, key, () => b.detMode!(m, args));
+        const r = run(() => b.detMode!(m, args));
         if (r === null) throw new Error(`cell engine: ${key} in this mode needs its generator, which is not built yet`);
         ok = r;
       } else throw new Error(`cell engine: the nondeterministic builtin ${key} reached the det bridge`);

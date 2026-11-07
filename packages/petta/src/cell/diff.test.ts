@@ -15,6 +15,7 @@
 // am[verifies a-petta-cell-store.compile.diff]
 
 import fc from "fast-check";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ATTR_PROGRAMS, ATTR_SWI } from "../attr-fixture";
 import { installBuiltins } from "../builtins";
@@ -29,8 +30,13 @@ import { installTermBuiltins } from "./builtins";
 import { compileCellClause, installInlineBuiltins } from "./compile";
 import { Heap } from "./heap";
 import { CellMachine } from "./machine";
+import { bridgeBuiltin } from "./bridge";
+import type { Builtin } from "../machine";
 
 const MAX_ANSWERS = 40;
+
+/** The file whose load-time goals lg1 consults. */
+const LOAD_GOALS = fileURLToPath(new URL("./load-goals.fixture.pl", import.meta.url));
 
 /** A canonical text of terms, variables numbered by first occurrence across them, so variant answers print equal. */
 function canon(ts: Term[]): string {
@@ -315,6 +321,8 @@ describe.each([
       sz3(L) :- length(L, 3).
       sz4(T) :- functor(T, f, 3).
       sz5(L) :- L = [a|T], length(L, 3), T = [_, b].
+      lg1(X) :- consult('${LOAD_GOALS}'), nb_getval(lg_key, A), ( nb_current(lg_err, B) -> true ; B = none ), nb_getval(lg_if, C), X = r(A, B, C).
+      al1(X) :- catch(atom(_, x, y), error(E, _), true), X = E.
       mem(X, [X|_]).
       mem(X, [_|T]) :- mem(X, T).
       db10(X) :- assertz(w10(1)), w10(X), retract(w10(X)), \\+ w10(_).
@@ -330,7 +338,10 @@ describe.each([
     // sz3 to sz5 build lists and compounds of fresh variables from a length.
     // am[verifies a-petta-cell-store.gc.atoms]
     // am[verifies a-petta-errors-fix-1108.length]
-    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7", "gv8", "gv9", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7", "gv10", "gv11", "fn1", "fn2", "wo1", "wo2", "wo3", "ps1", "tr1", "tr2", "as1", "as2", "gc1", "gc2", "gc3", "bx1", "bx2", "bx3", "bx4", "fa2", "fa3", "fa4", "fa5", "ag1", "ag2", "sz3", "sz4", "sz5"]) {
+    // al1 calls atom/3, which the autoloader resolves by loading dcg/basics, whose load-time goals run on cells
+    // in the middle of the call, which keeps its arguments (i-autoload-args-1108).
+    // am[verifies a-petta-errors-fix-1108.stack.args]
+    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7", "gv8", "gv9", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7", "gv10", "gv11", "fn1", "fn2", "wo1", "wo2", "wo3", "ps1", "tr1", "tr2", "as1", "as2", "gc1", "gc2", "gc3", "bx1", "bx2", "bx3", "bx4", "fa2", "fa3", "fa4", "fa5", "ag1", "ag2", "sz3", "sz4", "sz5", "al1"]) {
       const a = machines(), b = machines();
       for (const c of readClauses(src)) {
         a.m.addClause(c, true);
@@ -354,6 +365,15 @@ describe.each([
       const { m, cm } = machines();
       for (const c of readClauses(src)) m.addClause(c, true);
       for (const name of ["sz1", "sz2"]) expect(onCells(cm, name, [mkVar()]), name).toStrictEqual({ answers: ['"resource_error"("stack")'], threw: false });
+    }
+    // A file loaded at run time runs its directives and conditional compilation goals on the cell engine: two thousand
+    // workers pass its control stack's end there, which the object machine, whose fibers take no area, runs to the end
+    // (i-obj-no-stack-limit-1107), and the global variables they set are the program's own.
+    // am[verifies a-petta-errors-fix-1108.stack]
+    {
+      const { m, cm } = machines();
+      for (const c of readClauses(src)) m.addClause(c, true);
+      expect(onCells(cm, "lg1", [mkVar()])).toStrictEqual({ answers: ['"r"("loaded","resource_error"("stack"),"cells")'], threw: false });
     }
   });
 
@@ -663,5 +683,27 @@ describe("cell engine atom collection", () => {
     const bar = cm.hp.runtimeAtom("bar1");
     expect(bar >> 3).toBe(foo >> 3);
     expect(call(bar)).toBe(true);
+  });
+});
+
+// am[verifies a-petta-errors-fix-1108.stack.hold]
+describe("cell engine bridge", () => {
+  it("binds a loading builtin's argument where collections during its file's goals moved it", () => {
+    gcEvery = null;
+    const { m, cm } = machines();
+    for (const c of readClauses("grow(0) :- !.\ngrow(N) :- length(_, 50), N1 is N - 1, grow(N1).")) m.addClause(c, true);
+    cm.collectEvery(0);
+    // A builtin in the loading set that runs program goals on cells (Machine.solveProgram), then binds its argument.
+    const load: Builtin = { det: (m2, [x]) => m2.solveProgram(new Struct("grow", [20])) && m2.unify(x!, "bound") };
+    const det = bridgeBuiltin("consult/1", load);
+    // Junk below the argument, which the first collection frees, so the argument's cell moves down.
+    cm.hp.encode(new Struct("junk", [new Struct("j", [mkVar(), "a"])]), new Map());
+    const v = cm.hp.encode(mkVar(), new Map());
+    cm.A[0] = v;
+    cm.hold([v], (at) => {
+      expect(det(cm, 1)).toBe(true);
+      expect(at(0)).not.toBe(v);
+      expect(cm.hp.decode(at(0), new Map())).toBe("bound");
+    });
   });
 });

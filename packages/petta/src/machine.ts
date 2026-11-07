@@ -7,6 +7,9 @@
 // Cut, catch/throw, findall, negation, if-then-else and soft-cut are control frames on that stack, and the
 // machine is reentrant so builtins and the translator can solve subgoals. A call tries the clauses SWI's clause
 // selection picks (swi-index.ts), so a choicepoint stays exactly where SWI leaves one.
+// Once a cell machine runs the program (cell/), this machine has consulted PeTTa's own sources and hosts the database
+// and the builtins the cell machine reaches; a goal of the program it meets goes to the cell machine
+// (Machine.solveProgram).
 // am[implements a-pe-runtime]
 
 import { readSync } from "node:fs";
@@ -1153,6 +1156,18 @@ export class Machine {
       this.goals = savedGoals;
       this.curCC = savedCC;
     }
+  }
+
+  /**
+   * Solve a goal of the program once on the engine running it: the cell machine once one does (db.ts GoalEngine), here
+   * before one does, as PeTTa's own sources load. A file loaded at run time and the top level's error message rules
+   * come here, so no goal of a program run on cells meets the object machine, which has no stack limit
+   * (c-obj-solves-on-cells-1108, i-obj-no-stack-limit-1107). Bindings persist on success.
+   * am[implements a-petta-errors-fix-1108.stack.cells]
+   */
+  solveProgram(goal: Term): boolean {
+    const engine = this.db.cellMachine;
+    return engine !== null ? engine.solveTerm(goal) : this.solveOnce(goal);
   }
 
   /**

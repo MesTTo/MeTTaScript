@@ -6,9 +6,10 @@
 // src, its libraries and the vendored SWI libraries: clauses enter one namespace (module directives and M:
 // qualifications are dropped, which c-petta-flatten-safe shows keeps every definition), DCG rules translate as
 // SWI's dcg_translate_rule/2 does, directives run (dynamic, multifile, table, initialization, use_module and
-// ensure_loaded of files resolved against the loading file's directory, each loaded once), plunit blocks are
-// skipped, and prolog_load_context/2 answers for the file being loaded. Clause bodies are goal-expanded as SWI
-// expands them once library(yall) is loaded (goal-expansion.ts), meta_predicate declarations taken into account.
+// ensure_loaded of files resolved against the loading file's directory, each loaded once), their goals and if/elif
+// conditions on the engine running the program (Machine.solveProgram), plunit blocks are skipped, and
+// prolog_load_context/2 answers for the file being loaded. Clause bodies are goal-expanded as SWI expands them once
+// library(yall) is loaded (goal-expansion.ts), meta_predicate declarations taken into account.
 // am[implements a-hp-loader]
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -507,11 +508,15 @@ function warnRedefinition(m: Machine, clause: Term, file: string): void {
     m.err(`Warning: ${file}: ${name}/${arity} is also defined in ${p.file}; one namespace merges their clauses\n`);
 }
 
-/** A directive goal: run once; failure and errors are reported as SWI's loader warns, and loading goes on. */
+/**
+ * A directive goal: run once on the engine running the program (Machine.solveProgram); failure and errors are reported
+ * as SWI's loader warns, and loading goes on.
+ * am[implements a-petta-errors-fix-1108.stack.cells]
+ */
 function runDirective(m: Machine, ctx: LoadCtx, g: Term): void {
   const run = (): void => {
     try {
-      if (!m.solveOnce(g)) m.err(`Warning: ${ctx.file}:\nWarning:    Goal (directive) failed\n`);
+      if (!m.solveProgram(g)) m.err(`Warning: ${ctx.file}:\nWarning:    Goal (directive) failed\n`);
     } catch (e) {
       if (!(e instanceof PrologError)) throw e;
       m.err(`Warning: ${ctx.file}:\nWarning:    Goal (directive) raised ${writeTerm(e.ball, { quoted: true })}\n`);
@@ -527,8 +532,9 @@ function directive(m: Machine, ctx: LoadCtx, g: Term): void {
   const arity = d instanceof Struct ? d.args.length : 0;
   const a = d instanceof Struct ? d.args : [];
   // Conditional compilation (:- if(G). ... :- elif(G). ... :- else. ... :- endif.) nests and runs first.
+  // am[implements a-petta-errors-fix-1108.stack.cells]
   if (name === "if" && arity === 1) {
-    const on = loading(ctx) && !ctx.inTests && m.solveOnce(a[0]!);
+    const on = loading(ctx) && !ctx.inTests && m.solveProgram(a[0]!);
     ctx.conds.push({ active: on, taken: on });
     return;
   }
@@ -536,7 +542,7 @@ function directive(m: Machine, ctx: LoadCtx, g: Term): void {
     const top = ctx.conds[ctx.conds.length - 1];
     if (top === undefined) return;
     const outer = ctx.conds.slice(0, -1).every((c) => c.active);
-    top.active = outer && !top.taken && m.solveOnce(a[0]!);
+    top.active = outer && !top.taken && m.solveProgram(a[0]!);
     top.taken ||= top.active;
     return;
   }

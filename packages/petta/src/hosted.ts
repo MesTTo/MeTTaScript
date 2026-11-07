@@ -190,7 +190,8 @@ export class HostedPetta {
     const lines = mkVar();
     let text: string | null = null;
     try {
-      if (this.m.solveOnce(mkStruct("error_message", b.args[0]!, lines, NIL))) text = this.renderLines(lines);
+      // am[implements a-petta-errors-fix-1108.stack.cells]
+      if (this.m.solveProgram(mkStruct("error_message", b.args[0]!, lines, NIL))) text = this.renderLines(lines);
     } catch (e) {
       if (!(e instanceof PrologError)) throw e;
     }
