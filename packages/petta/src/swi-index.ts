@@ -397,6 +397,15 @@ class ClauseList {
     if (this.unindexed || this.arity === 0) return this.allScan();
     const n = this.liveCount();
     if (n === 0) return NO_CLAUSES;
+    // A list of one live clause scans it when its primary key is unbound or the call's matches it, and nothing else,
+    // which is what the keyed scan admits, without the index lookups (c-call-path-profile-1108).
+    // am[implements a-petta-next-1108.speed.cut.oneclause]
+    if (n === 1 && this.clauses.length === 1) {
+      const k = this.keyOf(this.clauses[0]!, this.primary);
+      if (k === null) return this.allScan();
+      const pkey = argKey(args, this.primary);
+      return pkey === null || matches(k, pkey) ? this.allScan() : NO_CLAUSES;
+    }
     for (;;) {
       const pindex = this.primary;
       let fast: Scan | null = null;
