@@ -21,7 +21,7 @@ import { CellArgs } from "./args";
 import { Bag } from "./bag";
 import { bridgeBuiltin, nextSolution, objectTrailMark, startNondet, takeSolution, type BridgeRun } from "./bridge";
 import { build, clauseCells, headProgram, matchHead, runHead, type HeadProgram } from "./headprog";
-import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, Heap, INT, REF, STR, reserved, stackExhausted, type TrailState, type Wakeup } from "./heap";
+import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, Heap, INT, REF, STR, noWakeups, reserved, stackExhausted, type TrailState, type Wakeup } from "./heap";
 
 /** Code the trampoline runs: the code to run next, or null at a run's exit. */
 export type Code = () => Code | null;
@@ -1153,7 +1153,7 @@ export class CellMachine {
       hp.top = hp.hb = 1 + GLOBAL_SLOTS;
       hp.frozen = 0;
       hp.setTrailState(null);
-      hp.wakeups = [];
+      hp.wakeups = noWakeups();
       this.sLimit = base + FIBER_S;
       this.inFiber = true;
       this.roots = [];
@@ -1668,7 +1668,7 @@ export class CellMachine {
     const sNest = this.nest;
     // The run queues its own wakeups: its failures empty the queue, which must not drop the caller's.
     const sWake = hp.wakeups;
-    hp.wakeups = [];
+    hp.wakeups = noWakeups();
     const bar = this.pushCP(K_BARRIER, sB, sCC, 0);
     R[RBAR] = bar;
     R[RCP] = this.OK;
@@ -1789,7 +1789,7 @@ export class CellMachine {
     const sE = R[RE]!, sCP = R[RCP]!, sB = R[RB]!, sCC = R[RCC]!, sBAR = R[RBAR]!;
     const sNest = this.nest;
     const sWake = this.hp.wakeups;
-    this.hp.wakeups = [];
+    this.hp.wakeups = noWakeups();
     const bar = this.pushCP(K_BARRIER, sB, sCC, 0);
     R[RBAR] = bar;
     R[RCP] = this.OK;

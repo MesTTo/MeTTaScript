@@ -79,6 +79,22 @@ export interface Wakeup {
   readonly value: number;
 }
 
+/** A wakeup no list holds, pushed onto each new list and popped, so the list starts with object elements. */
+const NO_WAKEUP: Wakeup = { attrs: 0, value: 0 };
+/**
+ * An empty wakeup list whose elements kind is already the objects one. A `[]` starts as small integers and changes kind
+ * at its first push, and generated code reading `hp.wakeups.length` was deoptimized at each kind it had not met, 210
+ * times in he_minimalmetta on the Mac mini (c-wakeups-kind-1108); every list the cell engine makes comes from here,
+ * and the collector rewrites a list in place.
+ * am[implements a-petta-next-1108.speed.callpath.kinds]
+ * am[rests-on c-wakeups-kind-1108]
+ */
+export const noWakeups = (): Wakeup[] => {
+  const w = [NO_WAKEUP];
+  w.pop();
+  return w;
+};
+
 /** A computation's trail: entries' addresses and old cells, and the first free entry (Heap.trailState). */
 export interface TrailState {
   readonly trail: Int32Array;
@@ -168,7 +184,7 @@ export class Heap {
   /** The compounds decode is inside of now, each with the variable standing for it once a cycle reaches it. */
   private readonly onPath = new Map<number, Var | null>();
   /** Attributes woken by bindings since the machine last ran them. */
-  wakeups: Wakeup[] = [];
+  wakeups: Wakeup[] = noWakeups();
 
   constructor() {
     this.NIL = this.atom("\u0000[]");
@@ -564,7 +580,8 @@ export class Heap {
         old[i] = 0;
       }
     }
-    this.wakeups = this.wakeups.map((w) => ({ attrs: cell(w.attrs), value: cell(w.value) }));
+    const woken = this.wakeups;
+    for (let i = 0; i < woken.length; i++) woken[i] = { attrs: cell(woken[i]!.attrs), value: cell(woken[i]!.value) };
     let kept = 0;
     for (let id = 0; id < nb; id++) if ((bbits[id >>> 5]! & (1 << (id & 31))) !== 0) boxes[kept++] = boxes[id];
     boxes.length = kept;
