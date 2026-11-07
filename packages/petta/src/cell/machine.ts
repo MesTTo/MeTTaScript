@@ -150,7 +150,7 @@ const CONTROL = new Set([",/2", ";/2", "->/2", "*->/2", "\\+/1", "call/1", "once
 
 /** A clause not yet compiled: its head and body programs and how often it has been tried. */
 interface ColdFact {
-  /** The head program, from the clause's second try; a fact's first try matches its head terms (matchHead). */
+  /** A rule's head program, from its first try; a fact has none, matching its head terms (matchHead). */
   readonly prog: HeadProgram | null;
   tries: number;
 }
@@ -1551,7 +1551,7 @@ export class CellMachine {
   /**
    * Try clause `c`, which has no code yet: for its first COMPILE_AFTER tries it runs from its head program, a rule
    * then building its body on the heap and running it through the meta-call interpreter with the clause's cut
-   * barrier, a fact on its first try from its head terms themselves (matchHead); on that try it is compiled, a rule
+   * barrier, a fact from its head terms themselves (matchHead); on that try it is compiled, a rule
    * with an inline head, a fact with a compact one (compile.ts, c-head-tiers-1106). Returns what the clause's code
    * would.
    */
@@ -1567,10 +1567,10 @@ export class CellMachine {
       this.vals = new Int32Array(2 * c.nvars);
       this.seen = new Int32Array(2 * c.nvars);
     }
-    // A fact's first try matches its head terms themselves: a fact tried once never pays for its program
-    // (c-msf-cell-profile-1107).
-    if (st === null && !rule) {
-      c.cell = { prog: null, tries: 1 };
+    // A fact matches its head terms themselves until it is compiled: one tried once never pays for a program
+    // (c-msf-cell-profile-1107), and a database of facts holds no program per fact (i-cell-tilepuzzle-memory-1107).
+    if (!rule) {
+      if (st === null) c.cell = { prog: null, tries: 1 };
       if (++this.seenMark === 0x7fffffff) {
         this.seen.fill(0);
         this.seenMark = 1;
