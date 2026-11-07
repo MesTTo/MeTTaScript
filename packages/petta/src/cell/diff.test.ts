@@ -753,6 +753,34 @@ describe("cell engine tiers", () => {
   });
 });
 
+// am[verifies a-petta-next-1108.speed.cut.take]
+describe("cell engine findall collections", () => {
+  const src = `
+    one(N) :- findall(f(X, X), between(1, 3000, X), L), length(L, N).
+    lp(0) :- !.
+    lp(K) :- findall(f(X, X), between(1, 3000, X), L), length(L, _), K1 is K - 1, lp(K1).`;
+  it("puts off the collection a findall's list alone makes due, which could only find the list live", () => {
+    gcEvery = null;
+    const { m, cm } = machines();
+    for (const c of readClauses(src)) m.addClause(c, true);
+    // 3000 solutions of five cells pass a growth of 4096 cells only when the list is copied onto the heap.
+    cm.collectEvery(4096);
+    const before = cm.collections;
+    expect(onCells(cm, "one", [mkVar()])).toStrictEqual({ answers: ["3000"], threw: false });
+    expect(cm.collections).toBe(before);
+  });
+  it("still collects the lists of findalls that die, putting off at most one collection a cycle", () => {
+    gcEvery = null;
+    const { m, cm } = machines();
+    for (const c of readClauses(src)) m.addClause(c, true);
+    cm.collectEvery(4096);
+    const before = cm.collections;
+    expect(onCells(cm, "lp", [20])).toStrictEqual({ answers: ["20"], threw: false });
+    // Twenty dead lists of 15000 cells: about one collection every two of them.
+    expect(cm.collections - before).toBeGreaterThanOrEqual(8);
+  });
+});
+
 // am[verifies a-petta-next-1108.speed.cut.retractall]
 describe("cell engine retractall", () => {
   it("retracts every clause whose head unifies, keyed, keyless and compound first arguments alike, as SWI-Prolog does", () => {

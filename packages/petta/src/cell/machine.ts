@@ -340,6 +340,15 @@ export class CellMachine {
   private gcAt = 1 + GLOBAL_SLOTS + GC_MIN_GROWTH;
   /** Cells the heap grows by between collections when fixed (collectEvery); null grows it by what the last kept. */
   private gcGrowth: number | null = null;
+  /**
+   * Whether a collection that a findall's list alone made due was put off since the last collection (findall): such a
+   * collection could only find the list live, as matespacefast's 122 M cells were at its end, so it waits until the
+   * heap grows by as much again; at most once a cycle, so lists that die keep counting (c-take-collect-1108).
+   * am[implements a-petta-next-1108.speed.cut.take]
+   */
+  private deferredTake = false;
+  /** Collections run so far. */
+  collections = 0;
   /** findall's solutions while its goal runs, nested findalls each taking their own (bag.ts). */
   private readonly bag = new Bag();
   /**
@@ -882,7 +891,13 @@ export class CellMachine {
         this.solveAllFrom(() => this.goal(g, this.R[RB]!, this.R[RCC]!), () => void bag.add(hp, at(0)));
         return at(1);
       });
+      const before = this.used();
       list = bag.take(hp, m, hp.NIL);
+      // am[implements a-petta-next-1108.speed.cut.take]
+      if (!this.deferredTake && this.gcAt !== 0 && before < this.gcAt && this.used() >= this.gcAt) {
+        this.deferredTake = true;
+        this.scheduleCollection();
+      }
     } finally {
       bag.reset(m);
     }
@@ -979,6 +994,8 @@ export class CellMachine {
       // am[implements a-petta-cell-store.gc.atoms]
       this.inFiber || this.fiberGroups > 0 ? null : (mark) => this.bag.markAtoms(mark),
     );
+    this.deferredTake = false;
+    this.collections++;
     this.scheduleCollection();
   }
 
