@@ -301,6 +301,11 @@ describe.each([
       bxjunk :- _ is 2 ** 42, _ is 2.5 * 3, atom_string(abc, _).
       bx3(X) :- bxjunk, A is 2 ** 41 + 7, F is 1.25 * 2, atom_string(xyz, S), bxjunk, atom_length(abc, _), X = A-F-S.
       bx4(L) :- findall(X-Y-Z, (between(1, 40, _), bx1(X), bx2(Y), bx3(Z)), L).
+      fa1(X) :- findall(T, T = f(T), [Y]), ( cyclic_term(Y) -> X = cyclic ; X = acyclic ).
+      fa2(L) :- X = g(A, A, _), findall(X, mem(A, [1, 2]), L).
+      fa3(L) :- findall(Y-S, (mem(X, [1, 2]), Y is X * 1.5 + 2 ** 40, atom_string(X, S)), L).
+      fa4(L) :- findall(X-Ys, (mem(X, [1, 2]), findall(Y, mem(Y, [X, a]), Ys)), L).
+      fa5(L) :- findall(X, (mem(X, [a, b]), catch(findall(Y, (mem(Y, [1, 2, 3]), ( Y > 2 -> throw(oops) ; true )), _), _, true)), L).
       mem(X, [X|_]).
       mem(X, [_|T]) :- mem(X, T).
       db10(X) :- assertz(w10(1)), w10(X), retract(w10(X)), \\+ w10(_).
@@ -309,14 +314,24 @@ describe.each([
     // in gc3 the variables the bridged clause/2 decoded sit inside its argument gcl(X), which dies once the generator
     // has started, so the collection at atom_length/2 moves them before the next solution binds them. bx1 and bx2
     // keep float, string and big integer constants of bodies and heads across collections, cold and, run 40 times
-    // in bx4, compiled; bx3's live runtime boxes move down past the dead ones bxjunk made.
-    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7", "gv8", "gv9", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7", "gv10", "gv11", "fn1", "fn2", "wo1", "wo2", "wo3", "ps1", "tr1", "tr2", "as1", "as2", "gc1", "gc2", "gc3", "bx1", "bx2", "bx3", "bx4"]) {
+    // in bx4, compiled; bx3's live runtime boxes move down past the dead ones bxjunk made. fa2 to fa5 copy findall's
+    // solutions through its bag: shared variables, runtime boxes, a nested findall, and an inner findall whose goal
+    // throws once it has solutions, which the outer findall's list must not hold.
+    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7", "gv8", "gv9", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7", "gv10", "gv11", "fn1", "fn2", "wo1", "wo2", "wo3", "ps1", "tr1", "tr2", "as1", "as2", "gc1", "gc2", "gc3", "bx1", "bx2", "bx3", "bx4", "fa2", "fa3", "fa4", "fa5"]) {
       const a = machines(), b = machines();
       for (const c of readClauses(src)) {
         a.m.addClause(c, true);
         b.m.addClause(c, true);
       }
       expect(onCells(b.cm, name, [mkVar()]), name).toStrictEqual(onObjects(a.m, name, [mkVar()]));
+    }
+    // findall/3 over a cyclic template: SWI-Prolog 10.1.17 answers cyclic (ai-tmp/swi/fa1.pl in petta-cell) where the
+    // object machine overflows its stack copying it (i-obj-findall-cyclic-1107), so the bag's copy is held to SWI.
+    // am[verifies a-petta-cell-store.tune.bag]
+    {
+      const { m, cm } = machines();
+      for (const c of readClauses(src)) m.addClause(c, true);
+      expect(onCells(cm, "fa1", [mkVar()])).toStrictEqual({ answers: ['"cyclic"'], threw: false });
     }
   });
 

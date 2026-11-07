@@ -169,8 +169,51 @@ function copyCells(hp: Heap, c0: number, map: Map<number, number>, attrs: boolea
   return c;
 }
 
-/** cyclic_term/1: whether a compound is reached again on its own path. Time: linear in the distinct compounds. */
+/** The untracked walk's stack (cyclicCells), reused. */
+const walkStack: number[] = [];
+
+/**
+ * cyclic_term/1 as builtins.ts isCyclic decides it: a walk that tracks nothing ends within its budget on a finite term
+ * whose shared parts it does not revisit too often and never on a cyclic one, so a walk past a million visits hands
+ * the term to cyclicTracked, which decides exactly; the acyclic terms PeTTa checks cost no set or allocation
+ * (c-peano-cell-profile-1107). Time: the term's size; past the budget, the tracked walk's.
+ * am[implements a-petta-cell-store.tune.acyclic]
+ */
 function cyclicCells(hp: Heap, c0: number): boolean {
+  const st = walkStack, h = hp.h, arity = hp.funArity;
+  st.length = 0;
+  st.push(c0);
+  let budget = 1 << 20;
+  while (st.length > 0) {
+    let x = st.pop()!;
+    for (;;) {
+      x = hp.deref(x);
+      if (--budget === 0) {
+        st.length = 0;
+        return cyclicTracked(hp, c0);
+      }
+      const tag = x & 7;
+      if (tag === LIS) {
+        const p = x >> 3;
+        st.push(h[p]!);
+        x = h[p + 1]!;
+        continue;
+      }
+      if (tag === STR) {
+        const p = x >> 3, n = arity[h[p]! >> 3]!;
+        if (n === 0) break;
+        for (let i = n; i > 1; i--) st.push(h[p + i]!);
+        x = h[p + 1]!;
+        continue;
+      }
+      break;
+    }
+  }
+  return false;
+}
+
+/** cyclic_term/1 tracking each compound on the path and each explored: linear in the distinct compounds. */
+function cyclicTracked(hp: Heap, c0: number): boolean {
   const onPath = new Set<number>(), done = new Set<number>();
   const st: number[] = [c0, 0];
   while (st.length > 0) {

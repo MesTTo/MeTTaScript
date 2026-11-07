@@ -14,8 +14,9 @@
 import { argHashIndex, clauseArgHash, type Clause, type Pred } from "../db";
 import { copyTerm, variantKeyOf, type Builtin, type Machine } from "../machine";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "../swi-index";
-import { Halt, NIL, PrologError, Struct, existenceError, instantiationError, mkList, typeError, type Term, type Var } from "../terms";
+import { Halt, NIL, PrologError, Struct, existenceError, instantiationError, typeError, type Term, type Var } from "../terms";
 import { CellArgs } from "./args";
+import { Bag } from "./bag";
 import { bridgeBuiltin, nextSolution, objectTrailMark, startNondet, takeSolution, type BridgeRun } from "./bridge";
 import { build, headProgram, runHead, type HeadProgram } from "./headprog";
 import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, Heap, INT, REF, STR, type TrailState, type Wakeup } from "./heap";
@@ -281,6 +282,8 @@ export class CellMachine {
   private gcAt = 1 + GLOBAL_SLOTS + GC_MIN_GROWTH;
   /** Cells the heap grows by between collections when fixed (collectEvery); null grows it by what the last kept. */
   private gcGrowth: number | null = null;
+  /** findall's solutions while its goal runs, nested findalls each taking their own (bag.ts). */
+  private readonly bag = new Bag();
 
   constructor(readonly om: Machine) {
     if (om.db.cellMachine !== null) throw new Error("cell machine: a database has one cell machine, the clauses' code being bound to it");
@@ -780,16 +783,22 @@ export class CellMachine {
 
   /**
    * findall(T, G, L) with A[0..3) holding them: G solved to exhaustion under its own barrier, its cut local, a
-   * decoded copy of T kept at each solution outside the heap backtracking frees, L unified with their list encoded.
+   * copy of T kept at each solution in the bag outside the heap backtracking frees, L unified with their list.
+   * am[implements a-petta-cell-store.tune.bag]
    */
   findall(): Code | null {
-    const hp = this.hp, A = this.A, g = A[1]!;
-    const found: Term[] = [];
-    const l = this.hold([A[0]!, A[2]!], (at) => {
-      this.solveAllFrom(() => this.goal(g, this.R[RB]!, this.R[RCC]!), () => void found.push(hp.decode(at(0), new Map())));
-      return at(1);
-    });
-    if (!hp.unify(l, hp.encode(mkList(found), new Map()))) return this.fail();
+    const hp = this.hp, A = this.A, g = A[1]!, bag = this.bag, m = bag.mark();
+    let l: number, list: number;
+    try {
+      l = this.hold([A[0]!, A[2]!], (at) => {
+        this.solveAllFrom(() => this.goal(g, this.R[RB]!, this.R[RCC]!), () => void bag.add(hp, at(0)));
+        return at(1);
+      });
+      list = bag.take(hp, m, hp.NIL);
+    } finally {
+      bag.reset(m);
+    }
+    if (!hp.unify(l, list)) return this.fail();
     return hp.wakeups.length !== 0 ? this.wake(this.R[RCC]!) : this.proceed();
   }
 
