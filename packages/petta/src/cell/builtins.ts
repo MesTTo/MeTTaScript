@@ -3,14 +3,16 @@
 // SPDX-License-Identifier: MIT
 
 // Purpose: the term, global variable and attribute builtins on cells, each giving the object builtin's answers,
-// bindings and errors (builtins.ts, library.ts) without decoding its arguments: the standard order (compare/3, @</2
-// and the rest, ==/2), variance (=@=/2), subsumes_term/2, functor/3, arg/3, =../2, copy_term/2, cyclic_term/1,
-// term_variables/2,3, length/2 and the sorts; b_setval/2, nb_setval/2 and their readers; put_attr/3, get_attr/3,
-// del_attr/2 and the rest. A mode that needs a generator (arg/3 with an unbound index, length/2 of a partial list with
-// an unbound length) goes to the object builtin's generator through the bridge.
+// bindings and errors (builtins.ts, library.ts) without decoding its arguments: the standard order (compare/3, @</2 and
+// the rest, ==/2), variance (=@=/2), subsumes_term/2, functor/3, arg/3, =../2, copy_term/2, cyclic_term/1,
+// term_variables/2,3, length/2, the sorts, memberchk/2 and code_type/2 of a code and a plain class; b_setval/2,
+// nb_setval/2 and their readers; put_attr/3, get_attr/3, del_attr/2 and the rest. A mode that needs a generator (arg/3
+// with an unbound index, length/2 of a partial list with an unbound length) goes to the object builtin's generator
+// through the bridge.
 // am[implements a-petta-cell-store.builtins.terms]
 
 import { compareNum, type Num } from "../arith";
+import { classTest } from "../ctype";
 import { captureOutput, cmpStr, mergeSort, sinkText } from "../builtins";
 import { Float, NIL, PrologError, Str, Struct, domainError, existenceError, instantiationError, mkList, mkVar, typeError } from "../terms";
 import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, INT, LIS, REF, STR, boxEq, type Heap } from "./heap";
@@ -739,6 +741,64 @@ export function installTermBuiltins(cm: CellMachine): void {
     // A partial list of unbound length enumerates lengths: the object builtin's generator.
     return null;
   });
+
+  // code_type(+Code, +Class) for a code and an arity-0 class, the test MeTTa's reader makes of each character it reads
+  // (11.8 thousand bridged calls in lib_roman's import, c-import-calls-roman-1108), answered from the classes the
+  // object builtin's generator reads (ctype.ts classTest); every other mode goes to that generator through the bridge.
+  // am[implements a-petta-next-1108.speed.native.codetype]
+  // am[rests-on c-import-calls-roman-1108]
+  detOr("code_type", 2, () => {
+    const c = hp.deref(A[0]!), t = hp.deref(A[1]!);
+    if ((c & 7) !== INT || (t & 7) !== ATM) return null;
+    return classTest(atomText(hp, t), c >> 3) ?? null;
+  });
+
+  // memberchk/2 natively, as SWI-Prolog's C builtin runs it: library.ts defines it as member(X, L), !, so each element
+  // it passes was a call of lists:member_/3, 148754 of lib_roman's 1.13 million import calls (c-import-calls-roman-1108).
+  // The answer is the library's: the first element X unifies with is kept, and an unbound tail becomes [X|_], as
+  // member_/3's second clause makes it; each failed try's bindings are undone, every binding of a try trailed for that
+  // (subsumes_term's trial). A try that wakes an attribute hook goes to the clauses instead, since member/2 runs the
+  // hook before its cut and tries the next element when the hook fails; so does every call once a program has
+  // changed memberchk/2's clauses.
+  // am[implements a-petta-next-1108.speed.native.memberchk]
+  // am[rests-on c-import-calls-roman-1108]
+  const memberchkPred = cm.om.db.get("memberchk", 2);
+  if (memberchkPred !== undefined && memberchkPred.clauses.length === 1) {
+    const libClause = memberchkPred.clauses[0]!;
+    /** One try of X against cell `y`: true when it unifies waking no hook, false when it fails, null when it woke one. */
+    const tryOne = (x: number, y: number): boolean | null => {
+      const hb = hp.hb, mark = hp.tr, w = hp.wakeups.length;
+      hp.hb = HEAP_CELLS;
+      const ok = hp.unify(x, y);
+      hp.hb = hb;
+      if (ok && hp.wakeups.length === w) return true;
+      hp.undo(mark);
+      hp.wakeups.length = w;
+      return ok ? null : false;
+    };
+    /** memberchk(A[0], A[1]) as the library answers it, null when the clauses must. Time: the elements passed. */
+    const memberchk = (): boolean | null => {
+      const x = A[0]!;
+      let t = hp.deref(A[1]!);
+      for (;;) {
+        if ((t & 7) === LIS) {
+          const r = tryOne(x, hp.h[t >> 3]!);
+          if (r !== false) return r;
+          t = hp.deref(hp.h[(t >> 3) + 1]!);
+        } else if (isVarTag(t)) {
+          const b = hp.alloc(2);
+          hp.h[b] = x;
+          hp.h[b + 1] = (b + 1) << 3;
+          return tryOne(t, (b << 3) | LIS);
+        } else return false;
+      }
+    };
+    cm.proc("memberchk", 2).ctl = (m, _n, cc) => {
+      const library = memberchkPred.clauses.length === 1 && memberchkPred.clauses[0] === libClause && libClause.died === Infinity;
+      const r = library ? memberchk() : null;
+      return r === null ? m.runClauses(memberchkPred, cc) : m.answer(r, cc);
+    };
+  }
 
   // '$seek_list'(+N, +List, -RestN, -RestList), nth0/nth1's skip: past up to N cells of List, RestN of N left.
   // am[implements a-petta-cell-store.tune.bridged]

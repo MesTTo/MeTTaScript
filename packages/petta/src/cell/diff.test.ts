@@ -25,7 +25,7 @@ import { consultLibrary, installLibrary } from "../library";
 import { Machine } from "../machine";
 import { readClauses } from "../prolog-reader";
 import { Ground, clauseArgHash, groundHash } from "../db";
-import { Cons, Float, NIL, Str, Struct, Var, deref, listToArray, mkVar, type Term } from "../terms";
+import { Cons, Float, NIL, Str, Struct, Var, deref, listToArray, mkList, mkVar, type Term } from "../terms";
 import { installTermBuiltins } from "./builtins";
 import { compileCellClause, installInlineBuiltins } from "./compile";
 import { Heap } from "./heap";
@@ -814,5 +814,78 @@ describe("cell engine bridge", () => {
       expect(at(0)).not.toBe(v);
       expect(cm.hp.decode(at(0), new Map())).toBe("bound");
     });
+  });
+});
+
+// am[verifies a-petta-next-1108.speed.native.memberchk]
+describe("cell engine memberchk", () => {
+  /** `t` with the pool's placeholder variables replaced by fresh ones, the same fresh one for each placeholder. */
+  const fresh = (t: Term, vars: Map<Var, Var>): Term => {
+    if (t instanceof Var) {
+      let v = vars.get(t);
+      if (v === undefined) vars.set(t, (v = mkVar()));
+      return v;
+    }
+    if (t instanceof Cons) return new Cons(fresh(t.head, vars), fresh(t.tail, vars));
+    if (t instanceof Struct) return new Struct(t.name, t.args.map((a) => fresh(a, vars)));
+    return t;
+  };
+
+  it("answers as library.ts's member(X, L), ! does on proper, partial and improper lists sharing variables", () => {
+    gcEvery = null;
+    const { m, cm } = machines();
+    const pool = [mkVar(), mkVar(), mkVar()];
+    fc.assert(
+      fc.property(term(pool, 2), fc.array(term(pool, 1), { maxLength: 5 }), fc.constantFrom("nil", "var", "pool", "atom"), (x, items, tail) => {
+        const t: Term = tail === "nil" ? NIL : tail === "var" ? mkVar() : tail === "pool" ? pool[0]! : "a";
+        const goal = [x, items.reduceRight<Term>((acc, h) => new Cons(h, acc), t)];
+        // Each engine gets its own copy, variables shared between the arguments as the generated goal shares them.
+        const copy = (): Term[] => {
+          const vars = new Map<Var, Var>();
+          return goal.map((g) => fresh(g, vars));
+        };
+        expect(onCells(cm, "memberchk", copy())).toStrictEqual(onObjects(m, "memberchk", copy()));
+      }),
+      { numRuns: 400 },
+    );
+  });
+
+  it("goes to the clauses when a try wakes a hook, so a failing hook moves it to the next element", () => {
+    gcEvery = null;
+    const { m, cm } = machines();
+    // The fixture's ch hook accepts a value only from the attribute's list: a, the first element, wakes it and fails.
+    for (const c of readClauses(ATTR_PROGRAMS + "\ntm1(X) :- put_attr(X, ch, [b]), memberchk(X, [a, b, a]).")) m.addClause(c, true);
+    const want = onObjects(m, "tm1", [mkVar()]);
+    expect(want).toStrictEqual({ answers: ['"b"'], threw: false });
+    expect(onCells(cm, "tm1", [mkVar()])).toStrictEqual(want);
+  });
+
+  it("answers from the clauses once the library's clause is gone", () => {
+    gcEvery = null;
+    const { m, cm } = machines();
+    const p = m.db.get("memberchk", 2)!;
+    for (const c of [...p.clauses]) m.db.retractClause(c);
+    const goal = (): Term[] => [mkVar(), mkList(["a"])];
+    const want = onObjects(m, "memberchk", goal());
+    expect(want).toStrictEqual({ answers: [], threw: false });
+    expect(onCells(cm, "memberchk", goal())).toStrictEqual(want);
+  });
+});
+
+// am[verifies a-petta-next-1108.speed.native.codetype]
+describe("cell engine code_type", () => {
+  it("answers code_type(+Code, +Class) as the object builtin's generator does, errors included", () => {
+    gcEvery = null;
+    const { m, cm } = machines();
+    const classes = ["alnum", "alpha", "csym", "csymf", "prolog_var_start", "prolog_atom_start", "prolog_identifier_continue", "decimal",
+      "prolog_symbol", "prolog_solo", "pattern_syntax", "ascii", "white", "cntrl", "digit", "print", "graph", "lower", "upper", "punct",
+      "space", "end_of_file", "end_of_line", "prolog_end_of_line", "prolog_layout", "newline", "period", "quote", "nonesuch"];
+    const code = fc.oneof(fc.integer({ min: -2, max: 300 }), fc.constantFrom(0x85, 0xa0, 0x2028, 0x3000, 0x1f600, 0x10ffff, 0x110000));
+    fc.assert(
+      fc.property(code, fc.constantFrom(...classes), (c, cls) => {
+        expect(onCells(cm, "code_type", [c, cls])).toStrictEqual(onObjects(m, "code_type", [c, cls]));
+      }),
+      { numRuns: 600 },
+    );
   });
 });

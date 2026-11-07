@@ -1466,6 +1466,19 @@ export class CellMachine {
   }
 
   /**
+   * Run `pred`'s clauses for the call in A, as callw does once it knows the predicate (callw keeps the same three
+   * lines inline: it is the hottest function, and V8's inlining of it moved he_minimalmetta's time by 13 % at changes
+   * this small, c-he-jit-sensitive-1108). For a builtin that answers natively only in some modes.
+   * am[implements a-petta-next-1108.speed.native.memberchk]
+   * am[rests-on c-he-jit-sensitive-1108]
+   */
+  runClauses(pred: Pred, cc: number): Code | null {
+    const scan = clauseScan(pred, this.args);
+    const r = this.tryClauses(pred, scan, scan.start, this.om.db.generation, cc, -1);
+    return r === undefined ? this.fail() : r;
+  }
+
+  /**
    * A call of tabled predicate `p` with A[0..n), as Machine.callTabled answers it: the first call of a variant solves
    * it to completion on cells with `p` untabled, so its own recursive calls run the clauses, keeping its distinct
    * answers up to variance in the object machine's tables, which both engines share; every call then answers from
@@ -1477,10 +1490,7 @@ export class CellMachine {
     const om = this.om, hp = this.hp, H = hp.h, A = this.A;
     if (!om.tabled.has(p.key)) {
       const pred = p.pred ?? this.resolve(p);
-      if (pred === undefined) return this.fail();
-      const scan = clauseScan(pred, this.args);
-      const r = this.tryClauses(pred, scan, scan.start, om.db.generation, cc, -1);
-      return r === undefined ? this.fail() : r;
+      return pred === undefined ? this.fail() : this.runClauses(pred, cc);
     }
     const args: Term[] = [];
     for (let i = 0; i < n; i++) args.push(hp.decode(A[i]!, new Map()));

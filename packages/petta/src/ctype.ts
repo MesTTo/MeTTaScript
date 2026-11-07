@@ -130,6 +130,21 @@ const CHAR_TYPES: CharType[] = [
   },
 ];
 
+/** The arity-0 classes by name: each name has one (pl-ctype.c), beside any arity-1 class of that name. */
+const CLASS0 = new Map(CHAR_TYPES.filter((t) => t.arity === 0).map((t) => [t.name, t.test as (c: number) => boolean]));
+
+/**
+ * Whether code `c` is in arity-0 class `name`, as charTypeSolutions answers code_type(+C, +Name) and char_type(+C,
+ * +Name): code -1 is end_of_file's alone, whatever the name; undefined for a name that is no arity-0 class, which the
+ * generator answers (an arity-1 class's compound) or raises type_error(char_type, Name) for.
+ * am[implements a-petta-next-1108.speed.native.codetype]
+ */
+export function classTest(name: string, c: number): boolean | undefined {
+  if (c === -1) return name === "end_of_file";
+  const t = CLASS0.get(name);
+  return t === undefined ? undefined : t(c) === true;
+}
+
 /** A character term's code: a one-character atom, or (code_type) a code; null when unbound. */
 function codeOf(t: Term, codes: boolean): number | null {
   const d = deref(t);
