@@ -815,6 +815,76 @@ export function installTermBuiltins(cm: CellMachine): void {
   detOr("assertz", 1, assertClause(true));
   detOr("asserta", 1, assertClause(false));
 
+  // current_predicate/1, predicate_property/2, current_op/3 and atom_concat/3 in the modes PeTTa calls them in, each
+  // answering as the object builtin does (builtins.ts); any other mode goes to the object builtin's generator.
+  // am[implements a-petta-cell-store.tune.introspect]
+  const F_SLASH2 = hp.functor("/", 2), F_NOC = hp.functor("number_of_clauses", 1);
+  const isName = (c: number): boolean => (c & 7) === ATM && c !== hp.NIL;
+  // current_predicate(Name/Arity) with both bound: defined, or dynamic, or a library predicate or builtin.
+  detOr("current_predicate", 1, () => {
+    let d = hp.deref(A[0]!);
+    while ((d & 7) === STR && hp.h[d >> 3] === F_COLON) d = hp.deref(hp.h[(d >> 3) + 2]!);
+    if ((d & 7) !== STR || hp.h[d >> 3] !== F_SLASH2) return null;
+    const nd = hp.deref(hp.h[(d >> 3) + 1]!), ad = hp.deref(hp.h[(d >> 3) + 2]!);
+    if (!isName(nd) || (ad & 7) !== INT) return null;
+    const name = hp.atomNames[nd >> 3]!, arity = ad >> 3, key = `${name}/${arity}`, om = cm.om;
+    const pred = om.db.get(name, arity);
+    return (pred !== undefined && (pred.live > 0 || pred.dynamic)) || om.libraryPreds.has(key) || om.builtins.has(key);
+  });
+  // predicate_property(Head, number_of_clauses(N)): a builtin has none, a predicate its live clauses.
+  detOr("predicate_property", 2, () => {
+    const prop = hp.deref(A[1]!);
+    if ((prop & 7) !== STR || hp.h[prop >> 3] !== F_NOC) return null;
+    let d = hp.deref(A[0]!);
+    if (isVarTag(d)) return false;
+    // The object builtin reads the second argument of any compound named ':', so another arity of it goes there.
+    if ((d & 7) === STR && hp.funNames[hp.h[d >> 3]! >> 3] === ":" && hp.h[d >> 3] !== F_COLON) return null;
+    if ((d & 7) === STR && hp.h[d >> 3] === F_COLON) d = hp.deref(hp.h[(d >> 3) + 2]!);
+    let name: string, arity: number;
+    if (isName(d)) [name, arity] = [hp.atomNames[d >> 3]!, 0];
+    else if ((d & 7) === STR) [name, arity] = [hp.funNames[hp.h[d >> 3]! >> 3]!, hp.funArity[hp.h[d >> 3]! >> 3]!];
+    else return null;
+    if (cm.om.builtins.has(`${name}/${arity}`)) return false;
+    const pred = cm.om.db.get(name, arity);
+    return pred !== undefined && unify(hp.h[(prop >> 3) + 1]!, hp.int(pred.live));
+  });
+  // current_op(P, T, Name) with Name bound: its definitions of the bound type, if any, answered when there is one.
+  detOr("current_op", 3, () => {
+    const nd = hp.deref(A[2]!);
+    if (!isName(nd)) return null;
+    const td = hp.deref(A[1]!);
+    if (!isVarTag(td) && !isName(td)) return null;
+    const name = hp.atomNames[nd >> 3]!, ops = cm.om.ops;
+    let found: { pri: number; type: string } | null = null, count = 0;
+    for (const map of [ops.infix, ops.prefix, ops.postfix]) {
+      const def = map.get(name);
+      if (def !== undefined && (isVarTag(td) || hp.atomNames[td >> 3] === def.type)) {
+        found = def;
+        count++;
+      }
+    }
+    if (count === 0) return false;
+    if (count > 1) return null;
+    return unify(A[1]!, hp.atom(found!.type)) && unify(A[0]!, hp.int(found!.pri));
+  });
+  // atom_concat/3 on atoms: both parts given, or a part and the whole.
+  detOr("atom_concat", 3, () => {
+    const x = hp.deref(A[0]!), y = hp.deref(A[1]!);
+    if (isName(x) && isName(y)) return unify(A[2]!, hp.atom(hp.atomNames[x >> 3]! + hp.atomNames[y >> 3]!));
+    const z = hp.deref(A[2]!);
+    if (!isName(z)) return null;
+    const whole = hp.atomNames[z >> 3]!;
+    if (isName(x) && isVarTag(y)) {
+      const pre = hp.atomNames[x >> 3]!;
+      return whole.startsWith(pre) && unify(y, hp.atom(whole.slice(pre.length)));
+    }
+    if (isVarTag(x) && isName(y)) {
+      const suf = hp.atomNames[y >> 3]!;
+      return whole.endsWith(suf) && unify(x, hp.atom(whole.slice(0, whole.length - suf.length)));
+    }
+    return null;
+  });
+
   // Sorting: Array.prototype.sort is stable, as the object builtins rely on.
   def("msort", 2, () => unify(A[1]!, listCells(hp, properListArg(hp, A[0]!).sort((x, y) => compareCells(hp, x, y)), hp.NIL)));
   def("sort", 2, () => {

@@ -190,6 +190,11 @@ const CASES: [string, (vs: Var[]) => fc.Arbitrary<Term>[]][] = [
   ["$free_variable_set", (vs) => [fc.oneof(fc.tuple(term(vs, 1), carets(vs)).map(([t, g]) => new Struct("^", [t, g]) as Term), term(vs, 2)), term(vs, 1), term(vs, 1)]],
   [">>", (vs) => [lambdaParams(vs), lambdaBody(vs), term(vs, 1)]],
   [">>", (vs) => [lambdaParams(vs), lambdaBody(vs), term(vs, 1), term(vs, 1)]],
+  // am[verifies a-petta-cell-store.tune.introspect]
+  // Names are bound: an unbound one enumerates each machine's own database, the oracle's and the cell machine's.
+  ["current_predicate", () => [fc.tuple(fc.constantFrom<Term>("append", "length", "foo", "is", "[]"), fc.oneof(fc.integer({ min: 0, max: 3 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(2 ** 40, "a"))).map(([n, a]) => new Struct("/", [n, a]) as Term)]],
+  ["predicate_property", (vs) => [fc.oneof(fc.constantFrom<Term>("foo", "append"), fc.tuple(fc.constantFrom("append", "length", "is", "foo"), fc.array(term(vs, 1), { minLength: 1, maxLength: 3 })).map(([n, a]) => new Struct(n, a) as Term)), term(vs, 1).map((t) => new Struct("number_of_clauses", [t]) as Term)]],
+  ["current_op", (vs) => [fc.oneof(fc.constantFrom<Term>(...vs), fc.integer({ min: 0, max: 1200 }) as fc.Arbitrary<Term>), fc.constantFrom<Term>("xfx", "yfx", "fy", "xfy", 3, ...vs), fc.constantFrom<Term>("div", "<", "-", "+", "\\+", "foo")]],
   ["msort", (vs) => [fc.oneof(list(term(vs, 1), vs), term(vs, 1)), term(vs, 1)]],
   ["sort", (vs) => [fc.oneof(list(term(vs, 1), vs), term(vs, 1)), term(vs, 1)]],
   ["keysort", (vs) => [fc.oneof(list(term(vs, 1), vs), list(fc.tuple(term(vs, 1), term(vs, 1)).map(([k, v]) => new Struct("-", [k, v]) as Term), vs)), term(vs, 1)]],
@@ -202,6 +207,8 @@ const CASES: [string, (vs: Var[]) => fc.Arbitrary<Term>[]][] = [
   ["number_codes", (vs) => [fc.oneof(fc.integer({ min: -3, max: 30 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs)), fc.oneof(codes(vs), fc.constantFrom<Term>(...vs))]],
   // Deterministic modes: the first two arguments bound (splitting an atom needs the generator).
   ["atom_concat", (vs) => [text(vs), text(vs), fc.oneof(text(vs), fc.constantFrom<Term>(...vs))]],
+  // A part unbound: the whole split by the other part (a-petta-cell-store.tune.introspect).
+  ["atom_concat", (vs) => [fc.constantFrom<Term>("", "a", "ab", "x", ...vs), fc.constantFrom<Term>("", "c", "bc", "b", "abc", ...vs), fc.constantFrom<Term>("abc", "ab", "a", "", ...vs)]],
   ["atom_string", (vs) => [fc.oneof(text(vs), fc.constantFrom<Term>(...vs)), fc.oneof(text(vs), fc.constantFrom<Term>(...vs))]],
   ["string_concat", (vs) => [text(vs), text(vs), fc.oneof(text(vs), fc.constantFrom<Term>(...vs))]],
   ["string_chars", (vs) => [fc.oneof(text(vs), fc.constantFrom<Term>(...vs)), fc.oneof(chars(vs), fc.constantFrom<Term>(...vs))]],
