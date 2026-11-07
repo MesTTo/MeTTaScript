@@ -197,7 +197,12 @@ class ClauseIndex {
   buckets = new Map<Key, Clause | Clause[]>();
   varClauses: Clause[] = [];
   lists = new Map<Key, ClauseList>();
-  /** A hash index's scan of each bucket and of the variable clauses, made on first use; bucket arrays grow in place. */
+  /**
+   * A hash index's scan of each bucket of several clauses and of the variable clauses, made on first use; bucket
+   * arrays grow in place. A bucket of one clause gets a fresh scan on each probe instead, so a predicate of distinct
+   * keys probed once each (tilepuzzle's visited states) keeps no scan and no array per key (c-tilepuzzle-scan-cache-1107).
+   * am[implements a-petta-cell-store.tune.bucket-scan]
+   */
   // am[implements a-petta-speed-1105.goal.select-once]
   scans = new Map<Key, Scan>();
   varScan: Scan | null = null;
@@ -514,12 +519,12 @@ class ClauseList {
   private bucketScan(ci: ClauseIndex, key: Key, args: Args, depth: number): Scan {
     if (!ci.realised) this.realise(ci);
     if (!ci.list) {
+      const b = ci.buckets.get(key);
+      if (b === undefined) return (ci.varScan ??= { list: ci.varClauses, start: 0, key: null, keyAt: null });
+      // am[implements a-petta-cell-store.tune.bucket-scan]
+      if (!Array.isArray(b)) return { list: [b], start: 0, key: null, keyAt: null };
       let s = ci.scans.get(key);
-      if (s === undefined) {
-        const b = ci.buckets.get(key);
-        if (b === undefined) return (ci.varScan ??= { list: ci.varClauses, start: 0, key: null, keyAt: null });
-        ci.scans.set(key, (s = { list: Array.isArray(b) ? b : [b], start: 0, key: null, keyAt: null }));
-      }
+      if (s === undefined) ci.scans.set(key, (s = { list: b, start: 0, key: null, keyAt: null }));
       return s;
     }
     // A list index's last key and its sub-list, held while realised: consecutive calls usually share the key.

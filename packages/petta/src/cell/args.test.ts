@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: MIT
 
 // Purpose: property test of the cell argument vector (args.ts): for random static and dynamic predicates and random
-// calls, swi-index's clauseScan gives the same scan (clause list, start, key) whether the call's arguments are object
-// terms or the same terms encoded as cells, so the cell engine selects clauses as the object engine does.
+// calls, swi-index's clauseScan gives the same scan (the same clauses in order, start and key) whether the call's
+// arguments are object terms or the same terms encoded as cells, so the cell engine selects clauses as the object
+// engine does.
 // am[verifies a-petta-cell-store.select]
 
 import fc from "fast-check";
@@ -49,7 +50,10 @@ describe("cell argument vector", () => {
             const vars = new Map();
             const regs = new Int32Array([hp.encode(x, vars), hp.encode(y, vars)]);
             const got = clauseScan(pred, new CellArgs(hp, regs, 0));
-            expect(got.list).toBe(want.list);
+            // A bucket of one clause gets a fresh list on each probe (swi-index.ts bucketScan), so the lists are
+            // compared by the clauses they hold.
+            // am[verifies a-petta-cell-store.tune.bucket-scan]
+            expect(got.list.map((c) => c.seq)).toStrictEqual(want.list.map((c) => c.seq));
             expect(got.start).toBe(want.start);
             expect(got.key).toStrictEqual(want.key);
           }
