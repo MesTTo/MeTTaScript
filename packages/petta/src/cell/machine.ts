@@ -91,6 +91,11 @@ const GC_MIN_GROWTH = 1 << 22;
  * heap barely grows, and a large live heap still waits for as much growth as it holds.
  */
 const BOX_CELLS = 20;
+/**
+ * The minimum growth between a concurrent_and worker's collections: an eighth of GC_MIN_GROWTH, since a group's
+ * workers grow their heaps at once and each starts empty (hyperpose_primes runs four).
+ */
+const FIBER_MIN_GROWTH = GC_MIN_GROWTH >> 3;
 /** Control stack cells each concurrent_and worker gets in its choicepoint's area. */
 const FIBER_S = 1 << 18;
 /** Trampoline bounces a worker runs before the next takes its turn, as the object machine's workers run SLICE goals. */
@@ -288,6 +293,15 @@ export class CellMachine {
   private gcGrowth: number | null = null;
   /** findall's solutions while its goal runs, nested findalls each taking their own (bag.ts). */
   private readonly bag = new Bag();
+  /**
+   * Workers' heap arrays no worker holds, kept to be taken again: macOS's allocator zeroes a freed gigabyte it hands
+   * out again, so a fresh array per worker made hyperpose_primes resident at 4.5 GB there (c-mac-heap-reuse-1107),
+   * where a kept array's untouched pages stay unused; a worker's cells above its heap top are never read.
+   * am[implements a-petta-cell-store.tune.fiberheaps]
+   */
+  private readonly heapPool: Int32Array[] = [];
+  /** concurrent_and choicepoints whose workers still hold heap arrays, so a cut or a ball knows to look (releaseFibersAbove). */
+  private fiberGroups = 0;
 
   constructor(readonly om: Machine) {
     if (om.db.cellMachine !== null) throw new Error("cell machine: a database has one cell machine, the clauses' code being bound to it");
@@ -511,6 +525,7 @@ export class CellMachine {
     if (this.R[RB]! <= b0) return;
     // A cut past setup_call_cleanup's choicepoint runs its cleanup (Machine.cutTo).
     if (this.cleanups > 0) this.cleanupsAbove(b0, false);
+    if (this.fiberGroups > 0) this.releaseFibersAbove(b0);
     this.R[RB] = b0;
     const hp = this.hp, mark = this.S[b0 + 2]!, done = this.TIDIED[b0]!;
     hp.hb = hp.above(this.S[b0 + 9]!);
@@ -589,6 +604,7 @@ export class CellMachine {
           const g = this.SO[b] as FiberGroup;
           const sol = this.nextFiberSolution(g);
           if (sol === null) {
+            this.fiberGroups--;
             this.popCP(b);
             continue;
           }
@@ -828,6 +844,7 @@ export class CellMachine {
     });
     if (pairs.length === 0) return this.fail();
     const b = this.pushCP(K_FIBERS, this.R[RB]!, cc, 0);
+    this.fiberGroups++;
     const area = pairs.length * FIBER_S;
     if (b + CPH + area > this.sLimit) throw new Error("cell control stack exhausted");
     this.S[b + 10] = area;
@@ -912,12 +929,13 @@ export class CellMachine {
 
   /**
    * Where the next call port collects: once the heap used, its cells and its runtime boxes weighed (BOX_CELLS), has
-   * grown by what it is now, at least GC_MIN_GROWTH cells, so collecting costs a constant per cell or box made; or
+   * grown by what it is now, at least GC_MIN_GROWTH cells (FIBER_MIN_GROWTH in a worker), so collecting costs a
+   * constant per cell or box made; or
    * by the fixed growth, a fixed growth of 0 being every call port however far backtracking lowers the heap.
    */
   private scheduleCollection(): void {
     const used = this.hp.top + BOX_CELLS * this.hp.boxes.length, g = this.gcGrowth;
-    this.gcAt = g === 0 ? 0 : used + (g ?? Math.max(used, GC_MIN_GROWTH));
+    this.gcAt = g === 0 ? 0 : used + (g ?? Math.max(used, this.inFiber ? FIBER_MIN_GROWTH : GC_MIN_GROWTH));
   }
 
   /**
@@ -993,7 +1011,9 @@ export class CellMachine {
     const main = this.saveCtx();
     const hp = this.hp, S = this.S, R = this.R;
     try {
-      hp.h = new Int32Array(HEAP_CELLS);
+      hp.h = this.heapPool.pop() ?? new Int32Array(HEAP_CELLS);
+      // A kept array's global slots read as no values, as a fresh one's do.
+      hp.h.fill(0, 0, 1 + GLOBAL_SLOTS);
       hp.boxes = [];
       hp.top = hp.hb = 1 + GLOBAL_SLOTS;
       hp.frozen = 0;
@@ -1077,6 +1097,7 @@ export class CellMachine {
       while (g.i < g.workers.length) {
         const r = this.runFiber(g.workers[g.i]!, SLICE);
         if (r === "failed") {
+          this.heapPool.push(g.workers[g.i]!.ctx.h);
           g.workers.splice(g.i, 1);
           continue;
         }
@@ -1110,6 +1131,22 @@ export class CellMachine {
     } catch (e) {
       if (!(e instanceof PrologError)) throw e;
     }
+  }
+
+  /**
+   * Give back the heap arrays of the workers of each concurrent_and choicepoint above `b0`, which a cut or a ball is
+   * dropping. Time: the choicepoints above b0.
+   * am[implements a-petta-cell-store.tune.fiberheaps]
+   */
+  private releaseFibersAbove(b0: number): void {
+    const S = this.S;
+    for (let b = this.R[RB]!; b > b0; b = S[b]!)
+      if (S[b + 1] === K_FIBERS) {
+        const g = this.SO[b] as FiberGroup;
+        for (const w of g.workers) this.heapPool.push(w.ctx.h);
+        g.workers.length = 0;
+        this.fiberGroups--;
+      }
   }
 
   /** The cleanups of the cleanup choicepoints above `b0`, newest first, each after undoing to its setup when `undo`. */
@@ -1152,6 +1189,7 @@ export class CellMachine {
     let b = R[RCC]!;
     // Each cleanup the ball passes runs, with the bindings undone to its setup's (Machine.unwindTo).
     if (this.cleanups > 0) this.cleanupsAbove(b > bar ? b : bar, true);
+    if (this.fiberGroups > 0) this.releaseFibersAbove(b > bar ? b : bar);
     while (b > bar && S[b + 1] === K_CATCH) {
       hp.undo(S[b + 2]!);
       hp.top = hp.above(S[b + 9]!);
@@ -1172,6 +1210,7 @@ export class CellMachine {
       hp.wakeups.length = 0;
       this.popCP(b);
       b = outer;
+      if (this.fiberGroups > 0) this.releaseFibersAbove(b > bar ? b : bar);
     }
     throw copiedBall(e);
   }
@@ -1494,6 +1533,8 @@ export class CellMachine {
     } catch (e) {
       throw copiedBall(e);
     } finally {
+      // An early stop or a ball leaves the choicepoints above the barrier, workers' included, to be dropped here.
+      if (this.fiberGroups > 0) this.releaseFibersAbove(sB);
       hp.undo(S[bar + 2]!);
       hp.top = hp.above(S[bar + 9]!);
       R[RB] = sB;

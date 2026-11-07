@@ -413,11 +413,16 @@ describe.each([
       cnt([], N, N).
       cnt([_|T], A, N) :- A1 is A + 1, cnt(T, A1, N).
       ca9(S) :- findall(N-C, concurrent_and(mem(N, [15000, 12000]), (length(Ls, N), cnt(Ls, 0, C))), L), msort(L, S).
+      ca10(L) :- ca1(A), ca3(B), ca4(C), ca2(D), ca6(E), L = [A, B, C, D, E].
+      ca11(L) :- findall(X, concurrent_and(mem(_, [a]), (nb_setval(kx, f(1)), X = set)), _), findall(Y, concurrent_and(mem(_, [b]), catch(b_getval(kx, Y), _, Y = none)), L).
     `;
     // ca8 calls after each solution, so a collection meets the group's pair, which only its choicepoint holds; ca9's
-    // workers count lists past a slice, each slice ending with a call pending on its own list and counter.
-    // am[verifies a-cell-fiber-args-1107]
-    for (const name of ["ca1", "ca2", "ca3", "ca4", "ca5", "ca6", "ca7", "ca8", "ca9"]) {
+    // workers count lists past a slice, each slice ending with a call pending on its own list and counter. ca10 runs
+    // groups one after another on one machine, exhausted, cut, thrown out of and exhausted again, so later workers
+    // take the heaps earlier ones gave back; in ca11 the second worker takes the first's heap, whose global, set
+    // with nb_setval/2 and so never undone, it must not see.
+    // am[verifies a-cell-fiber-args-1107] am[verifies a-petta-cell-store.tune.fiberheaps]
+    for (const name of ["ca1", "ca2", "ca3", "ca4", "ca5", "ca6", "ca7", "ca8", "ca9", "ca10", "ca11"]) {
       // ca9's 27000 calls would each collect a worker's whole list at every call port; every 4096 cells still collects.
       const every = gcEvery;
       if (name === "ca9" && every === 0) gcEvery = 1 << 12;
