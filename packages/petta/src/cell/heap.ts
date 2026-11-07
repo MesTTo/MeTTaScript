@@ -103,7 +103,8 @@ export class Heap {
   private readonly constantIds = new Map<string, number>();
   private readonly atomIds = new Map<string, number>();
   readonly atomNames: string[] = [];
-  private readonly funIds = new Map<string, number>();
+  /** Functor ids by name and then arity, so a lookup builds no key string (a-petta-cell-store.tune.functor). */
+  private readonly funIds = new Map<string, number[]>();
   readonly funNames: string[] = [];
   readonly funArity: number[] = [];
   /** The empty list, an atom id of its own: SWI 7 keeps [] apart from the atom '[]'. */
@@ -132,13 +133,14 @@ export class Heap {
 
   /** The functor cell of name/n. */
   functor(name: string, n: number): number {
-    const k = name + "/" + n;
-    let id = this.funIds.get(k);
+    let byArity = this.funIds.get(name);
+    if (byArity === undefined) this.funIds.set(name, (byArity = []));
+    let id = byArity[n];
     if (id === undefined) {
       id = this.funNames.length;
       this.funNames.push(name);
       this.funArity.push(n);
-      this.funIds.set(k, id);
+      byArity[n] = id;
     }
     return (id << 3) | FUN;
   }

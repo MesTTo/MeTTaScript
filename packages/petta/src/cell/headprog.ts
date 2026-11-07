@@ -233,6 +233,117 @@ export function matchTerm(hp: Heap, code: Int32Array, c: number, vals: Int32Arra
   return match(hp, code, 0, c, vals, next) >= 0;
 }
 
+/** The cell of an atomic template: an atom or a constant the clause keeps (Heap.constant). */
+function atomicCell(hp: Heap, t: Term): number {
+  if (typeof t === "string") return hp.atom(t);
+  if (t === NIL) return hp.NIL;
+  if (typeof t === "number" || typeof t === "bigint" || t instanceof Float || t instanceof Str) return hp.constant(t);
+  throw new Error(`cell head program: no cell for ${String(t)}`);
+}
+
+/**
+ * Build template t0 on the heap as build does from a program: a slot stamped `mark` in `seen` is its value in `vals`,
+ * another a fresh variable that joins them; a list's spine is built without recursion on its tail. Time: its size.
+ */
+function buildTerm(hp: Heap, t0: Term, vals: Int32Array, seen: Int32Array, mark: number): number {
+  const t = t0 instanceof Ground ? t0.t : t0;
+  if (t instanceof Slot) {
+    if (seen[t.i] === mark) return vals[t.i]!;
+    const a = hp.alloc(1);
+    hp.h[a] = a << 3;
+    seen[t.i] = mark;
+    vals[t.i] = a << 3;
+    return a << 3;
+  }
+  if (t instanceof Cons) {
+    const first = hp.alloc(2);
+    let last = first;
+    let rest: Term = t;
+    for (;;) {
+      const r = rest as Cons;
+      hp.h[last] = buildTerm(hp, r.head, vals, seen, mark);
+      rest = r.tail instanceof Ground ? r.tail.t : r.tail;
+      if (!(rest instanceof Cons)) break;
+      const next = hp.alloc(2);
+      hp.h[last + 1] = (next << 3) | LIS;
+      last = next;
+    }
+    hp.h[last + 1] = buildTerm(hp, rest, vals, seen, mark);
+    return (first << 3) | LIS;
+  }
+  if (t instanceof Struct && t.args.length > 0) {
+    const n = t.args.length, p = hp.alloc(n + 1);
+    hp.h[p] = hp.functor(t.name, n);
+    for (let i = 0; i < n; i++) hp.h[p + 1 + i] = buildTerm(hp, t.args[i]!, vals, seen, mark);
+    return (p << 3) | STR;
+  }
+  return atomicCell(hp, t);
+}
+
+/** Unify template t0 with cell c0 as match does from a program, slots as buildTerm takes them. */
+function matchTermOf(hp: Heap, t0: Term, c0: number, vals: Int32Array, seen: Int32Array, mark: number): boolean {
+  let t = t0 instanceof Ground ? t0.t : t0;
+  let c = c0;
+  // A list's tail is matched in this loop, so a long list in a head takes no stack.
+  for (;;) {
+    if (t instanceof Slot) {
+      if (seen[t.i] !== mark) {
+        seen[t.i] = mark;
+        vals[t.i] = c;
+        return true;
+      }
+      return hp.unify(vals[t.i]!, c);
+    }
+    const d = hp.deref(c), tag = d & 7;
+    if (t instanceof Cons) {
+      if (tag === LIS) {
+        const p = d >> 3;
+        if (!matchTermOf(hp, t.head, hp.h[p]!, vals, seen, mark)) return false;
+        t = t.tail instanceof Ground ? t.tail.t : t.tail;
+        c = hp.h[p + 1]!;
+        continue;
+      }
+    } else if (t instanceof Struct && t.args.length > 0) {
+      if (tag === STR) {
+        const p = d >> 3;
+        if (hp.h[p] !== hp.functor(t.name, t.args.length)) return false;
+        for (let i = 0; i < t.args.length; i++) if (!matchTermOf(hp, t.args[i]!, hp.h[p + 1 + i]!, vals, seen, mark)) return false;
+        return true;
+      }
+    } else {
+      const k = atomicCell(hp, t);
+      if (d === k) return true;
+      if (tag === REF) {
+        hp.bind(d >> 3, k);
+        return true;
+      }
+      // An attributed variable takes the constant through unification, which records its wakeup; boxes compare by
+      // content there.
+      return hp.unify(d, k);
+    }
+    // A compound template against an unbound cell builds it, an attributed one through unification.
+    if (tag === REF) {
+      hp.bind(d >> 3, buildTerm(hp, t, vals, seen, mark));
+      return true;
+    }
+    return tag === ATV && hp.unify(d, buildTerm(hp, t, vals, seen, mark));
+  }
+}
+
+/**
+ * Unify clause `c`'s head with argument cells A[0..arity) from its head terms themselves, as runHead does from its
+ * program: a fact's first try, so a fact tried once never pays for a program (c-msf-cell-profile-1107). A slot's
+ * first occurrence takes its cell, stamped `mark` in `seen`, and a later one unifies with it. Time: the cells visited
+ * and the terms built.
+ * am[implements a-petta-cell-store.tune.firsttry]
+ */
+export function matchHead(hp: Heap, c: Clause, A: Int32Array, vals: Int32Array, seen: Int32Array, mark: number): boolean {
+  const head = c.head;
+  if (!(head instanceof Struct)) return true;
+  for (let i = 0; i < head.args.length; i++) if (!matchTermOf(hp, head.args[i]!, A[i]!, vals, seen, mark)) return false;
+  return true;
+}
+
 /** Unify the head whose program is `prog` with argument cells A[0..arity); `vals` holds the slots. */
 export function runHead(hp: Heap, prog: HeadProgram, A: Int32Array, vals: Int32Array, next: Int32Array): boolean {
   const code = prog.code;

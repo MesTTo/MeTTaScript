@@ -18,7 +18,7 @@ import { Halt, NIL, PrologError, Struct, existenceError, instantiationError, typ
 import { CellArgs } from "./args";
 import { Bag } from "./bag";
 import { bridgeBuiltin, nextSolution, objectTrailMark, startNondet, takeSolution, type BridgeRun } from "./bridge";
-import { build, headProgram, runHead, type HeadProgram } from "./headprog";
+import { build, headProgram, matchHead, runHead, type HeadProgram } from "./headprog";
 import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, Heap, INT, REF, STR, type TrailState, type Wakeup } from "./heap";
 
 /** Code the trampoline runs: the code to run next, or null at a run's exit. */
@@ -145,7 +145,8 @@ const CONTROL = new Set([",/2", ";/2", "->/2", "*->/2", "\\+/1", "call/1", "once
 
 /** A clause not yet compiled: its head and body programs and how often it has been tried. */
 interface ColdFact {
-  readonly prog: HeadProgram;
+  /** The head program, from the clause's second try; a fact's first try matches its head terms (matchHead). */
+  readonly prog: HeadProgram | null;
   tries: number;
 }
 
@@ -269,6 +270,9 @@ export class CellMachine {
   private nest = 0;
   /** Head slots, of compiled heads (compile.ts) and cold facts' head programs (headprog.ts); grown to the most slots a clause has. */
   vals = new Int32Array(64);
+  /** First-try stamps of a fact's slots (matchHead), current when equal to seenMark. */
+  private seen = new Int32Array(this.vals.length);
+  private seenMark = 0;
   private readonly next = new Int32Array(1);
   /** Where the running computation's control stack must end: the stack's end, or a worker's area's end. */
   private sLimit = S_LIMIT;
@@ -1506,8 +1510,9 @@ export class CellMachine {
   /**
    * Try clause `c`, which has no code yet: for its first COMPILE_AFTER tries it runs from its head program, a rule
    * then building its body on the heap and running it through the meta-call interpreter with the clause's cut
-   * barrier; on that try it is compiled, a rule with an inline head, a fact with a compact one (compile.ts,
-   * c-head-tiers-1106). Returns what the clause's code would.
+   * barrier, a fact on its first try from its head terms themselves (matchHead); on that try it is compiled, a rule
+   * with an inline head, a fact with a compact one (compile.ts, c-head-tiers-1106). Returns what the clause's code
+   * would.
    */
   private cold(c: Clause, h: number, cc: number): Code | null {
     let st = c.cell as ColdFact | null;
@@ -1517,13 +1522,27 @@ export class CellMachine {
       c.cell = fn;
       return fn(h, cc, 0);
     }
-    if (st === null) c.cell = st = { prog: headProgram(this.hp, c), tries: 1 };
-    if (c.nvars > this.vals.length) this.vals = new Int32Array(2 * c.nvars);
-    if (!runHead(this.hp, st.prog, this.A, this.vals, this.next)) return HEADFAIL;
+    if (c.nvars > this.vals.length) {
+      this.vals = new Int32Array(2 * c.nvars);
+      this.seen = new Int32Array(2 * c.nvars);
+    }
+    // A fact's first try matches its head terms themselves: a fact tried once never pays for its program
+    // (c-msf-cell-profile-1107).
+    if (st === null && !rule) {
+      c.cell = { prog: null, tries: 1 };
+      if (++this.seenMark === 0x7fffffff) {
+        this.seen.fill(0);
+        this.seenMark = 1;
+      }
+      if (!matchHead(this.hp, c, this.A, this.vals, this.seen, this.seenMark)) return HEADFAIL;
+      return this.hp.wakeups.length !== 0 ? this.wake(cc) : this.proceed();
+    }
+    if (st === null || st.prog === null) c.cell = st = { prog: headProgram(this.hp, c), tries: st === null ? 1 : st.tries };
+    if (!runHead(this.hp, st.prog!, this.A, this.vals, this.next)) return HEADFAIL;
     const woke = this.hp.wakeups.length !== 0;
     if (!rule) return woke ? this.wake(cc) : this.proceed();
     // The hooks the head woke run before the body, which they are put in front of.
-    const body = build(this.hp, st.prog.body!, 0, this.vals, this.next);
+    const body = build(this.hp, st.prog!.body!, 0, this.vals, this.next);
     return this.goal(woke ? this.conj(this.wakeGoal(), body) : body, h, cc);
   }
 
