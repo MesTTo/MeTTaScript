@@ -3,9 +3,10 @@
 // SPDX-License-Identifier: MIT
 
 
-// Purpose: the clause database: predicates as ordered clause lists under SWI's logical update view; which clauses
-// a call scans is SWI's own clause selection (swi-index.ts), told of every change through a ClauseObserver; and the
-// ground-term hash that argument hash indexes compare, whose leaf mixers the cell heap's hash shares.
+// Purpose: the clause database: predicates as ordered clause lists under SWI's logical update view, an image's
+// clauses kept undecoded until a predicate's first read; which clauses a call scans is SWI's own clause selection
+// (swi-index.ts), told of every change through a ClauseObserver; and the ground-term hash that argument hash indexes
+// compare, whose leaf mixers the cell heap's hash shares.
 // am[implements a-pe-runtime]
 
 import { Cons, Float, NIL, Str, Struct, Var, deref, type Term } from "./terms";
@@ -85,8 +86,23 @@ export interface ClauseObserver {
   compacted(): void;
 }
 
+/**
+ * A predicate's clauses as an image keeps them (image.ts), all live, decoded into clauses on the predicate's first read
+ * of them: a run reads a few hundred of the image's predicates (c-image-touched-1108), and each decodes alone into the
+ * clauses an eager load would make (c-image-clauses-alone-1108).
+ * am[implements a-petta-next-1108.startup.cut.lazyimage]
+ * am[rests-on c-image-clauses-alone-1108]
+ */
+export interface StoredClauses {
+  readonly count: number;
+  decode(p: Pred): Clause[];
+}
+
 export class Pred {
-  clauses: Clause[] = [];
+  private list: Clause[] = [];
+  /** The image's clauses not yet decoded; null once `list` holds them, and for a predicate no image stored. */
+  // am[implements a-petta-next-1108.startup.cut.lazyimage]
+  private stored: StoredClauses | null = null;
   live = 0;
   dynamic = false;
   /** Declared multifile: several files may add clauses. */
@@ -105,6 +121,30 @@ export class Pred {
     public readonly name: string,
     public readonly arity: number,
   ) {}
+
+  /** The clauses in order, retracted ones kept until compaction; stored ones are decoded here, on the first read. */
+  // am[implements a-petta-next-1108.startup.cut.lazyimage]
+  get clauses(): Clause[] {
+    const s = this.stored;
+    if (s !== null) {
+      this.stored = null;
+      this.list = s.decode(this);
+    }
+    return this.list;
+  }
+
+  set clauses(cs: Clause[]) {
+    this.stored = null;
+    this.list = cs;
+  }
+
+  /** Take an image's clauses, all live, in place of none; they are decoded when `clauses` is first read. */
+  // am[implements a-petta-next-1108.startup.cut.lazyimage]
+  store(s: StoredClauses): void {
+    if (this.list.length !== 0 || this.stored !== null) throw new Error(`${this.name}/${this.arity}: an image's clauses must be its only clauses`);
+    this.stored = s;
+    this.live = s.count;
+  }
 
   add(c: Clause, atEnd: boolean): void {
     if (atEnd) this.clauses.push(c);

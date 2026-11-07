@@ -72,9 +72,9 @@ interface Comparable {
 
 function comparable(data: Record<string, unknown>): Comparable {
   const preds = new Map<string, string>();
-  const db = data.db as { preds: [string, number, number, unknown, unknown[][]][] };
-  for (const [name, arity, bits, file, clauses] of db.preds)
-    preds.set(name + "/" + arity, JSON.stringify([bits, file, clauses.map((c) => c.slice(0, 4))]));
+  const db = data.db as { preds: [string, number, number, unknown, number, string][] };
+  for (const [name, arity, bits, file, , json] of db.preds)
+    preds.set(name + "/" + arity, JSON.stringify([bits, file, (JSON.parse(json) as unknown[][]).map((c) => c.slice(0, 4))]));
   const rest = { ...data, db: null, files: null, argv: null, flags: (data.flags as [string, unknown][]).filter(([k]) => k !== "argv") };
   return { preds, rest: JSON.stringify(rest) };
 }

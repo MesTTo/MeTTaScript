@@ -8,13 +8,14 @@
 // the loader's files and modules and the goal-expansion state; builtins are code, so a loading machine installs them
 // and the image only says which of them consulting removed. Paths under the package directory are stored relative
 // to it. The image applies only while every file it was consulted from is byte-identical and the engine bundle is
-// the one that built it; the directives that read argv at load time are run again with the run's own argv.
+// the one that built it; the directives that read argv at load time are run again with the run's own argv. Each
+// predicate's clauses are kept as their own JSON text and decoded the first time the database reads them.
 // am[implements a-petta-speed-1105.startup.image]
 
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
-import { Clause, Database, Ground, Slot } from "./db";
+import { Clause, Database, Ground, Slot, type Pred } from "./db";
 import { expansionSnapshot, restoreExpansion } from "./goal-expansion";
 import { loaderSnapshot, restoreLoader, runFileDirective, type LoaderSnapshot } from "./consult";
 import type { Machine } from "./machine";
@@ -23,12 +24,19 @@ import { Cons, Float, NIL, Str, Struct, Var, mkVar, type Term } from "./terms";
 type J = unknown;
 
 /** The image file format; a reader of another format consults instead. */
-const FORMAT = 1;
+const FORMAT = 2;
 
-/** Encodes terms for the image: atoms as strings, other kinds tagged, variables numbered across the whole image. */
+/**
+ * Encodes terms for the image: atoms as strings, other kinds tagged, variables numbered across the whole image. An
+ * encoder for clauses (`clauses` true) refuses a variable, since each predicate's clauses decode alone.
+ * am[rests-on c-image-clauses-alone-1108]
+ */
 class Encoder {
   private readonly vars = new Map<Var, number>();
-  constructor(private readonly root: string) {}
+  constructor(
+    private readonly root: string,
+    private readonly clauses = false,
+  ) {}
 
   text(s: string): J {
     return s.startsWith(this.root + "/") ? { p: s.slice(this.root.length + 1) } : s;
@@ -46,6 +54,7 @@ class Encoder {
     if (t instanceof Var) {
       if (t.ref !== null) return this.term(t.ref);
       if (t.attrs !== null && t.attrs.size > 0) throw new Error("image: an attributed variable cannot be saved");
+      if (this.clauses) throw new Error("image: a stored clause holds a variable outside its slots");
       let n = this.vars.get(t);
       if (n === undefined) this.vars.set(t, (n = this.vars.size));
       return { x: n };
@@ -142,6 +151,7 @@ export function engineHash(dir: string): string {
  */
 export function imageData(m: Machine, root: string, engine: string, builtins: string[], argv: ArgvDependence): Record<string, J> {
   const enc = new Encoder(root);
+  const cenc = new Encoder(root, true);
   if (m.objectCount() > 0) throw new Error("image: consulting left host objects (streams) open");
   const loader = loaderSnapshot(m);
   const preds: J[] = [];
@@ -149,9 +159,10 @@ export function imageData(m: Machine, root: string, engine: string, builtins: st
     const clauses: J[] = [];
     for (const c of p.clauses) {
       if (c.died !== Infinity) continue;
-      clauses.push([enc.term(c.head), enc.term(c.body), c.nvars, c.file === null ? null : enc.text(c.file), c.born, c.seq]);
+      clauses.push([cenc.term(c.head), cenc.term(c.body), c.nvars, c.file === null ? null : cenc.text(c.file), c.born, c.seq]);
     }
-    preds.push([p.name, p.arity, +p.dynamic | (+p.multifile << 1), p.file === null ? null : enc.text(p.file), clauses]);
+    // am[implements a-petta-next-1108.startup.cut.lazyimage]
+    preds.push([p.name, p.arity, +p.dynamic | (+p.multifile << 1), p.file === null ? null : enc.text(p.file), clauses.length, JSON.stringify(clauses)]);
   }
   const removed = builtins.filter((k) => !m.builtins.has(k));
   const added = [...m.builtins.keys()].filter((k) => !builtins.includes(k));
@@ -203,10 +214,27 @@ export function readImage(path: string, root: string, engine: string, argv: stri
 }
 
 /**
+ * Predicate `p`'s clauses from their JSON text in an image. Time: linear in the text.
+ * am[implements a-petta-next-1108.startup.cut.lazyimage]
+ * am[rests-on c-image-clauses-alone-1108]
+ */
+function decodeClauses(p: Pred, json: string, root: string): Clause[] {
+  const dec = new Decoder(root);
+  const out: Clause[] = [];
+  for (const [h, b, nvars, cfile, born, seq] of JSON.parse(json) as [J, J, number, J, number, number][]) {
+    const c = new Clause(p, dec.term(h), dec.term(b), nvars, born, seq);
+    c.file = cfile === null ? null : (dec.term(cfile) as string);
+    out.push(c);
+  }
+  return out;
+}
+
+/**
  * Load an image into `m`, whose builtins and library are installed and which has consulted nothing: the database,
  * flags (argv set after), globals, operators, tables and loader and expansion states become the image's; then the
- * directives that read argv run again, their predicates cleared first, with the argv flag `m` already has.
- * Time: linear in the image.
+ * directives that read argv run again, their predicates cleared first, with the argv flag `m` already has. Each
+ * predicate's clauses stay JSON text until the database first reads them (Pred.store).
+ * Time: linear in the image's predicates and its non-clause state, plus the clauses the directives read.
  */
 export function loadImage(m: Machine, data: Record<string, J>, root: string): void {
   const dec = new Decoder(root);
@@ -214,16 +242,13 @@ export function loadImage(m: Machine, data: Record<string, J>, root: string): vo
   const argv = m.flags.get("argv")!;
   const db = new Database();
   const d = data.db as { generation: number; seq: number; preds: J[][] };
-  for (const [name, arity, bits, file, clauses] of d.preds as [string, number, number, J, J[][]][]) {
+  for (const [name, arity, bits, file, count, json] of d.preds as [string, number, number, J, number, string][]) {
     const p = db.ensure(name, arity);
     p.dynamic = (bits & 1) !== 0;
     p.multifile = (bits & 2) !== 0;
     p.file = file === null ? null : text(file);
-    for (const [h, b, nvars, cfile, born, seq] of clauses as [J, J, number, J, number, number][]) {
-      const c = new Clause(p, dec.term(h), dec.term(b), nvars, born, seq);
-      c.file = cfile === null ? null : text(cfile);
-      p.add(c, true);
-    }
+    // am[implements a-petta-next-1108.startup.cut.lazyimage]
+    if (count > 0) p.store({ count, decode: (q) => decodeClauses(q, json, root) });
   }
   db.restoreCounters(d.generation, d.seq);
   m.replaceDatabase(db);
