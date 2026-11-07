@@ -102,12 +102,17 @@ const FIBER_MIN_GROWTH = GC_MIN_GROWTH >> 3;
  */
 const V8_CHECK_MASK = 0xffff;
 /**
- * V8's heap beyond twice its live size that a run may hold before the machine collects it: V8's own growing factor
- * reached four times live on tilepuzzle (c-v8-growth-tilepuzzle-1107), and the goal bounds peak memory at twice
- * PeTTa's plus 150 MB; --optimize-for-size's factor of two cost up to two and a half times the CPU
- * (c-optimize-for-size-1107), where this bound kept tilepuzzle's CPU (c-v8-bound-experiment-1107).
+ * How far V8's heap may grow past the live size the machine's last collection of it left, V8_GROWTH times it plus
+ * V8_SLACK, before the machine collects it again: V8's own growing factor reached four times live on tilepuzzle
+ * (c-v8-growth-tilepuzzle-1107), and the goal bounds peak memory at twice PeTTa's plus 150 MB; --optimize-for-size's
+ * factor of two cost up to two and a half times the CPU (c-optimize-for-size-1107), and V8's own growing factor at
+ * 1.5 (--heap-growing-percent=50) cost more instructions than this bound for a lower peak only on scale. At 1.5 times
+ * plus 32 MB tilepuzzle's and scale's peaks fall by 66 and 86 MB from twice plus 64 MB, for 9 and 3 percent more
+ * instructions there and none measurable on the other long examples (c-v8-bound-sweep-1107).
+ * am[implements a-petta-cell-store.tune.v8bound-tight]
  */
-const V8_SLACK = 64 << 20;
+const V8_GROWTH = 1.5;
+const V8_SLACK = 32 << 20;
 /** Control stack cells each concurrent_and worker gets in its choicepoint's area. */
 const FIBER_S = 1 << 18;
 /** Trampoline bounces a worker runs before the next takes its turn, as the object machine's workers run SLICE goals. */
@@ -316,7 +321,7 @@ export class CellMachine {
   private fiberGroups = 0;
   /**
    * A major collection of V8's heap, which the hosted runtime hands the machine (hosted.ts) so it can hold V8's heap
-   * to twice its live size plus V8_SLACK; null leaves V8 to its own growth.
+   * to V8_GROWTH times its live size plus V8_SLACK; null leaves V8 to its own growth.
    */
   majorGc: (() => void) | null = null;
   private v8Tick = 0;
@@ -974,12 +979,13 @@ export class CellMachine {
   }
 
   /**
-   * Collect V8's heap with `gc` when its size has passed twice the live size the last such collection left plus
-   * V8_SLACK, and note the new live size.
+   * Collect V8's heap with `gc` when its size has passed V8_GROWTH times the live size the last such collection left
+   * plus V8_SLACK, and note the new live size.
    * am[implements a-petta-cell-store.tune.v8bound]
+   * am[implements a-petta-cell-store.tune.v8bound-tight]
    */
   private boundV8Heap(gc: () => void): void {
-    if (getHeapStatistics().total_heap_size <= 2 * this.v8Live + V8_SLACK) return;
+    if (getHeapStatistics().total_heap_size <= V8_GROWTH * this.v8Live + V8_SLACK) return;
     gc();
     this.v8Live = getHeapStatistics().used_heap_size;
   }
