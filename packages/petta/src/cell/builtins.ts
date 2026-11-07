@@ -394,6 +394,21 @@ export function installGlobalBuiltins(cm: CellMachine): void {
     if (tag !== ATM && tag !== INT && tag !== BOX) hp.freeze();
     return c;
   };
+  // am[implements a-petta-next-1108.speed.imports.replay]
+  cm.globalStore = {
+    keys: () => [...slots.keys()],
+    cell: (key) => {
+      const a = slots.get(key);
+      return a === undefined ? 0 : hp.h[a]!;
+    },
+    set: (key, c) => void keep(slotOf(key), copyCells(hp, c, new Map(), true)),
+    bind: (key, c) => hp.bind(slotOf(key), c),
+    remove: (key) => {
+      const a = slots.get(key);
+      if (a !== undefined) hp.h[a] = 0;
+      cm.om.globals.delete(key);
+    },
+  };
   cm.proc("b_setval", 2).det = () => {
     hp.bind(slotOf(atomArg(hp, A[0]!)), A[1]!);
     return true;

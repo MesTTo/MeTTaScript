@@ -19,6 +19,7 @@ import { installProcess } from "./process";
 import { installJanus } from "./janus";
 import { consultFile, installConsult, mainGoalOf, markLoaded } from "./consult";
 import { engineHash, loadImage, readImage } from "./image";
+import { IMPORTS_DIR, installImportReplay, snapshotDir } from "./import-snapshot";
 import { installSpecCache } from "./spec-cache";
 import { consultLibrary, installLibrary } from "./library";
 import { Machine, profileReport } from "./machine";
@@ -43,6 +44,11 @@ export interface HostedOptions {
    * consults the source otherwise, "consult" always consults, "none" leaves it to the caller (consultSource).
    */
   readonly load?: "auto" | "consult" | "none";
+  /**
+   * Called with the cell machine before main/0 runs on it: the package build records import snapshots through it
+   * (import-build.ts).
+   */
+  readonly onCells?: (cm: CellMachine) => void;
 }
 
 /** The vendored PeTTa src directory (petta-src beside dist or src). */
@@ -88,10 +94,14 @@ const SWI_FLAGS: [string, Term][] = [
 export class HostedPetta {
   readonly m = new Machine();
   readonly srcDir: string;
+  /** The bundle hash the loaded image was built with; null when the source was consulted instead. */
+  private imageEngine: string | null = null;
+  private readonly onCells: ((cm: CellMachine) => void) | undefined;
 
   constructor(opts: HostedOptions) {
     const m = this.m;
     this.srcDir = opts.srcDir ?? defaultSrcDir();
+    this.onCells = opts.onCells;
     if (opts.out) m.out = opts.out;
     if (opts.err) m.err = opts.err;
     if (opts.readLine) m.readLine = opts.readLine;
@@ -108,10 +118,12 @@ export class HostedPetta {
     if (load === "auto" && opts.srcDir === undefined) {
       // am[implements a-petta-speed-1105.startup.image]
       const p = imagePaths();
-      const image = readImage(p.image, p.root, engineHash(p.bundle), opts.argv);
+      const engine = engineHash(p.bundle);
+      const image = readImage(p.image, p.root, engine, opts.argv);
       if (image !== null) {
         loadImage(m, image, p.root);
         installSpecCache(m);
+        this.imageEngine = engine;
         return;
       }
     }
@@ -178,6 +190,14 @@ export class HostedPetta {
     cm.compile = compileCellClause;
     installInlineBuiltins(cm);
     installTermBuiltins(cm);
+    // A shipped library's import replays its snapshot when one matches, on the state an image gives
+    // (a-petta-next-1108.speed.imports.replay).
+    // am[implements a-petta-next-1108.speed.imports.replay]
+    if (this.imageEngine !== null) {
+      const p = imagePaths();
+      installImportReplay(cm, p.root, snapshotDir(join(p.bundle, IMPORTS_DIR), this.imageEngine));
+    }
+    this.onCells?.(cm);
     // V8 exposes gc to contexts made after its expose-gc flag is set: a fresh context's gc collects this isolate's
     // heap, which the machine uses to bound it (CellMachine.boundV8Heap). The context, 2.3 M instructions, is made
     // when the bound first asks for a collection, which a short run never does (c-startup-phases-1108).

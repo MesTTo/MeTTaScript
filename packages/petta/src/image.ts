@@ -28,14 +28,18 @@ const FORMAT = 2;
 
 /**
  * Encodes terms for the image: atoms as strings, other kinds tagged, variables numbered across the whole image. An
- * encoder for clauses (`clauses` true) refuses a variable, since each predicate's clauses decode alone.
+ * encoder for clauses (`clauses` true) refuses a variable, since each predicate's clauses decode alone. A clause
+ * reference is refused unless `ref` encodes it (an import snapshot keeps it as its clause's place, import-snapshot.ts),
+ * and an attributed variable unless `attrs` is set, when its attributes go with its number.
  * am[rests-on c-image-clauses-alone-1108]
  */
-class Encoder {
+export class Encoder {
   private readonly vars = new Map<Var, number>();
   constructor(
     private readonly root: string,
     private readonly clauses = false,
+    private readonly ref: ((t: Struct) => J) | null = null,
+    private readonly attrs = false,
   ) {}
 
   text(s: string): J {
@@ -53,11 +57,14 @@ class Encoder {
     if (t === NIL) return { n: 1 };
     if (t instanceof Var) {
       if (t.ref !== null) return this.term(t.ref);
-      if (t.attrs !== null && t.attrs.size > 0) throw new Error("image: an attributed variable cannot be saved");
+      const attributed = t.attrs !== null && t.attrs.size > 0;
+      if (attributed && !this.attrs) throw new Error("image: an attributed variable cannot be saved");
       if (this.clauses) throw new Error("image: a stored clause holds a variable outside its slots");
       let n = this.vars.get(t);
-      if (n === undefined) this.vars.set(t, (n = this.vars.size));
-      return { x: n };
+      if (n !== undefined) return { x: n };
+      this.vars.set(t, (n = this.vars.size));
+      // Numbered before its attributes, which may name it again.
+      return attributed ? { x: n, at: [...t.attrs!].map(([k, v]) => [k, this.term(v)]) } : { x: n };
     }
     if (t instanceof Cons) {
       const items: J[] = [];
@@ -69,6 +76,7 @@ class Encoder {
       return { l: items, t: this.term(c) };
     }
     if (t instanceof Struct) {
+      if (t.name === "$cref" && this.ref !== null) return { r: this.ref(t) };
       if (t.name === "$cref" || t.name === "$stream") throw new Error(`image: a ${t.name} reference cannot be saved`);
       return [t.name, ...t.args.map((a) => this.term(a))];
     }
@@ -76,9 +84,12 @@ class Encoder {
   }
 }
 
-class Decoder {
+export class Decoder {
   private readonly vars = new Map<number, Var>();
-  constructor(private readonly root: string) {}
+  constructor(
+    private readonly root: string,
+    private readonly ref: ((j: J) => Term) | null = null,
+  ) {}
 
   term(j: J): Term {
     if (typeof j === "string") return j;
@@ -103,6 +114,7 @@ class Decoder {
       const n = o.x as number;
       let v = this.vars.get(n);
       if (v === undefined) this.vars.set(n, (v = mkVar()));
+      if ("at" in o) v.attrs = new Map((o.at as [string, J][]).map(([k, a]) => [k, this.term(a)]));
       return v;
     }
     if ("i" in o) return BigInt(o.i as string);
@@ -110,6 +122,7 @@ class Decoder {
     if ("s" in o) return new Str(o.s as string);
     if ("sp" in o) return new Str(this.root + "/" + (o.sp as string));
     if ("z" in o) return -0;
+    if ("r" in o && this.ref !== null) return this.ref(o.r);
     throw new Error("image: unknown term encoding");
   }
 }
@@ -133,7 +146,7 @@ export interface ArgvDependence {
 }
 
 /** SHA-1 of a file's bytes. */
-function fileHash(path: string): string {
+export function fileHash(path: string): string {
   return createHash("sha1").update(readFileSync(path)).digest("hex");
 }
 

@@ -23,7 +23,7 @@
     "swipl"
   ],
   "scripts": {
-    "build": "tsup src/index.ts src/cli.ts src/image-build.ts --format esm --dts --clean && node dist/image-build.js"
+    "build": "tsup src/index.ts src/cli.ts src/image-build.ts src/import-build.ts --format esm --dts --clean && node dist/image-build.js && node dist/import-build.js"
   },
   "author": "MesTTo",
   "engines": {

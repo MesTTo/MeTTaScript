@@ -269,6 +269,19 @@ export class CellMachine {
    */
   private readonly TIDIED = reserved(Int32Array, S_LIMIT);
   readonly CODE: Code[] = [];
+  /**
+   * The global variables as installGlobalBuiltins keeps them, null before it runs: the keys set on cells, a key's value
+   * cell (0 when unset here, the object machine's term then standing for it), nb_setval/2's set, b_setval/2's bind
+   * and nb_delete/1's remove. Import snapshots read and replay globals through it (import-snapshot.ts).
+   * am[implements a-petta-next-1108.speed.imports.replay]
+   */
+  globalStore: {
+    keys(): string[];
+    cell(key: string): number;
+    set(key: string, cell: number): void;
+    bind(key: string, cell: number): void;
+    remove(key: string): void;
+  } | null = null;
   /** The argument registers as clause selection reads them. */
   private readonly args: CellArgs;
   private readonly procs = new Map<string, CellProc>();

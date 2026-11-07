@@ -2063,7 +2063,8 @@ export function clauseRef(c: import("./db").Clause): Term {
   }
   return mkStruct("$cref", id);
 }
-function refClause(r: Term): import("./db").Clause | undefined {
+/** The clause a $cref reference names, or undefined for another term. */
+export function refClause(r: Term): import("./db").Clause | undefined {
   const d = deref(r);
   if (d instanceof Struct && d.name === "$cref") return refTable[deref(d.args[0]!) as number];
   return undefined;

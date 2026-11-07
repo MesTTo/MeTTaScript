@@ -147,6 +147,13 @@ export class Pred {
    * am[implements a-petta-spec-cache]
    */
   memo: Memo | null = null;
+  /**
+   * Whether a clause was added, removed or revived since the predicate was made: an image's predicates stay untouched
+   * until a run changes them, so the state an import starts from is the image's plus the touched predicates
+   * (import-snapshot.ts).
+   * am[implements a-petta-next-1108.speed.imports.replay]
+   */
+  touched = false;
   constructor(
     public readonly name: string,
     public readonly arity: number,
@@ -177,6 +184,7 @@ export class Pred {
   }
 
   add(c: Clause, atEnd: boolean): void {
+    this.touched = true;
     if (atEnd) this.clauses.push(c);
     // asserta: a new array, so calls already iterating keep their snapshot.
     else this.clauses = [c, ...this.clauses];
@@ -186,6 +194,7 @@ export class Pred {
 
   remove(c: Clause, gen: number, compact = true): void {
     if (c.died !== Infinity) return;
+    this.touched = true;
     c.died = gen;
     this.live--;
     this.observer?.removed(c);
@@ -265,6 +274,7 @@ export class Database {
       if (c.died === Infinity) continue;
       c.died = Infinity;
       c.pred.live++;
+      c.pred.touched = true;
       if (!c.pred.clauses.includes(c)) {
         const arr = [...c.pred.clauses, c].sort((a, b) => a.seq - b.seq);
         c.pred.clauses = arr;
