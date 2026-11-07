@@ -149,9 +149,9 @@ interface FiberGroup {
 const CONTROL = new Set([",/2", ";/2", "->/2", "*->/2", "\\+/1", "call/1", "once/1", "ignore/1", "forall/2"]);
 
 /** A clause not yet compiled: its head and body programs and how often it has been tried. */
+/** A rule's cold state: its head program, made on its first try, and its tries; a fact keeps only a count (cold). */
 interface ColdFact {
-  /** A rule's head program, from its first try; a fact has none, matching its head terms (matchHead). */
-  readonly prog: HeadProgram | null;
+  readonly prog: HeadProgram;
   tries: number;
 }
 
@@ -1556,21 +1556,22 @@ export class CellMachine {
    * would.
    */
   private cold(c: Clause, h: number, cc: number): Code | null {
-    let st = c.cell as ColdFact | null;
     const rule = c.body !== "true";
-    if (st !== null && ++st.tries >= COMPILE_AFTER) {
-      const fn = this.compile!(this, c, rule);
-      c.cell = fn;
-      return fn(h, cc, 0);
-    }
     if (c.nvars > this.vals.length) {
       this.vals = new Int32Array(2 * c.nvars);
       this.seen = new Int32Array(2 * c.nvars);
     }
-    // A fact matches its head terms themselves until it is compiled: one tried once never pays for a program
-    // (c-msf-cell-profile-1107), and a database of facts holds no program per fact (i-cell-tilepuzzle-memory-1107).
+    // A fact matches its head terms themselves until it is compiled, counting its tries in its cell field as a plain
+    // number: one tried once never pays for a program (c-msf-cell-profile-1107), and a database of facts holds no
+    // program or state object per fact (i-cell-tilepuzzle-memory-1107; scale asserts a million).
     if (!rule) {
-      if (st === null) c.cell = { prog: null, tries: 1 };
+      const tries = c.cell === null ? 1 : (c.cell as number) + 1;
+      if (tries >= COMPILE_AFTER) {
+        const fn = this.compile!(this, c, false);
+        c.cell = fn;
+        return fn(h, cc, 0);
+      }
+      c.cell = tries;
       if (++this.seenMark === 0x7fffffff) {
         this.seen.fill(0);
         this.seenMark = 1;
@@ -1578,12 +1579,17 @@ export class CellMachine {
       if (!matchHead(this.hp, c, this.A, this.vals, this.seen, this.seenMark)) return HEADFAIL;
       return this.hp.wakeups.length !== 0 ? this.wake(cc) : this.proceed();
     }
-    if (st === null || st.prog === null) c.cell = st = { prog: headProgram(this.hp, c), tries: st === null ? 1 : st.tries };
-    if (!runHead(this.hp, st.prog!, this.A, this.vals, this.next)) return HEADFAIL;
+    let st = c.cell as ColdFact | null;
+    if (st !== null && ++st.tries >= COMPILE_AFTER) {
+      const fn = this.compile!(this, c, true);
+      c.cell = fn;
+      return fn(h, cc, 0);
+    }
+    if (st === null) c.cell = st = { prog: headProgram(this.hp, c), tries: 1 };
+    if (!runHead(this.hp, st.prog, this.A, this.vals, this.next)) return HEADFAIL;
     const woke = this.hp.wakeups.length !== 0;
-    if (!rule) return woke ? this.wake(cc) : this.proceed();
     // The hooks the head woke run before the body, which they are put in front of.
-    const body = build(this.hp, st.prog!.body!, 0, this.vals, this.next);
+    const body = build(this.hp, st.prog.body!, 0, this.vals, this.next);
     return this.goal(woke ? this.conj(this.wakeGoal(), body) : body, h, cc);
   }
 
