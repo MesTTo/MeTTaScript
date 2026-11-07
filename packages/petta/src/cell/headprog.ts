@@ -252,6 +252,30 @@ function atomicCell(hp: Heap, t: Term): number {
  * another a fresh variable that joins them; a list's spine is built without recursion on its tail. Time: its size.
  */
 /**
+ * The size of clause `c`'s head and body, counted up to `cap`: one for each structure, list cell and atomic or variable
+ * argument, and a ground subterm kept as cells its string's cells. Time: at most `cap` nodes.
+ * am[implements a-petta-next-1108.speed.cut.tier]
+ */
+export function clauseCells(c: Clause, cap: number): number {
+  let n = 0;
+  const stack: Term[] = [c.head, c.body];
+  while (stack.length > 0 && n < cap) {
+    const t = stack.pop()!;
+    if (t instanceof Ground) {
+      if (t.cells instanceof CellGround) n += t.cells.size;
+      else stack.push(t.t);
+    } else if (t instanceof Struct) {
+      n++;
+      for (const a of t.args) stack.push(a);
+    } else if (t instanceof Cons) {
+      n++;
+      stack.push(t.head, t.tail);
+    } else n++;
+  }
+  return Math.min(n, cap);
+}
+
+/**
  * The cells a stored ground term holds when this heap can copy them in (cell/ground.ts): an assert on this machine
  * made them, so their atom and functor ids are this heap's. Null for any other term.
  * am[implements a-petta-next-1108.speed.cut.ground]

@@ -95,6 +95,8 @@ function machines(): { m: Machine; cm: CellMachine } {
   installInlineBuiltins(cm);
   installTermBuiltins(cm);
   if (gcEvery !== null) cm.collectEvery(gcEvery);
+  // Every clause compiles at its 32nd try, so a program run 40 times runs its clauses cold and then compiled.
+  cm.tierWork = 0;
   return { m, cm };
 }
 
@@ -728,6 +730,26 @@ describe("cell engine memory", () => {
     // Each machine reserves gigabytes (three 1 GiB arrays, a 1 GiB heap per worker); V8 counting any of them would
     // set off its memory-pressure collections (c-cell-external-memory-1108).
     expect(process.memoryUsage().external - before).toBeLessThan(64 << 20);
+  });
+});
+
+// am[verifies a-petta-next-1108.speed.cut.tier]
+describe("cell engine tiers", () => {
+  it("compiles a large clause at its 32nd try and a small one only after more, as its size sets", () => {
+    gcEvery = null;
+    const { m, cm } = machines();
+    cm.tierWork = 8000;
+    const deep = Array.from({ length: 150 }, (_, i) => `n${i}`).join(", ");
+    for (const c of readClauses(`sm(1).\nbg(f(${deep}), [${deep}]).\nrun(0) :- !.\nrun(N) :- sm(_), bg(_, _), N1 is N - 1, run(N1).`)) m.addClause(c, true);
+    const compiled = (name: string, arity: number): boolean => typeof m.db.get(name, arity)!.clauses[0]!.cell === "function";
+    expect(onCells(cm, "run", [31]).threw).toBe(false);
+    expect([compiled("sm", 1), compiled("bg", 2)]).toEqual([false, false]);
+    expect(onCells(cm, "run", [1]).threw).toBe(false);
+    // bg's size, 454, gives 8000 / 454 = 18 tries, so the 32 floor holds and its 32nd try compiled it; sm's 3 give
+    // 2667, past the 256 ceiling, so it stays cold until then.
+    expect([compiled("sm", 1), compiled("bg", 2)]).toEqual([false, true]);
+    expect(onCells(cm, "run", [1000]).threw).toBe(false);
+    expect(compiled("sm", 1)).toBe(true);
   });
 });
 

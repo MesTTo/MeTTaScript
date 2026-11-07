@@ -20,7 +20,7 @@ import { Halt, NIL, PrologError, Struct, existenceError, instantiationError, typ
 import { CellArgs } from "./args";
 import { Bag } from "./bag";
 import { bridgeBuiltin, nextSolution, objectTrailMark, startNondet, takeSolution, type BridgeRun } from "./bridge";
-import { build, headProgram, matchHead, runHead, type HeadProgram } from "./headprog";
+import { build, clauseCells, headProgram, matchHead, runHead, type HeadProgram } from "./headprog";
 import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, Heap, INT, REF, STR, reserved, stackExhausted, type TrailState, type Wakeup } from "./heap";
 
 /** Code the trampoline runs: the code to run next, or null at a run's exit. */
@@ -72,10 +72,28 @@ export const CPH = 11;
  */
 const NEST = 4;
 /**
- * Tries before a fact gets generated code; until then its head runs from its head program, which V8 need not compile
- * (c-cold-plan-facts-1106). The object engine compiles a clause on the same try (machine.ts COMPILE_AFTER).
+ * The fewest tries a clause runs cold before it gets generated code; until then its head runs from its head program,
+ * which V8 need not compile (c-cold-plan-facts-1106). The object engine compiles a clause on the same try (machine.ts
+ * COMPILE_AFTER).
  */
 const COMPILE_AFTER = 32;
+/**
+ * Tries a clause runs cold before it is compiled: TIER_WORK over its size (headprog.ts clauseCells), no fewer than
+ * COMPILE_AFTER and no more than TIER_MAX. A cold try costs about the clause's size and compiling it its size plus a
+ * cost each generated function pays (new Function, its inline caches warming), so a small clause earns its code back
+ * only after more tries. On the Mac mini this takes the library-loading examples 10 to 21 percent faster than
+ * compiling every clause at its 32nd try, peano's large facts still compiling at 32; a ceiling of 1024 made
+ * he_minimalmetta 14 percent slower where 256 leaves it as it was (c-tier-sweep-1108, c-tier-mac-1108).
+ * am[implements a-petta-next-1108.speed.cut.tier]
+ */
+const TIER_WORK = 8000;
+const TIER_MAX = 256;
+/**
+ * The tries clause `c` runs cold before it is compiled, for a budget of `work` cells (TIER_WORK). Time: at most
+ * work / COMPILE_AFTER nodes.
+ */
+const compileAfter = (c: Clause, work: number): number =>
+  work <= 0 ? COMPILE_AFTER : Math.max(COMPILE_AFTER, Math.min(TIER_MAX, Math.round(work / clauseCells(c, Math.ceil(work / COMPILE_AFTER)))));
 /**
  * Control stack cells: environments and choicepoints. A frame that would pass the end raises SWI's stack limit error
  * (Heap's stackExhausted), where a typed array would drop the writes (i-cell-bounds-unchecked-1106). PeTTa runs SWI
@@ -176,10 +194,13 @@ interface FiberGroup {
 const CONTROL = new Set([",/2", ";/2", "->/2", "*->/2", "\\+/1", "call/1", "once/1", "ignore/1", "forall/2"]);
 
 /** A clause not yet compiled: its head and body programs and how often it has been tried. */
-/** A rule's cold state: its head program, made on its first try, and its tries; a fact keeps only a count (cold). */
+/**
+ * A rule's cold state: its head program, made on its first try, and the tries left before it is compiled; a fact keeps
+ * only that count (cold).
+ */
 interface ColdFact {
   readonly prog: HeadProgram;
-  tries: number;
+  left: number;
 }
 
 const EMPTY_POS: number[] = [];
@@ -335,6 +356,12 @@ export class CellMachine {
    * to V8_GROWTH times its live size plus V8_SLACK; null leaves V8 to its own growth.
    */
   majorGc: (() => void) | null = null;
+  /**
+   * The cold work a clause's tries make up before it is compiled (TIER_WORK); 0 compiles every clause at its
+   * COMPILE_AFTER'th try, which the differential tests use to run each program's clauses both cold and compiled.
+   * am[implements a-petta-next-1108.speed.cut.tier]
+   */
+  tierWork = TIER_WORK;
   private v8Tick = 0;
   /** V8's used heap after the last collection this machine asked for. */
   private v8Live = 0;
@@ -1655,7 +1682,7 @@ export class CellMachine {
   }
 
   /**
-   * Try clause `c`, which has no code yet: for its first COMPILE_AFTER tries it runs from its head program, a rule
+   * Try clause `c`, which has no code yet: for its first tries (compileAfter) it runs from its head program, a rule
    * then building its body on the heap and running it through the meta-call interpreter with the clause's cut
    * barrier, a fact from its head terms themselves (matchHead); on that try it is compiled, a rule
    * with an inline head, a fact with a compact one (compile.ts, c-head-tiers-1106). Returns what the clause's code
@@ -1667,17 +1694,17 @@ export class CellMachine {
       this.vals = new Int32Array(2 * c.nvars);
       this.seen = new Int32Array(2 * c.nvars);
     }
-    // A fact matches its head terms themselves until it is compiled, counting its tries in its cell field as a plain
-    // number: one tried once never pays for a program (c-msf-cell-profile-1107), and a database of facts holds no
-    // program or state object per fact (i-cell-tilepuzzle-memory-1107; scale asserts a million).
+    // A fact matches its head terms themselves until it is compiled, counting down the tries left in its cell field as
+    // a plain number: one tried once never pays for a program (c-msf-cell-profile-1107), and a database of facts holds
+    // no program or state object per fact (i-cell-tilepuzzle-memory-1107; scale asserts a million).
     if (!rule) {
-      const tries = c.cell === null ? 1 : (c.cell as number) + 1;
-      if (tries >= COMPILE_AFTER) {
+      const left = c.cell === null ? compileAfter(c, this.tierWork) - 1 : (c.cell as number) - 1;
+      if (left <= 0) {
         const fn = this.compile!(this, c, false);
         c.cell = fn;
         return fn(h, cc, 0);
       }
-      c.cell = tries;
+      c.cell = left;
       if (++this.seenMark === 0x7fffffff) {
         this.seen.fill(0);
         this.seenMark = 1;
@@ -1686,12 +1713,12 @@ export class CellMachine {
       return this.hp.wakeups.length !== 0 ? this.wake(cc) : this.proceed();
     }
     let st = c.cell as ColdFact | null;
-    if (st !== null && ++st.tries >= COMPILE_AFTER) {
+    if (st !== null && --st.left <= 0) {
       const fn = this.compile!(this, c, true);
       c.cell = fn;
       return fn(h, cc, 0);
     }
-    if (st === null) c.cell = st = { prog: headProgram(this.hp, c), tries: 1 };
+    if (st === null) c.cell = st = { prog: headProgram(this.hp, c), left: compileAfter(c, this.tierWork) - 1 };
     if (!runHead(this.hp, st.prog, this.A, this.vals, this.next)) return HEADFAIL;
     const woke = this.hp.wakeups.length !== 0;
     // The hooks the head woke run before the body, which they are put in front of.

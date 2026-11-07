@@ -39,6 +39,11 @@ export class CellGround implements GroundCells {
     return cellAt(this.s, this.root);
   }
 
+  /** The cells the string holds. */
+  get size(): number {
+    return this.s.length >> 1;
+  }
+
   get name(): string | null {
     const c = this.rootCell();
     return (c & 7) === LIS ? null : this.hp.funNames[cellAt(this.s, c >> 3) >> 3]!;
