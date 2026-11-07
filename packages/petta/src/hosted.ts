@@ -4,8 +4,8 @@
 
 // Purpose: the petta engine as PeTTa itself: PeTTa ee5cacb's own Prolog source (petta-src/, vendored from
 // trueagi-io/PeTTa) consulted on the TypeScript machine with SWI's builtins, the vendored SWI libraries and the
-// clpfd subset, then run through main.pl's main/0, so parsing, translation, type and determinism checking and
-// evaluation are PeTTa's own code (a-pe-host-petta-src).
+// clpfd subset, then run through main.pl's main/0 on the cell engine (cell/), so parsing, translation, type and
+// determinism checking and evaluation are PeTTa's own code (a-pe-host-petta-src).
 // am[implements a-hp-entry]
 
 import { existsSync } from "node:fs";
@@ -143,7 +143,7 @@ export class HostedPetta {
     const g = mainGoalOf(this.m);
     if (g === null) throw new Error(`${this.srcDir}/main.pl declares no initialization(main, main) goal`);
     try {
-      if (process.env.PETTA_ENGINE === "cell" ? this.solveOnCells(g) : this.m.solveOnce(g)) return 0;
+      if (this.solveOnCells(g)) return 0;
       this.m.err("Warning: goal (initialization) failed\n");
       return 1;
     } catch (e) {
@@ -161,10 +161,11 @@ export class HostedPetta {
   }
 
   /**
-   * Solve the main goal on the cell engine, which PETTA_ENGINE=cell selects until the cell engine replaces the object
-   * machine's run (a-petta-cell-store.verify, a-petta-cell-store.land): the clauses the object machine consulted are
-   * compiled to cell code as they are called, and its errors, halts and failure end the run as the object machine's do.
+   * Solve the main goal on the cell engine, petta's engine (a-petta-cell-store.land): the clauses the object machine
+   * consulted are compiled to cell code as they are called, the object machine's builtins run through the bridge where
+   * the cell engine has no native one, and its errors, halts and failure end the run as the object machine's did.
    * am[implements a-petta-cell-store.verify]
+   * am[implements a-petta-cell-store.land]
    */
   private solveOnCells(g: Term): boolean {
     const cm = new CellMachine(this.m);
