@@ -1138,7 +1138,10 @@ export function installBuiltins(m: Machine): void {
     if (typeof name !== "string") throw typeError("callable", head);
     const p = m2.db.ensure(name, ar);
     p.dynamic = true;
-    for (const cl of m2.visibleClauses(name, ar)) {
+    // Only the clauses whose index keys can match the head are renamed and unified, as retract/1 scans them: renaming
+    // every visible clause cost roman_test 5 percent of its engine thread (c-retractall-scan-1108).
+    // am[implements a-petta-next-1108.speed.cut.retractall]
+    for (const cl of candidateClauses(m2, head, name, ar)) {
       const mark = m2.trailMark();
       const [hh] = m2.clauseTerms(cl);
       if (m2.unify(head, hh)) m2.db.retractClause(cl);

@@ -731,6 +731,20 @@ describe("cell engine memory", () => {
   });
 });
 
+// am[verifies a-petta-next-1108.speed.cut.retractall]
+describe("cell engine retractall", () => {
+  it("retracts every clause whose head unifies, keyed, keyless and compound first arguments alike, as SWI-Prolog does", () => {
+    gcEvery = null;
+    const { m, cm } = machines();
+    const src = `t10(L) :- retractall(w10(_, _)), assertz(w10(a, 1)), assertz(w10(b, 2)), assertz(w10(_, 3)), assertz(w10(a, 4)),
+      assertz(w10(c, 5)), assertz(w10(f(a), 6)), assertz(w10(f(_), 7)), retractall(w10(a, _)), retractall(w10(f(a), _)),
+      findall(K-V, w10(K, V), L).`;
+    for (const c of readClauses(src)) m.addClause(c, true);
+    // SWI-Prolog 10.1: [b-2,c-5] (ai-tmp/bf-next/ra.pl).
+    expect(onCells(cm, "t10", [mkVar()])).toStrictEqual({ answers: ['["-"("b",2)|["-"("c",5)|[]]]'], threw: false });
+  });
+});
+
 // am[verifies a-petta-errors-fix-1108.stack.hold]
 describe("cell engine bridge", () => {
   it("binds a loading builtin's argument where collections during its file's goals moved it", () => {
