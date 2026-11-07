@@ -85,20 +85,54 @@ export class Bag {
     this.copy(hp, c, true);
   }
 
-  /** One copy of `c0` into a new root slot; false when an untracked copy ran past its budget. */
+  /**
+   * One copy of `c0` into a new root slot; false when an untracked copy ran past its budget. A compound's first argument,
+   * or a list's head, is copied next in place and its other arguments, or its tail, wait on the work stack, so a chain
+   * of compounds copies with no stack traffic and the cells land where a stack of every item put them: the head before
+   * the tail, so the stack holds one item per open list. Time: the term's cells.
+   * am[implements a-petta-next-1108.speed.cut.bag]
+   */
   private copy(hp: Heap, c0: number, tracked: boolean): boolean {
-    const h = hp.h, work = this.work, vars = this.vars, compounds = this.compounds;
+    const h = hp.h, work = this.work, vars = this.vars, compounds = this.compounds, funArity = hp.funArity;
     vars.clear();
     compounds.clear();
     work.length = 0;
     const root = this.alloc(1);
     this.roots.push(root);
-    work.push(root, c0);
-    let budget = UNTRACKED;
-    while (work.length > 0) {
-      const src = hp.deref(work.pop()!), dst = work.pop()!;
-      const tag = src & 7;
-      if (tag === REF || tag === ATV) {
+    let budget = UNTRACKED, dst = root, c = c0;
+    for (;;) {
+      const src = hp.deref(c), tag = src & 7;
+      if (tag === STR || tag === LIS) {
+        if (!tracked && --budget === 0) {
+          work.length = 0;
+          return false;
+        }
+        const seen = tracked ? compounds.get(src) : undefined;
+        if (seen !== undefined) this.cells[dst] = seen;
+        else {
+          const p = src >> 3;
+          if (tag === LIS) {
+            const q = this.alloc(2), cell = (q << 3) | LIS;
+            this.cells[dst] = cell;
+            if (tracked) compounds.set(src, cell);
+            work.push(q + 1, h[p + 1]!);
+            dst = q;
+            c = h[p]!;
+            continue;
+          }
+          const f = h[p]!, n = funArity[f >> 3]!;
+          const q = this.alloc(n + 1), cell = (q << 3) | STR, cells = this.cells;
+          cells[q] = f;
+          cells[dst] = cell;
+          if (tracked) compounds.set(src, cell);
+          if (n > 0) {
+            for (let i = n; i >= 2; i--) work.push(q + i, h[p + i]!);
+            dst = q + 1;
+            c = h[p + 1]!;
+            continue;
+          }
+        }
+      } else if (tag === REF || tag === ATV) {
         let v = vars.get(src);
         if (v === undefined) {
           if (tag === ATV && hp.attributed(src)) {
@@ -114,43 +148,14 @@ export class Bag {
           vars.set(src, v);
         }
         this.cells[dst] = v;
-        continue;
+      } else {
+        // A runtime box's value goes into the bag's own table; atoms, integers and constants copy as they are.
+        this.cells[dst] = tag === BOX && src >= 0 ? ((this.boxes.push(hp.boxed(src)) - 1) << 3) | BOX : src;
       }
-      if (tag === STR || tag === LIS) {
-        if (!tracked && --budget === 0) {
-          work.length = 0;
-          return false;
-        }
-        if (tracked) {
-          const seen = compounds.get(src);
-          if (seen !== undefined) {
-            this.cells[dst] = seen;
-            continue;
-          }
-        }
-        const p = src >> 3;
-        if (tag === LIS) {
-          const q = this.alloc(2);
-          const cell = (q << 3) | LIS;
-          this.cells[dst] = cell;
-          if (tracked) compounds.set(src, cell);
-          // The tail goes on the stack first, so a list's elements copy before it and its spine adds one item at a time.
-          work.push(q + 1, h[p + 1]!, q, h[p]!);
-          continue;
-        }
-        const f = h[p]!, n = hp.funArity[f >> 3]!;
-        const q = this.alloc(n + 1);
-        const cell = (q << 3) | STR;
-        this.cells[q] = f;
-        this.cells[dst] = cell;
-        if (tracked) compounds.set(src, cell);
-        for (let i = n; i >= 1; i--) work.push(q + i, h[p + i]!);
-        continue;
-      }
-      // A runtime box's value goes into the bag's own table; atoms, integers and constants copy as they are.
-      this.cells[dst] = tag === BOX && src >= 0 ? (this.boxes.push(hp.boxed(src)) - 1) << 3 | BOX : src;
+      if (work.length === 0) return true;
+      c = work.pop()!;
+      dst = work.pop()!;
     }
-    return true;
   }
 
   /**
