@@ -257,7 +257,7 @@ function varsOf(hp: Heap, c0: number): number[] {
 
 /** The compound name(args...) built on the heap, the atom name when there are no arguments. */
 function compoundCells(hp: Heap, name: string, args: readonly number[]): number {
-  if (args.length === 0) return hp.atom(name);
+  if (args.length === 0) return hp.runtimeAtom(name);
   const q = hp.alloc(args.length + 1);
   hp.h[q] = hp.functor(name, args.length);
   for (let i = 0; i < args.length; i++) hp.h[q + 1 + i] = args[i]!;
@@ -315,7 +315,7 @@ function atomArg(hp: Heap, c0: number): string {
 
 /** Name(Args...) as terms.ts mkCompound builds it: the name's atom for no arguments, a list cell for '[|]'/2. */
 function mkCompoundCell(hp: Heap, name: string, args: readonly number[]): number {
-  if (args.length === 0) return hp.atom(name);
+  if (args.length === 0) return hp.runtimeAtom(name);
   if (name === "[|]" && args.length === 2) {
     const q = hp.alloc(2);
     hp.h[q] = args[0]!;
@@ -472,7 +472,7 @@ export function installAttrBuiltins(cm: CellMachine): void {
   def("put_attr", 3, () => {
     const d = hp.deref(A[0]!);
     if (!isVarTag(d)) throw new PrologError(new Struct("error", [new Struct("uninstantiation_error", [culprit(hp, d)]), mkVar()]));
-    const m = hp.atom(atomArg(hp, A[1]!));
+    const m = hp.runtimeAtom(atomArg(hp, A[1]!));
     if (!hp.attributed(d)) hp.bind(d >> 3, hp.newAttVar(att(m, A[2]!, hp.NIL)));
     else {
       const link = seek(d, m);
@@ -484,13 +484,13 @@ export function installAttrBuiltins(cm: CellMachine): void {
   def("get_attr", 3, () => {
     const d = hp.deref(A[0]!);
     if (!hp.attributed(d)) return false;
-    seek(d, hp.atom(atomArg(hp, A[1]!)));
+    seek(d, hp.runtimeAtom(atomArg(hp, A[1]!)));
     return at !== 0 && hp.unify(A[2]!, hp.h[at + 2]!);
   });
   def("del_attr", 2, () => {
     const d = hp.deref(A[0]!);
     if (!isVarTag(d)) return true;
-    const m = hp.atom(atomArg(hp, A[1]!));
+    const m = hp.runtimeAtom(atomArg(hp, A[1]!));
     if (hp.attributed(d)) {
       const link = seek(d, m);
       if (at !== 0) hp.bind(link, hp.h[at + 3]!);
@@ -613,7 +613,7 @@ export function installTermBuiltins(cm: CellMachine): void {
 
   def("compare", 3, () => {
     const c = compareCells(hp, A[1]!, A[2]!);
-    return unify(A[0]!, hp.atom(c < 0 ? "<" : c > 0 ? ">" : "="));
+    return unify(A[0]!, hp.runtimeAtom(c < 0 ? "<" : c > 0 ? ">" : "="));
   });
   def("@<", 2, () => cmp() < 0);
   def("@>", 2, () => cmp() > 0);
@@ -654,7 +654,7 @@ export function installTermBuiltins(cm: CellMachine): void {
     }
     if ((d & 7) === STR || (d & 7) === LIS) {
       const [n, f] = compound(hp, d);
-      return unify(A[1]!, hp.atom(f)) && unify(A[2]!, hp.int(n));
+      return unify(A[1]!, hp.runtimeAtom(f)) && unify(A[2]!, hp.int(n));
     }
     return unify(A[1]!, d) && unify(A[2]!, hp.int(0));
   });
@@ -687,7 +687,7 @@ export function installTermBuiltins(cm: CellMachine): void {
     }
     if ((d & 7) === STR || (d & 7) === LIS) {
       const [n, f, p] = compound(hp, d);
-      const items = [hp.atom(f)];
+      const items = [hp.runtimeAtom(f)];
       for (let i = 0; i < n; i++) items.push(hp.h[p + i]!);
       return unify(A[1]!, listCells(hp, items, hp.NIL));
     }
@@ -749,7 +749,7 @@ export function installTermBuiltins(cm: CellMachine): void {
       goal = hp.deref(hp.h[(goal >> 3) + 2]!);
     }
     const free = varsOf(hp, goal).filter((v) => !bound.has(v));
-    return unify(A[1]!, goal) && unify(A[2]!, free.length === 0 ? hp.atom("v") : compoundCells(hp, "v", free));
+    return unify(A[1]!, goal) && unify(A[2]!, free.length === 0 ? hp.runtimeAtom("v") : compoundCells(hp, "v", free));
   });
 
   // yall's Params>>Lambda called with k more arguments (library.ts): a copy of Params and Lambda, sharing the
@@ -865,22 +865,22 @@ export function installTermBuiltins(cm: CellMachine): void {
     }
     if (count === 0) return false;
     if (count > 1) return null;
-    return unify(A[1]!, hp.atom(found!.type)) && unify(A[0]!, hp.int(found!.pri));
+    return unify(A[1]!, hp.runtimeAtom(found!.type)) && unify(A[0]!, hp.int(found!.pri));
   });
   // atom_concat/3 on atoms: both parts given, or a part and the whole.
   detOr("atom_concat", 3, () => {
     const x = hp.deref(A[0]!), y = hp.deref(A[1]!);
-    if (isName(x) && isName(y)) return unify(A[2]!, hp.atom(hp.atomNames[x >> 3]! + hp.atomNames[y >> 3]!));
+    if (isName(x) && isName(y)) return unify(A[2]!, hp.runtimeAtom(hp.atomNames[x >> 3]! + hp.atomNames[y >> 3]!));
     const z = hp.deref(A[2]!);
     if (!isName(z)) return null;
     const whole = hp.atomNames[z >> 3]!;
     if (isName(x) && isVarTag(y)) {
       const pre = hp.atomNames[x >> 3]!;
-      return whole.startsWith(pre) && unify(y, hp.atom(whole.slice(pre.length)));
+      return whole.startsWith(pre) && unify(y, hp.runtimeAtom(whole.slice(pre.length)));
     }
     if (isVarTag(x) && isName(y)) {
       const suf = hp.atomNames[y >> 3]!;
-      return whole.endsWith(suf) && unify(x, hp.atom(whole.slice(0, whole.length - suf.length)));
+      return whole.endsWith(suf) && unify(x, hp.runtimeAtom(whole.slice(0, whole.length - suf.length)));
     }
     return null;
   });

@@ -8,9 +8,9 @@
 // id, a small integer is inline, and a large integer, a bigint, a float or a string sits in a side table: the runtime
 // boxes, or the constants code holds. Assignments are trailed by address and old cell against the newest
 // choicepoint's heap top, as in the WAM, so backtracking resets the heap top and frees everything above it, and a
-// collection frees the cells and runtime boxes no root reaches, sliding the rest down in order. Decoding to and
-// encoding from the object terms (terms.ts) map variables both ways, which is how builtins written for objects run on
-// cells.
+// collection frees the cells and runtime boxes no root reaches, sliding the rest down in order, and the atoms a run
+// made that nothing it scans holds. Decoding to and encoding from the object terms (terms.ts) map variables both
+// ways, which is how builtins written for objects run on cells.
 // am[implements a-petta-cell-store.terms]
 
 import { Cons, Float, NIL, Str, Struct, Var, deref as derefObj, mkVar, type Term } from "../terms";
@@ -57,6 +57,8 @@ let liveBefore: Int32Array | null = null;
 /** The collector's mark bits over the runtime boxes and live boxes before each 32-box word, grown as the table grows. */
 let boxBits = new Uint32Array(0);
 let boxesBefore = new Int32Array(0);
+/** The collector's mark bits over the atom table, grown as the table grows. */
+let atomBits = new Uint32Array(0);
 
 /** The set bits of a 32-bit word (Hacker's Delight 5-2). */
 function popcount(x: number): number {
@@ -70,7 +72,7 @@ function popcount(x: number): number {
  * The heap with its tables. Cell 0 is never used, so no cell's address is 0; ids start at 0 in each table.
  * Fields are read by generated code (h, top, hb, tr), which reloads them after any call that can allocate. A
  * concurrent_and worker runs on a heap array, trail and queue of its own (CellMachine fibers), the machine swapping
- * them in and out; the atom, functor and box tables are shared.
+ * them in and out; the atom, functor and constant tables are shared.
  */
 export class Heap {
   /** The cells of the computation running now: the main run's, or a concurrent_and worker's own. */
@@ -103,7 +105,23 @@ export class Heap {
   private readonly constants: unknown[] = [];
   private readonly constantIds = new Map<string, number>();
   private readonly atomIds = new Map<string, number>();
+  /** Each atom's name by id; a freed runtime atom's id names nothing until a new atom takes it (sweepAtoms). */
   readonly atomNames: string[] = [];
+  /**
+   * Per atom id, 1 when code or the engine's own fields hold the atom outside cells (atom), so no collection frees it;
+   * 0 for an atom a run made (runtimeAtom), which a main-context collection frees once nothing it scans holds it.
+   * am[implements a-petta-cell-store.gc.atoms]
+   */
+  private atomPinned = new Uint8Array(1 << 10);
+  /** Ids of freed runtime atoms, which new atoms take first. */
+  private readonly freeAtomIds: number[] = [];
+  /** The runtime atoms in the table now, which the collector's schedule weighs as it weighs runtime boxes. */
+  runtimeAtoms = 0;
+  /**
+   * Test stress: a freed atom's id is never taken again and its name reads as a poison, so a cell left holding a freed
+   * atom shows in what a run prints instead of reading another atom (CellMachine.collectEvery).
+   */
+  atomStress = false;
   /** Functor ids by name and then arity, so a lookup builds no key string (a-petta-cell-store.tune.functor). */
   private readonly funIds = new Map<string, number[]>();
   readonly funNames: string[] = [];
@@ -121,15 +139,62 @@ export class Heap {
     this.NIL = this.atom("\u0000[]");
   }
 
-  /** The cell of atom `name`. */
+  /**
+   * The cell of atom `name` for code or the engine's own fields to keep outside cells: no collection frees it.
+   * am[implements a-petta-cell-store.gc.atoms]
+   */
   atom(name: string): number {
+    const c = this.runtimeAtom(name), id = c >> 3;
+    if (this.atomPinned[id] === 0) {
+      this.atomPinned[id] = 1;
+      this.runtimeAtoms--;
+    }
+    return c;
+  }
+
+  /**
+   * The cell of atom `name` for a term a run builds in cells: a collection in the main context frees it once no live
+   * cell, trail entry or findall bag holds it, as SWI collects atoms (pl-atom.c), unless `atom` pinned it.
+   * am[implements a-petta-cell-store.gc.atoms]
+   */
+  runtimeAtom(name: string): number {
     let id = this.atomIds.get(name);
     if (id === undefined) {
-      id = this.atomNames.length;
-      this.atomNames.push(name);
+      id = this.freeAtomIds.pop() ?? this.atomNames.length;
+      this.atomNames[id] = name;
       this.atomIds.set(name, id);
+      if (id >= this.atomPinned.length) {
+        const grown = new Uint8Array(2 * id + 2);
+        grown.set(this.atomPinned);
+        this.atomPinned = grown;
+      }
+      this.atomPinned[id] = 0;
+      this.runtimeAtoms++;
     }
     return (id << 3) | ATM;
+  }
+
+  /**
+   * Free each runtime atom whose bit in `marked` is clear: its name leaves the table and its id goes to the free list,
+   * or under atomStress is poisoned and never taken again. Time: the atom table.
+   * am[implements a-petta-cell-store.gc.atoms]
+   */
+  private sweepAtoms(marked: Uint32Array): void {
+    const names = this.atomNames, pinned = this.atomPinned;
+    for (let id = 0; id < names.length; id++) {
+      if (pinned[id] !== 0 || (marked[id >>> 5]! & (1 << (id & 31))) !== 0) continue;
+      const name = names[id];
+      if (name === undefined) continue;
+      this.atomIds.delete(name);
+      this.runtimeAtoms--;
+      if (this.atomStress) {
+        names[id] = `\u0000freed atom ${id}`;
+        pinned[id] = 1;
+      } else {
+        names[id] = undefined as unknown as string;
+        this.freeAtomIds.push(id);
+      }
+    }
   }
 
   /** The functor cell of name/n. */
@@ -309,11 +374,19 @@ export class Heap {
    * then slide down in order, so each choicepoint's saved heap top still divides older cells from newer, and
    * `relocate` rewrites every root through the two functions it is given, one for a cell and one for a heap address.
    * A trail entry whose cell is dead is emptied to cell 0, which no term uses. The runtime boxes live cells hold slide
-   * down the same way and the rest are freed; constants stay. Time: the heap below the top in 32-cell words plus the
-   * live cells, the trail and the runtime boxes. Space: a mark bit per cell and per box, and a count per 32 of each.
+   * down the same way and the rest are freed; constants stay. With `atomRoots`, which marks the cells held off the heap
+   * (the findall bag), the runtime atoms no marked cell holds are freed too (sweepAtoms); without it, as in a
+   * concurrent_and worker whose atoms other heaps may hold, every atom stays. Time: the heap below the top in 32-cell
+   * words plus the live cells, the trail, the runtime boxes and the atom table. Space: a mark bit per cell, per box and
+   * per atom, and a count per 32 cells and per 32 boxes.
    * am[implements a-petta-cell-store.gc.mark] am[implements a-petta-cell-store.gc.compact]
+   * am[implements a-petta-cell-store.gc.atoms]
    */
-  collect(roots: (mark: (c: number) => void) => void, relocate: (cell: (c: number) => number, addr: (a: number) => number) => void): void {
+  collect(
+    roots: (mark: (c: number) => void) => void,
+    relocate: (cell: (c: number) => number, addr: (a: number) => number) => void,
+    atomRoots: ((mark: (c: number) => void) => void) | null = null,
+  ): void {
     const h = this.h, top = this.top, funArity = this.funArity;
     const words = (top >>> 5) + 2;
     const bits = (markBits ??= new Uint32Array((HEAP_CELLS >>> 5) + 2));
@@ -325,6 +398,10 @@ export class Heap {
       boxesBefore = new Int32Array(2 * boxWords + 1);
     } else boxBits.fill(0, 0, boxWords);
     const bbits = boxBits, bcounts = boxesBefore;
+    const atomWords = (this.atomNames.length >>> 5) + 2;
+    if (atomBits.length < atomWords) atomBits = new Uint32Array(2 * atomWords);
+    else atomBits.fill(0, 0, atomWords);
+    const abits = atomBits;
     let fresh = 0;
     const isSet = (a: number): boolean => (bits[a >>> 5]! & (1 << (a & 31))) !== 0;
     const set = (a: number): void => {
@@ -336,7 +413,7 @@ export class Heap {
     const stack: number[] = [];
     // Marks the cells a term reaches: a variable's cell and what it is bound to, an attributed one's list too, a
     // structure's functor and arguments, a list pair's two cells, following a list's tail without the stack, and the
-    // runtime box a BOX cell holds.
+    // runtime box a BOX cell holds and the atom an ATM cell names.
     const mark = (c0: number): void => {
       stack.push(c0);
       while (stack.length > 0) {
@@ -376,6 +453,9 @@ export class Heap {
           if (tag === BOX && x >= 0) {
             const id = x >> 3;
             bbits[id >>> 5]! |= 1 << (id & 31);
+          } else if (tag === ATM) {
+            const id = x >> 3;
+            abits[id >>> 5]! |= 1 << (id & 31);
           }
           break;
         }
@@ -392,6 +472,14 @@ export class Heap {
     for (let before = -1; before !== fresh; ) {
       before = fresh;
       for (let i = 0; i < tr; i++) if (isSet(trail[i]!)) mark(old[i]!);
+    }
+    if (atomRoots !== null) {
+      atomRoots((c) => {
+        if ((c & 7) !== ATM) return;
+        const id = c >> 3;
+        abits[id >>> 5]! |= 1 << (id & 31);
+      });
+      this.sweepAtoms(abits);
     }
     let live = 0;
     for (let w = 0; w < words; w++) {
@@ -565,11 +653,13 @@ export class Heap {
   /**
    * Encode an object term on the heap; `vars` maps each object variable met to its cell, so the same variable is one
    * cell and a later decode gives the variable back. An attributed object variable becomes an attributed cell whose
-   * attribute list is att(Module, Value, More) ending in [], as SWI keeps it. Time: the term's size.
+   * attribute list is att(Module, Value, More) ending in [], as SWI keeps it. Its atoms are runtime atoms, which the
+   * cells it builds hold (c-atom-holders-1107). Time: the term's size.
+   * am[implements a-petta-cell-store.gc.atoms]
    */
   encode(t0: Term, vars: Map<Var, number>): number {
     const t = derefObj(t0);
-    if (typeof t === "string") return this.atom(t);
+    if (typeof t === "string") return this.runtimeAtom(t);
     if (typeof t === "number" || typeof t === "bigint") return this.int(t);
     if (t === NIL) return this.NIL;
     if (t instanceof Var) {
@@ -584,7 +674,7 @@ export class Heap {
           const [mod, val] = entries[i]!;
           const a = this.alloc(4);
           this.h[a] = this.functor("att", 3);
-          this.h[a + 1] = this.atom(mod);
+          this.h[a + 1] = this.runtimeAtom(mod);
           this.h[a + 2] = this.encode(val, vars);
           this.h[a + 3] = list;
           list = (a << 3) | STR;

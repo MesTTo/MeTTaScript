@@ -8,7 +8,8 @@
 // stay where SWI leaves them. Clauses run as code the clause compiler (compile.ts) makes from the database's templates,
 // which the object machine it wraps also reads. The control's shape is the object core's (commit 9934828), cells in
 // place of objects (c-cell-control-design-1106). At a call port the heap is collected once it has grown by what it
-// held, the roots being the registers, the stack's frames and the cells JS frames hold across nested solves.
+// held, the roots being the registers, the stack's frames and the cells JS frames hold across nested solves, and
+// outside concurrent_and's workers the atoms a run made go once no cell or findall bag holds them.
 // am[implements a-petta-cell-store.control]
 
 import { getHeapStatistics } from "node:v8";
@@ -87,9 +88,11 @@ const S_LIMIT = 1 << 24;
  */
 const GC_MIN_GROWTH = 1 << 22;
 /**
- * The heap cells a runtime box weighs in the collector's schedule: hyperpose_primes held about 80 bytes of V8 heap
- * per box made between collections (c-box-weight-1107), so numeric loops whose results are boxed collect though the
- * heap barely grows, and a large live heap still waits for as much growth as it holds.
+ * The heap cells a runtime box or a runtime atom weighs in the collector's schedule: hyperpose_primes held about 80
+ * bytes of V8 heap per box made between collections (c-box-weight-1107), and an atom of a short name costs about as
+ * much in the atom table (c-atom-leak-1107), so loops whose results are boxed or new atoms collect though the heap
+ * barely grows, and a large live heap still waits for as much growth as it holds.
+ * am[implements a-petta-cell-store.gc.atoms]
  */
 const BOX_CELLS = 20;
 /**
@@ -660,14 +663,19 @@ export class CellMachine {
     return this.CODE[this.CALL]!;
   }
 
-  /** The procedure of functor cell `f` (name/n) or of atom cell `a` (name/0), found by its id. */
+  /** The procedure of functor cell `f` (name/n), found by its id. */
   private funProc(f: number): CellProc {
     const id = f >> 3;
     return (this.funProcs[id] ??= this.proc(this.hp.funNames[id]!, this.hp.funArity[id]!));
   }
+  /**
+   * The procedure of atom cell `a`, cached by the atom's id and checked against its name, since a freed runtime atom's
+   * id may come back naming another atom (Heap.sweepAtoms).
+   * am[implements a-petta-cell-store.gc.atoms]
+   */
   private atomProc(a: number): CellProc {
-    const id = a >> 3;
-    return (this.atomProcs[id] ??= this.proc(this.hp.atomNames[id]!, 0));
+    const id = a >> 3, name = this.hp.atomNames[id]!, p = this.atomProcs[id];
+    return p !== undefined && p.name === name ? p : (this.atomProcs[id] = this.proc(name, 0));
   }
 
   /**
@@ -937,6 +945,10 @@ export class CellMachine {
         }
         for (let i = 0; i < this.roots.length; i++) this.roots[i] = cell(this.roots[i]!);
       },
+      // Atoms are freed only where every cell that can hold one is marked: not while a concurrent_and worker's heap,
+      // which this collection does not scan, is alive (c-atom-holders-1107).
+      // am[implements a-petta-cell-store.gc.atoms]
+      this.inFiber || this.fiberGroups > 0 ? null : (mark) => this.bag.markAtoms(mark),
     );
     this.scheduleCollection();
   }
@@ -944,22 +956,34 @@ export class CellMachine {
   /**
    * Collect whenever the heap has grown by `cells` since the last collection, or at every call port when `cells` is
    * 0, instead of by what the last collection kept: tests collect at every call port to reach each root at each point
-   * (gc.test).
+   * (gc.test), and then freed atoms are poisoned and their ids never taken again (Heap.atomStress), so a cell left
+   * holding a freed atom shows in what the run prints.
    * am[implements a-petta-cell-store.gc.trigger]
+   * am[implements a-petta-cell-store.gc.atoms]
    */
   collectEvery(cells: number): void {
     this.gcGrowth = cells;
+    this.hp.atomStress = cells === 0;
     this.scheduleCollection();
   }
 
   /**
-   * Where the next call port collects: once the heap used, its cells and its runtime boxes weighed (BOX_CELLS), has
-   * grown by what it is now, at least GC_MIN_GROWTH cells (FIBER_MIN_GROWTH in a worker), so collecting costs a
-   * constant per cell or box made; or
+   * The heap used as the collector's schedule weighs it: its cells, and its runtime boxes and runtime atoms at
+   * BOX_CELLS each.
+   * am[implements a-petta-cell-store.gc.trigger]
+   */
+  private used(): number {
+    const hp = this.hp;
+    return hp.top + BOX_CELLS * (hp.boxes.length + hp.runtimeAtoms);
+  }
+
+  /**
+   * Where the next call port collects: once the heap used (used) has grown by what it is now, at least GC_MIN_GROWTH
+   * cells (FIBER_MIN_GROWTH in a worker), so collecting costs a constant per cell, box or atom made; or
    * by the fixed growth, a fixed growth of 0 being every call port however far backtracking lowers the heap.
    */
   private scheduleCollection(): void {
-    const used = this.hp.top + BOX_CELLS * this.hp.boxes.length, g = this.gcGrowth;
+    const used = this.used(), g = this.gcGrowth;
     this.gcAt = g === 0 ? 0 : used + (g ?? Math.max(used, this.inFiber ? FIBER_MIN_GROWTH : GC_MIN_GROWTH));
   }
 
@@ -1305,7 +1329,7 @@ export class CellMachine {
   callw(p: CellProc, n: number, cc: number): Code | null {
     // A call port is where the collector runs: compiled code calls in tail position, so only A[0..n), the control
     // stack and the held roots hold cells.
-    if (this.hp.top + BOX_CELLS * this.hp.boxes.length >= this.gcAt) this.collect(n);
+    if (this.used() >= this.gcAt) this.collect(n);
     if (this.majorGc !== null && (++this.v8Tick & V8_CHECK_MASK) === 0) this.boundV8Heap(this.majorGc);
     // The catch context of the call, which a throw from inside it unwinds to (unwind).
     this.R[RCC] = cc;

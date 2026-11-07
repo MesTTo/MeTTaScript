@@ -233,9 +233,13 @@ export function matchTerm(hp: Heap, code: Int32Array, c: number, vals: Int32Arra
   return match(hp, code, 0, c, vals, next) >= 0;
 }
 
-/** The cell of an atomic template: an atom or a constant the clause keeps (Heap.constant). */
+/**
+ * The cell of an atomic template for a term built or matched on the heap: a runtime atom, which the cells it goes into
+ * hold (c-atom-holders-1107), or a constant the clause keeps (Heap.constant).
+ * am[implements a-petta-cell-store.gc.atoms]
+ */
 function atomicCell(hp: Heap, t: Term): number {
-  if (typeof t === "string") return hp.atom(t);
+  if (typeof t === "string") return hp.runtimeAtom(t);
   if (t === NIL) return hp.NIL;
   if (typeof t === "number" || typeof t === "bigint" || t instanceof Float || t instanceof Str) return hp.constant(t);
   throw new Error(`cell head program: no cell for ${String(t)}`);

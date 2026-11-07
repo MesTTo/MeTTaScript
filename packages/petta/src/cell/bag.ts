@@ -5,7 +5,8 @@
 // Purpose: findall/3's bag on the cell engine. Each solution of the template is copied cell to cell into an Int32Array
 // of the bag's own, off the heap that backtracking frees, as SWI's findall keeps its solutions as copied records; at
 // the end the solutions are copied back onto the heap at once as one list. Variables come out fresh, attributed ones
-// with their attributes, a cyclic term stays cyclic, and the boxes a copy holds come back as new runtime boxes.
+// with their attributes, a cyclic term stays cyclic, and the boxes a copy holds come back as new runtime boxes; a
+// collection keeps the atoms the copies hold.
 // am[implements a-petta-cell-store.tune.bag]
 
 import { ATV, BOX, LIS, REF, STR, type Heap } from "./heap";
@@ -46,6 +47,16 @@ export class Bag {
     this.n = m.n;
     this.boxes.length = m.boxes;
     this.roots.length = m.roots;
+  }
+
+  /**
+   * Give `mark` every cell the bag holds now, so a collection keeps the atoms among them (Heap.collect's atom roots);
+   * the bag's pointer cells index the bag, so `mark` must read atoms only. Time: the bag's cells.
+   * am[implements a-petta-cell-store.gc.atoms]
+   */
+  markAtoms(mark: (c: number) => void): void {
+    const cells = this.cells;
+    for (let i = 0; i < this.n; i++) mark(cells[i]!);
   }
 
   private alloc(k: number): number {

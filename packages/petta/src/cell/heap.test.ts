@@ -6,7 +6,7 @@
 // variable renaming with sharing kept; cell unification succeeds exactly when the object machine's does, leaving the
 // same bindings; and undoing the trail returns every cell to what it was; and both engines bind attributed and plain
 // variables the way SWI-Prolog does; and a collection frees exactly the cells no root reaches, keeping what the roots
-// reach, its order and its trail's undo.
+// reach, its order and its trail's undo, and exactly the runtime atoms nothing it scans holds, keeping pinned ones.
 // am[verifies a-petta-cell-store.terms]
 
 import fc from "fast-check";
@@ -267,6 +267,67 @@ describe("cell term store", () => {
         hp.undo(got.mark);
         expect(cellText(hp, roots)).toBe(cellText(want.hp, want.roots));
       }),
+      { numRuns: 400 },
+    );
+  });
+
+  // am[verifies a-petta-cell-store.gc.atoms]
+  it("frees exactly the runtime atoms no root or extra root holds, keeping pinned ones and every name a live cell reads", () => {
+    const pool = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    fc.assert(
+      fc.property(
+        fc.subarray(pool, { minLength: 1 }),
+        fc.subarray(pool),
+        fc.constantFrom(...pool),
+        fc.constantFrom(...pool),
+        fc.boolean(),
+        (live, junk, extra, pinned, stress) => {
+          const hp = new Heap();
+          hp.atomStress = stress;
+          const ids = new Map<string, number>();
+          const intern = (name: string): number => {
+            const c = hp.runtimeAtom(name);
+            ids.set(name, c >> 3);
+            return c;
+          };
+          hp.atom(pinned);
+          ids.set(pinned, hp.atom(pinned) >> 3);
+          // A root over the live names, junk over its own names between, and one name only an extra root holds.
+          const root = (names: readonly string[]): number => {
+            const q = hp.alloc(names.length + 1);
+            hp.h[q] = hp.functor("t", names.length);
+            names.forEach((n, i) => (hp.h[q + 1 + i] = intern(n)));
+            return (q << 3) | STR;
+          };
+          let roots = [root(live)];
+          if (junk.length > 0) root(junk);
+          const extraCell = intern(extra);
+          const before = hp.runtimeAtoms;
+          hp.collect(
+            (mark) => roots.forEach(mark),
+            (cell) => void (roots = roots.map(cell)),
+            (mark) => mark(extraCell),
+          );
+          const kept = new Set([...live, extra, pinned]);
+          const text = (c: number): string => hp.atomNames[c >> 3]!;
+          // Every name the root reads is the name it was built with.
+          const p = roots[0]! >> 3;
+          live.forEach((n, i) => expect(text(hp.h[p + 1 + i]!)).toBe(n));
+          for (const [n, id] of ids) {
+            if (kept.has(n)) expect(hp.atomNames[id], n).toBe(n);
+            else expect(hp.atomNames[id], n).not.toBe(n);
+          }
+          const freed = [...ids.keys()].filter((n) => !kept.has(n)).length;
+          expect(hp.runtimeAtoms).toBe(before - freed);
+          // A new atom takes a freed id, outside stress; under stress no freed id comes back.
+          const fresh = hp.runtimeAtom("fresh") >> 3;
+          const freedIds = [...ids].filter(([n]) => !kept.has(n)).map(([, id]) => id);
+          if (stress || freed === 0) expect(freedIds).not.toContain(fresh);
+          else expect(freedIds).toContain(fresh);
+          expect(hp.runtimeAtom("fresh") >> 3).toBe(fresh);
+          expect(hp.atomNames[fresh]).toBe("fresh");
+        },
+      ),
       { numRuns: 400 },
     );
   });

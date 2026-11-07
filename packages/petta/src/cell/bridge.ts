@@ -167,7 +167,7 @@ function bindBack(cm: CellMachine, back: Map<number, Var>, mark: number): boolea
       const [mod, val] = entries[j]!;
       const q = hp.alloc(4);
       hp.h[q] = hp.functor("att", 3);
-      hp.h[q + 1] = hp.atom(mod);
+      hp.h[q + 1] = hp.runtimeAtom(mod);
       hp.h[q + 2] = hp.encode(val, varsOf());
       hp.h[q + 3] = list;
       list = (q << 3) | STR;

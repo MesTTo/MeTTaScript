@@ -10,7 +10,8 @@
 // (naive reverse, member, a counting loop) check recursion and backtracking through it; database, global variable and
 // attribute programs run on fresh machine pairs, attributes also against SWI-Prolog's measured answers.
 // Every test runs under the collector's own schedule and again collecting at every call port, where a collection
-// meets each root a program holds at that point.
+// meets each root a program holds at that point and a freed atom reads as a poison; a freed atom's id taken by another
+// atom calls the other's procedure.
 // am[verifies a-petta-cell-store.compile.diff]
 
 import fc from "fast-check";
@@ -306,6 +307,9 @@ describe.each([
       fa3(L) :- findall(Y-S, (mem(X, [1, 2]), Y is X * 1.5 + 2 ** 40, atom_string(X, S)), L).
       fa4(L) :- findall(X-Ys, (mem(X, [1, 2]), findall(Y, mem(Y, [X, a]), Ys)), L).
       fa5(L) :- findall(X, (mem(X, [a, b]), catch(findall(Y, (mem(Y, [1, 2, 3]), ( Y > 2 -> throw(oops) ; true )), _), _, true)), L).
+      agt(T) :- atom_concat(old, 1, O), T = f(O).
+      ag1(X) :- agt(T), ( setarg(1, T, new), atom_length(abc, _), fail ; arg(1, T, X) ).
+      ag2(L) :- findall(A, (mem(X, [p, q, r]), atom_concat(X, z, A), atom_length(abc, _)), L).
       mem(X, [X|_]).
       mem(X, [_|T]) :- mem(X, T).
       db10(X) :- assertz(w10(1)), w10(X), retract(w10(X)), \\+ w10(_).
@@ -316,8 +320,10 @@ describe.each([
     // keep float, string and big integer constants of bodies and heads across collections, cold and, run 40 times
     // in bx4, compiled; bx3's live runtime boxes move down past the dead ones bxjunk made. fa2 to fa5 copy findall's
     // solutions through its bag: shared variables, runtime boxes, a nested findall, and an inner findall whose goal
-    // throws once it has solutions, which the outer findall's list must not hold.
-    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7", "gv8", "gv9", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7", "gv10", "gv11", "fn1", "fn2", "wo1", "wo2", "wo3", "ps1", "tr1", "tr2", "as1", "as2", "gc1", "gc2", "gc3", "bx1", "bx2", "bx3", "bx4", "fa2", "fa3", "fa4", "fa5"]) {
+    // throws once it has solutions, which the outer findall's list must not hold. In ag1 only the trail holds the
+    // runtime atom setarg/3 replaced, and in ag2 only the bag holds the atoms of earlier solutions, at collections.
+    // am[verifies a-petta-cell-store.gc.atoms]
+    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7", "gv8", "gv9", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7", "gv10", "gv11", "fn1", "fn2", "wo1", "wo2", "wo3", "ps1", "tr1", "tr2", "as1", "as2", "gc1", "gc2", "gc3", "bx1", "bx2", "bx3", "bx4", "fa2", "fa3", "fa4", "fa5", "ag1", "ag2"]) {
       const a = machines(), b = machines();
       for (const c of readClauses(src)) {
         a.m.addClause(c, true);
@@ -415,14 +421,17 @@ describe.each([
       ca9(S) :- findall(N-C, concurrent_and(mem(N, [15000, 12000]), (length(Ls, N), cnt(Ls, 0, C))), L), msort(L, S).
       ca10(L) :- ca1(A), ca3(B), ca4(C), ca2(D), ca6(E), L = [A, B, C, D, E].
       ca11(L) :- findall(X, concurrent_and(mem(_, [a]), (nb_setval(kx, f(1)), X = set)), _), findall(Y, concurrent_and(mem(_, [b]), catch(b_getval(kx, Y), _, Y = none)), L).
+      ca12(X) :- atom_concat(main, 1, A), findall(Y, concurrent_and(mem(Y, [1, 2]), (atom_concat(w, Y, B), atom_length(B, _))), _), X = A.
     `;
     // ca8 calls after each solution, so a collection meets the group's pair, which only its choicepoint holds; ca9's
     // workers count lists past a slice, each slice ending with a call pending on its own list and counter. ca10 runs
     // groups one after another on one machine, exhausted, cut, thrown out of and exhausted again, so later workers
     // take the heaps earlier ones gave back; in ca11 the second worker takes the first's heap, whose global, set
-    // with nb_setval/2 and so never undone, it must not see.
+    // with nb_setval/2 and so never undone, it must not see. In ca12 the caller's runtime atom lies in the main heap,
+    // which the workers' collections do not scan, so they must not free atoms.
     // am[verifies a-cell-fiber-args-1107] am[verifies a-petta-cell-store.tune.fiberheaps]
-    for (const name of ["ca1", "ca2", "ca3", "ca4", "ca5", "ca6", "ca7", "ca8", "ca9", "ca10", "ca11"]) {
+    // am[verifies a-petta-cell-store.gc.atoms]
+    for (const name of ["ca1", "ca2", "ca3", "ca4", "ca5", "ca6", "ca7", "ca8", "ca9", "ca10", "ca11", "ca12"]) {
       // ca9's 27000 calls would each collect a worker's whole list at every call port; every 4096 cells still collects.
       const every = gcEvery;
       if (name === "ca9" && every === 0) gcEvery = 1 << 12;
@@ -599,5 +608,35 @@ describe.each([
       ),
     ];
     for (const [name, args] of queries) expect(onCells(cm, name, args), name).toStrictEqual(onObjects(m, name, args));
+  });
+});
+
+// am[verifies a-petta-cell-store.gc.atoms]
+describe("cell engine atom collection", () => {
+  it("calls an atom by its name after a collection gave a freed atom's id to another", () => {
+    gcEvery = null;
+    const { m, cm } = machines();
+    for (const c of readClauses("foo1 :- fail.\nbar1.")) m.addClause(c, true);
+    // Every call port collects, and freed ids are taken again, as outside the tests' stress.
+    cm.collectEvery(0);
+    cm.hp.atomStress = false;
+    const call = (c: number): boolean => {
+      let ok = false;
+      cm.A[0] = c;
+      cm.hold([c], () =>
+        cm.solveAll(cm.proc("call", 1), 1, () => {
+          ok = true;
+          return false;
+        }),
+      );
+      return ok;
+    };
+    const foo = cm.hp.runtimeAtom("foo1");
+    expect(call(foo)).toBe(false);
+    // Nothing holds foo1 now, so the collection at this call's port frees it and bar1 takes its id.
+    expect(call(cm.hp.atom("true"))).toBe(true);
+    const bar = cm.hp.runtimeAtom("bar1");
+    expect(bar >> 3).toBe(foo >> 3);
+    expect(call(bar)).toBe(true);
   });
 });
