@@ -21,7 +21,7 @@ import { CellArgs } from "./args";
 import { Bag } from "./bag";
 import { bridgeBuiltin, nextSolution, objectTrailMark, startNondet, takeSolution, type BridgeRun } from "./bridge";
 import { build, headProgram, matchHead, runHead, type HeadProgram } from "./headprog";
-import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, Heap, INT, REF, STR, stackExhausted, type TrailState, type Wakeup } from "./heap";
+import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, Heap, INT, REF, STR, reserved, stackExhausted, type TrailState, type Wakeup } from "./heap";
 
 /** Code the trampoline runs: the code to run next, or null at a run's exit. */
 export type Code = () => Code | null;
@@ -233,7 +233,7 @@ export type ClauseFn = (b0: number, cc: number, pc: number) => Code | null;
 
 export class CellMachine {
   readonly hp = new Heap();
-  readonly S = new Int32Array(S_LIMIT);
+  readonly S = new Int32Array(reserved(S_LIMIT));
   readonly R = new Int32Array(8);
   /** Argument registers A[0..n): a call's argument cells. */
   readonly A = new Int32Array(256);
@@ -246,7 +246,7 @@ export class CellMachine {
    * memory only where choicepoints go: doubling it as the stack grew instead copied and touched the part below
    * hyperpose_primes' workers, 22 MB more at the peak.
    */
-  private readonly TIDIED = new Int32Array(S_LIMIT);
+  private readonly TIDIED = new Int32Array(reserved(S_LIMIT));
   readonly CODE: Code[] = [];
   /** The argument registers as clause selection reads them. */
   private readonly args: CellArgs;
@@ -1102,7 +1102,7 @@ export class CellMachine {
     const main = this.saveCtx();
     const hp = this.hp, S = this.S, R = this.R;
     try {
-      hp.h = this.heapPool.pop() ?? new Int32Array(HEAP_CELLS);
+      hp.h = this.heapPool.pop() ?? new Int32Array(reserved(HEAP_CELLS));
       // A kept array's global slots read as no values, as a fresh one's do.
       hp.h.fill(0, 0, 1 + GLOBAL_SLOTS);
       hp.boxes = [];

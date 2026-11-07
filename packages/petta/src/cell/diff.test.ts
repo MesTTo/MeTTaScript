@@ -11,7 +11,7 @@
 // attribute programs run on fresh machine pairs, attributes also against SWI-Prolog's measured answers.
 // Every test runs under the collector's own schedule and again collecting at every call port, where a collection
 // meets each root a program holds at that point and a freed atom reads as a poison; a freed atom's id taken by another
-// atom calls the other's procedure.
+// atom calls the other's procedure. A machine and its workers' heaps add no external memory to the isolate.
 // am[verifies a-petta-cell-store.compile.diff]
 
 import fc from "fast-check";
@@ -685,6 +685,22 @@ describe("cell engine atom collection", () => {
     const bar = cm.hp.runtimeAtom("bar1");
     expect(bar >> 3).toBe(foo >> 3);
     expect(call(bar)).toBe(true);
+  });
+});
+
+// am[verifies a-petta-next-1108.startup.cut.shared]
+describe("cell engine memory", () => {
+  it("reserves its heaps, stacks and collector bitmaps without counting them as the isolate's external memory", () => {
+    gcEvery = null;
+    const before = process.memoryUsage().external;
+    const { m, cm } = machines();
+    // Worker heaps from concurrent_and's fibers, and the collector's bitmaps from a collection at every call port.
+    for (const c of readClauses("mem(X, [X|_]).\nmem(X, [_|T]) :- mem(X, T).\ncw(L) :- findall(X, concurrent_and(mem(X, [1, 2, 3]), true), L).")) m.addClause(c, true);
+    cm.collectEvery(0);
+    expect(onCells(cm, "cw", [mkVar()])).toStrictEqual({ answers: ["[1|[2|[3|[]]]]"], threw: false });
+    // Each machine reserves gigabytes (three 1 GiB arrays, a 1 GiB heap per worker); V8 counting any of them would
+    // set off its memory-pressure collections (c-cell-external-memory-1108).
+    expect(process.memoryUsage().external - before).toBeLessThan(64 << 20);
   });
 });
 

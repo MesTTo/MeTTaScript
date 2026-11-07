@@ -2,15 +2,16 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Purpose: the cell engine's term store. A term is a 32-bit cell whose low three bits are its tag: a variable refers
-// to its own address while unbound, an attributed variable likewise with its att(Module, Value, More) list in the
-// next cell, a compound or list cell points at its cells on the Int32Array heap, an atom or a functor is an interned
-// id, a small integer is inline, and a large integer, a bigint, a float or a string sits in a side table: the runtime
-// boxes, or the constants code holds. Assignments are trailed by address and old cell against the newest
-// choicepoint's heap top, as in the WAM, so backtracking resets the heap top and frees everything above it, and a
-// collection frees the cells and runtime boxes no root reaches, sliding the rest down in order, and the atoms a run
-// made that nothing it scans holds. Decoding to and encoding from the object terms (terms.ts) map variables both
-// ways, which is how builtins written for objects run on cells.
+// Purpose: the cell engine's term store. A term is a 32-bit cell whose low three bits are its tag: a variable refers to
+// its own address while unbound, an attributed variable likewise with its att(Module, Value, More) list in the next
+// cell, a compound or list cell points at its cells on the Int32Array heap, reserved whole in shared memory V8 does not
+// count against the isolate (reserved), an atom or a functor is an interned id, a small integer is inline, and a large
+// integer, a bigint, a float or a string sits in a side table: the runtime boxes, or the constants code holds.
+// Assignments are trailed by address and old cell against the newest choicepoint's heap top, as in the WAM, so
+// backtracking resets the heap top and frees everything above it, and a collection frees the cells and runtime boxes no
+// root reaches, sliding the rest down in order, and the atoms a run made that nothing it scans holds. Decoding to and
+// encoding from the object terms (terms.ts) map variables both ways, which is how builtins written for objects run on
+// cells.
 // am[implements a-petta-cell-store.terms]
 
 import { Cons, Float, NIL, PrologError, Str, Struct, Var, deref as derefObj, mkVar, type Term } from "../terms";
@@ -32,6 +33,16 @@ export const INT_MAX = (1 << 28) - 1;
 
 /** Heap cells. Linux commits pages as they are touched, so the size is address space until the heap grows into it. */
 export const HEAP_CELLS = 1 << 28;
+/**
+ * Memory for `cells` 32-bit cells, as a SharedArrayBuffer: its pages are committed only where written, as a plain
+ * buffer's are, but V8 does not count shared memory as the isolate's external memory, so the gigabyte arrays the cell
+ * engine reserves set off no memory-pressure collections, five at every start in a worker (c-cell-external-memory-1108,
+ * c-sab-unaccounted-1108); its fixed-length views run as fast as plain ones, where views of a resizable buffer that
+ * could grow on demand ran 24 to 36 percent more instructions (c-rab-views-slow-1108).
+ * am[implements a-petta-next-1108.startup.cut.shared]
+ * am[rests-on c-sab-unaccounted-1108]
+ */
+export const reserved = (cells: number): SharedArrayBuffer => new SharedArrayBuffer(4 * cells);
 /** Global variable slots reserved at the heap's bottom (b_setval/2): PeTTa names a few dozen globals. */
 export const GLOBAL_SLOTS = 4096;
 /** Trail entries at first; the trail doubles when full, up to TRAIL_MAX (a-petta-cell-store.control.bounds). */
@@ -85,7 +96,7 @@ function popcount(x: number): number {
  */
 export class Heap {
   /** The cells of the computation running now: the main run's, or a concurrent_and worker's own. */
-  h: Int32Array = new Int32Array(HEAP_CELLS);
+  h: Int32Array = new Int32Array(reserved(HEAP_CELLS));
   /** H: the first free cell. */
   /** Cells 1 to GLOBAL_SLOTS hold b_setval/2's values, below every choicepoint's heap top so always trailed. */
   top = 1 + GLOBAL_SLOTS;
@@ -398,8 +409,8 @@ export class Heap {
   ): void {
     const h = this.h, top = this.top, funArity = this.funArity;
     const words = (top >>> 5) + 2;
-    const bits = (markBits ??= new Uint32Array((HEAP_CELLS >>> 5) + 2));
-    const counts = (liveBefore ??= new Int32Array((HEAP_CELLS >>> 5) + 3));
+    const bits = (markBits ??= new Uint32Array(reserved((HEAP_CELLS >>> 5) + 2)));
+    const counts = (liveBefore ??= new Int32Array(reserved((HEAP_CELLS >>> 5) + 3)));
     bits.fill(0, 0, words);
     const boxes = this.boxes, nb = boxes.length, boxWords = (nb >>> 5) + 2;
     if (boxBits.length < boxWords) {
