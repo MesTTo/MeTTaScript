@@ -38,13 +38,13 @@ function rank(hp: Heap, c: number): number {
     case ATM:
       return 3;
     case BOX:
-      return hp.boxes[c >> 3] instanceof Str ? 4 : 1;
+      return hp.boxed(c) instanceof Str ? 4 : 1;
   }
   return 5;
 }
 
 /** A number cell's value. */
-const numOf = (hp: Heap, c: number): Num => ((c & 7) === INT ? c >> 3 : (hp.boxes[c >> 3] as Num));
+const numOf = (hp: Heap, c: number): Num => ((c & 7) === INT ? c >> 3 : (hp.boxed(c) as Num));
 
 /** An atom cell's text as the standard order reads it: [] as "[]" (builtins.ts compareTerms). */
 const atomText = (hp: Heap, c: number): string => (c === hp.NIL ? "[]" : hp.atomNames[c >> 3]!);
@@ -79,7 +79,7 @@ export function compareCells(hp: Heap, a0: number, b0: number): number {
         c = fx === fy ? 0 : fx ? -1 : 1;
       }
     } else if (ra === 3) c = cmpStr(atomText(hp, a), atomText(hp, b));
-    else if (ra === 4) c = cmpStr((hp.boxes[a >> 3] as Str).s, (hp.boxes[b >> 3] as Str).s);
+    else if (ra === 4) c = cmpStr((hp.boxed(a) as Str).s, (hp.boxed(b) as Str).s);
     else {
       const [na, fa, pa] = compound(hp, a), [nb, fb, pb] = compound(hp, b);
       if (na !== nb) return na - nb;
@@ -114,7 +114,7 @@ export function variantCells(hp: Heap, a0: number, b0: number): boolean {
       const [na, fa, pa] = compound(hp, x), [nb, fb, pb] = compound(hp, y);
       if (na !== nb || fa !== fb) return false;
       for (let i = na - 1; i >= 0; i--) st.push(hp.h[pa + i]!, hp.h[pb + i]!);
-    } else if (x !== y && (tx !== BOX || !boxEq(hp.boxes[x >> 3], hp.boxes[y >> 3]))) return false;
+    } else if (x !== y && (tx !== BOX || !boxEq(hp.boxed(x), hp.boxed(y)))) return false;
   }
   return true;
 }
@@ -248,7 +248,7 @@ function intArg(hp: Heap, c0: number): number {
   const c = hp.deref(c0);
   if (isVarTag(c)) throw instantiationError();
   if ((c & 7) === INT) return c >> 3;
-  if ((c & 7) === BOX && typeof hp.boxes[c >> 3] === "number") return hp.boxes[c >> 3] as number;
+  if ((c & 7) === BOX && typeof hp.boxed(c) === "number") return hp.boxed(c) as number;
   throw typeError("integer", culprit(hp, c));
 }
 
@@ -469,35 +469,46 @@ export function installAttrBuiltins(cm: CellMachine): void {
 export function installSolvingBuiltins(cm: CellMachine): void {
   const hp = cm.hp, A = cm.A;
   const go = (m: CellMachine, cc: number): ReturnType<CellMachine["proceed"]> => (hp.wakeups.length !== 0 ? m.wake(cc) : m.proceed());
+  // Each keeps the cells it reads after a nested solve in m.hold, since a collection inside the solve moves them.
   cm.proc("findnsols", 4).ctl = (m, _n, cc) => {
-    const limit = intArg(hp, A[0]!), t = A[1]!, g = A[2]!, l = A[3]!;
+    const limit = intArg(hp, A[0]!), g = A[2]!;
     const found: Term[] = [];
-    if (limit > 0) m.solveEach(g, () => (found.push(hp.decode(t, new Map())), found.length < limit));
+    const l = m.hold([A[1]!, A[3]!], (at) => {
+      if (limit > 0) m.solveEach(g, () => (found.push(hp.decode(at(0), new Map())), found.length < limit));
+      return at(1);
+    });
     return hp.unify(l, hp.encode(mkList(found), new Map())) ? go(m, cc) : m.fail();
   };
   cm.proc("with_output_to", 2).ctl = (m, _n, cc) => {
-    const sink = A[0]!, g = A[1]!;
-    const [ok, text] = captureOutput(cm.om, () => m.solveCell(g));
+    const g = A[1]!;
+    const [[ok, sink], text] = captureOutput(cm.om, () => m.hold([A[0]!], (at) => [m.solveCell(g), at(0)] as const));
     return ok && onObjects(m, [sink], (om, [s]) => sinkText(om, s!, text)) ? go(m, cc) : m.fail();
   };
   const F_CALL4 = hp.functor("call", 4), LT = hp.atom("<"), GT = hp.atom(">");
   cm.proc("predsort", 3).ctl = (m, _n, cc) => {
-    const p = A[0]!, items = properListArg(hp, A[1]!), s = A[2]!;
-    const order = (a: number, b: number): number => {
-      const o = freshVar(hp), q = hp.alloc(5);
-      hp.h[q] = F_CALL4;
-      hp.h[q + 1] = p;
-      hp.h[q + 2] = o;
-      hp.h[q + 3] = a;
-      hp.h[q + 4] = b;
-      if (!m.solveCell((q << 3) | STR)) throw new PrologError("predsort_failed");
-      const r = hp.deref(o);
-      return r === LT ? -1 : r === GT ? 1 : 0;
-    };
-    // predsort drops elements its order calls equal.
-    const out: number[] = [];
-    for (const t of mergeSort(items, order)) if (out.length === 0 || order(out[out.length - 1]!, t) !== 0) out.push(t);
-    return hp.unify(s, listCells(hp, out, hp.NIL)) ? go(m, cc) : m.fail();
+    // The order, the result and the items are held while the order's calls run, items going by index, and each
+    // call's order variable while that call runs.
+    const items = properListArg(hp, A[1]!);
+    const [list, s] = m.hold([A[0]!, A[2]!, ...items], (at) => {
+      const order = (i: number, j: number): number => {
+        const o = freshVar(hp), q = hp.alloc(5);
+        hp.h[q] = F_CALL4;
+        hp.h[q + 1] = at(0);
+        hp.h[q + 2] = o;
+        hp.h[q + 3] = at(2 + i);
+        hp.h[q + 4] = at(2 + j);
+        const r = m.hold([o], (on) => {
+          if (!m.solveCell((q << 3) | STR)) throw new PrologError("predsort_failed");
+          return hp.deref(on(0));
+        });
+        return r === LT ? -1 : r === GT ? 1 : 0;
+      };
+      // predsort drops elements its order calls equal.
+      const out: number[] = [];
+      for (const i of mergeSort(items.map((_, i) => i), order)) if (out.length === 0 || order(out[out.length - 1]!, i) !== 0) out.push(i);
+      return [out.map((i) => at(2 + i)), at(1)] as const;
+    });
+    return hp.unify(s, listCells(hp, list, hp.NIL)) ? go(m, cc) : m.fail();
   };
   // transaction/1: once(Goal); a failure or an exception rolls back the clause changes Goal made.
   cm.proc("transaction", 1).ctl = (m, _n, cc) => {
@@ -515,8 +526,8 @@ export function installSolvingBuiltins(cm: CellMachine): void {
     return ok ? go(m, cc) : m.fail();
   };
   cm.proc("assertion", 1).ctl = (m, _n, cc) => {
-    const g = A[0]!;
-    if (m.solveCell(g)) return go(m, cc);
+    const [ok, g] = m.hold([A[0]!], (at) => [m.solveCell(at(0)), at(0)] as const);
+    if (ok) return go(m, cc);
     throw new PrologError(new Struct("assertion_failed", [copyTerm(hp.decode(g, new Map()))]));
   };
 }
@@ -598,7 +609,7 @@ export function installTermBuiltins(cm: CellMachine): void {
     const d = hp.deref(A[1]!);
     if ((d & 7) !== STR && (d & 7) !== LIS) throw typeError("compound", culprit(hp, d));
     const nd = hp.deref(A[0]!);
-    const isNum = (nd & 7) === INT || ((nd & 7) === BOX && typeof hp.boxes[nd >> 3] === "number");
+    const isNum = (nd & 7) === INT || ((nd & 7) === BOX && typeof hp.boxed(nd) === "number");
     if (isNum) {
       const k = numOf(hp, nd) as number;
       const [n, , p] = compound(hp, d);
@@ -645,7 +656,7 @@ export function installTermBuiltins(cm: CellMachine): void {
     if (t === hp.NIL) return unify(A[1]!, hp.int(count));
     if (!isVarTag(t)) throw typeError("list", culprit(hp, A[0]!));
     const nd = hp.deref(A[1]!);
-    if ((nd & 7) === INT || ((nd & 7) === BOX && typeof hp.boxes[nd >> 3] === "number")) {
+    if ((nd & 7) === INT || ((nd & 7) === BOX && typeof hp.boxed(nd) === "number")) {
       const k = numOf(hp, nd) as number;
       if (k < count) return false;
       const extra: number[] = [];

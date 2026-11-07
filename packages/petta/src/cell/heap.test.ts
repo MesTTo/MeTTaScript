@@ -5,14 +5,15 @@
 // Purpose: property tests of the cell term store (heap.ts): encode then decode gives the object term back up to
 // variable renaming with sharing kept; cell unification succeeds exactly when the object machine's does, leaving the
 // same bindings; and undoing the trail returns every cell to what it was; and both engines bind attributed and plain
-// variables the way SWI-Prolog does.
+// variables the way SWI-Prolog does; and a collection frees exactly the cells no root reaches, keeping what the roots
+// reach, its order and its trail's undo.
 // am[verifies a-petta-cell-store.terms]
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { Machine } from "../machine";
 import { Cons, Float, NIL, Str, Struct, Var, deref, mkVar, type Term } from "../terms";
-import { Heap } from "./heap";
+import { ATV, BOX, Heap, LIS, REF, STR } from "./heap";
 
 /** A canonical text of a term with its variables numbered in first-occurrence order, so variants print equal. */
 function canon(t0: Term): string {
@@ -67,6 +68,44 @@ function pool(): Var[] {
   vs[2]!.attrs = new Map([["m", "x"]]);
   vs[3]!.attrs = new Map([["m", new Struct("p", [vs[0]!])]]);
   return vs;
+}
+
+/**
+ * What roots `roots` reach on `hp`, printed with variables numbered by first occurrence, so heap addresses play no
+ * part, an attributed variable's list shown where it first occurs and a box by its value, so box numbers play none,
+ * cut short by depth and nodes as canon is.
+ */
+function cellText(hp: Heap, roots: readonly number[]): string {
+  const names = new Map<number, number>();
+  let budget = 4000;
+  const one = (c0: number, depth: number): string => {
+    if (depth > 40 || --budget < 0) return "…";
+    const c = hp.deref(c0), a = c >> 3;
+    switch (c & 7) {
+      case REF:
+      case ATV: {
+        let n = names.get(a);
+        const first = n === undefined;
+        if (n === undefined) names.set(a, (n = names.size));
+        return (c & 7) === ATV && first ? `_${n}{${one(hp.h[a + 1]!, depth + 1)}}` : `_${n}`;
+      }
+      case STR: {
+        const f = hp.h[a]! >> 3, args: string[] = [];
+        for (let i = 1; i <= hp.funArity[f]!; i++) args.push(one(hp.h[a + i]!, depth + 1));
+        return `${hp.funNames[f]}(${args.join(",")})`;
+      }
+      case LIS:
+        return `[${one(hp.h[a]!, depth + 1)}|${one(hp.h[a + 1]!, depth + 1)}]`;
+      case BOX: {
+        const v = hp.boxed(c);
+        if (v instanceof Float) return `f${Object.is(v.v, -0) ? "-0" : String(v.v)}`;
+        return v instanceof Str ? `s${JSON.stringify(v.s)}` : `n${String(v)}`;
+      }
+    }
+    // Atoms and small integers are the same cells on heaps built alike.
+    return `k${c}`;
+  };
+  return roots.map((r) => one(r, 0)).join(" ");
 }
 
 describe("cell term store", () => {
@@ -170,5 +209,65 @@ describe("cell term store", () => {
         expect(hp.wakeups.length).toBe(1);
       }
     }
+  });
+
+  // am[verifies a-petta-cell-store.gc.mark] am[verifies a-petta-cell-store.gc.compact]
+  it("collects exactly the cells no root reaches, keeping what the roots reach, its order and the trail's undo", () => {
+    fc.assert(
+      fc.property(fc.constant(null).chain(() => {
+        const vs = pool();
+        return fc.tuple(fc.constant(vs), terms(vs), terms(vs), terms(vs), fc.tuple(terms(vs), terms(vs), terms(vs)), fc.boolean());
+      }), ([vs, a, b, c, junk, withC]) => {
+        // Two heaps built alike, the first never collected. Junk no root reaches, its boxes included, lies between the
+        // rooted terms, two pieces below a choicepoint and one above it; a unification across it trails bindings of
+        // older cells.
+        const build = () => {
+          const hp = new Heap();
+          const vars = new Map<Var, number>();
+          const roots = vs.map((v) => hp.encode(v, vars));
+          let junkBoxes = 0;
+          const waste = (t: Term): number => {
+            const t0 = hp.top, b0 = hp.boxes.length;
+            hp.encode(new Struct("w", [t]), vars);
+            junkBoxes += hp.boxes.length - b0;
+            return hp.top - t0;
+          };
+          let below = waste(junk[0]);
+          roots.push(hp.encode(a, vars));
+          below += waste(junk[1]);
+          roots.push(hp.encode(b, vars));
+          // nb values would be frozen here; a choicepoint after them binds older cells trailed.
+          hp.freeze();
+          const mark = hp.tr;
+          hp.hb = hp.top;
+          roots.push(hp.encode(c, vars));
+          const above = waste(junk[2]);
+          hp.unify(roots[4]!, withC ? roots[6]! : roots[5]!);
+          return { hp, roots, mark, below, junk: below + above, junkBoxes };
+        };
+        const want = build(), got = build();
+        const hp = got.hp, top = hp.top, hb = hp.hb, frozen = hp.frozen, boxes = hp.boxes.length;
+        let roots = got.roots;
+        const collect = (): void => hp.collect((mark) => roots.forEach(mark), (cell) => void (roots = roots.map(cell)));
+        collect();
+        expect(cellText(hp, roots)).toBe(cellText(want.hp, want.roots));
+        expect(hp.top).toBe(top - got.junk);
+        expect(hp.hb).toBe(hb - got.below);
+        expect(hp.frozen).toBe(frozen - got.below);
+        expect(hp.boxes.length).toBe(boxes - got.junkBoxes);
+        // The pool's variables keep their order, which is their age.
+        for (let i = 1; i < vs.length; i++) expect(roots[i]! >> 3).toBeGreaterThan(roots[i - 1]! >> 3);
+        // A second collection finds nothing to free and moves nothing.
+        const once = [...roots];
+        collect();
+        expect(roots).toStrictEqual(once);
+        expect(hp.top).toBe(top - got.junk);
+        // Undoing to the choicepoint after collecting leaves what undoing does without.
+        want.hp.undo(want.mark);
+        hp.undo(got.mark);
+        expect(cellText(hp, roots)).toBe(cellText(want.hp, want.roots));
+      }),
+      { numRuns: 400 },
+    );
   });
 });

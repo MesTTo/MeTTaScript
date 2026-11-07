@@ -7,13 +7,14 @@
 // over the argument registers (CellArgs) and tries them in the candidate loop with SWI's lookahead, so choicepoints
 // stay where SWI leaves them. Clauses run as code the clause compiler (compile.ts) makes from the database's templates,
 // which the object machine it wraps also reads. The control's shape is the object core's (commit 9934828), cells in
-// place of objects (c-cell-control-design-1106).
+// place of objects (c-cell-control-design-1106). At a call port the heap is collected once it has grown by what it
+// held, the roots being the registers, the stack's frames and the cells JS frames hold across nested solves.
 // am[implements a-petta-cell-store.control]
 
 import { argHashIndex, clauseArgHash, type Clause, type Pred } from "../db";
 import { copyTerm, variantKeyOf, type Builtin, type Machine } from "../machine";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "../swi-index";
-import { Halt, NIL, PrologError, Struct, existenceError, instantiationError, mkList, typeError, type Term } from "../terms";
+import { Halt, NIL, PrologError, Struct, existenceError, instantiationError, mkList, typeError, type Term, type Var } from "../terms";
 import { CellArgs } from "./args";
 import { bridgeBuiltin, nextSolution, objectTrailMark, startNondet, takeSolution, type BridgeRun } from "./bridge";
 import { build, headProgram, runHead, type HeadProgram } from "./headprog";
@@ -78,6 +79,17 @@ const COMPILE_AFTER = 32;
  * am[implements a-petta-cell-store.control.bounds]
  */
 const S_LIMIT = 1 << 24;
+/**
+ * Heap cells a run may grow by between collections however little the last one kept: 16 MB, so short runs never
+ * collect (a-petta-cell-store.gc.trigger).
+ */
+const GC_MIN_GROWTH = 1 << 22;
+/**
+ * The heap cells a runtime box weighs in the collector's schedule: hyperpose_primes held about 80 bytes of V8 heap
+ * per box made between collections (c-box-weight-1107), so numeric loops whose results are boxed collect though the
+ * heap barely grows, and a large live heap still waits for as much growth as it holds.
+ */
+const BOX_CELLS = 20;
 /** Control stack cells each concurrent_and worker gets in its choicepoint's area. */
 const FIBER_S = 1 << 18;
 /** Trampoline bounces a worker runs before the next takes its turn, as the object machine's workers run SLICE goals. */
@@ -87,6 +99,7 @@ const SLICE = 2000;
 interface Ctx {
   readonly R: Int32Array;
   readonly h: Int32Array;
+  readonly boxes: unknown[];
   readonly top: number;
   readonly hb: number;
   readonly frozen: number;
@@ -99,14 +112,18 @@ interface Ctx {
   readonly result: boolean;
   readonly sLimit: number;
   readonly inFiber: boolean;
+  readonly roots: number[];
+  readonly gcAt: number;
 }
 
-/** A concurrent_and worker: its state while another runs, the code it goes on with, its pair and its barrier. */
+/**
+ * A concurrent_and worker: its state while another runs, the code it goes on with and its barrier; its pair, on its
+ * own heap, is its context's first root, so its collections move it (gc).
+ */
 interface Fiber {
   ctx: Ctx;
   next: Code | null;
   solved: boolean;
-  readonly pair: number;
   readonly bar: number;
 }
 
@@ -114,7 +131,7 @@ interface Fiber {
 interface FiberGroup {
   readonly workers: Fiber[];
   i: number;
-  readonly pair: number;
+  pair: number;
 }
 /** The goals the meta-call interpreter runs itself (goal) when call/N builds one. */
 const CONTROL = new Set([",/2", ";/2", "->/2", "*->/2", "\\+/1", "call/1", "once/1", "ignore/1", "forall/2"]);
@@ -250,6 +267,14 @@ export class CellMachine {
   private sLimit = S_LIMIT;
   /** Whether a concurrent_and worker is running, which starts with no global variables (installGlobalBuiltins). */
   inFiber = false;
+  /**
+   * Cells a JS frame holds across a nested solve, which the collector marks and moves in place (hold).
+   */
+  roots: number[] = [];
+  /** The heap used, its cells and its runtime boxes weighed (BOX_CELLS), from which a call port collects. */
+  private gcAt = 1 + GLOBAL_SLOTS + GC_MIN_GROWTH;
+  /** Cells the heap grows by between collections when fixed (collectEvery); null grows it by what the last kept. */
+  private gcGrowth: number | null = null;
 
   constructor(readonly om: Machine) {
     if (om.db.cellMachine !== null) throw new Error("cell machine: a database has one cell machine, the clauses' code being bound to it");
@@ -358,7 +383,7 @@ export class CellMachine {
     };
     this.proc("halt", 1).ctl = (cm) => {
       const s = cm.hp.deref(cm.A[0]!);
-      const v = (s & 7) === INT ? s >> 3 : (s & 7) === BOX ? cm.hp.boxes[s >> 3] : null;
+      const v = (s & 7) === INT ? s >> 3 : (s & 7) === BOX ? cm.hp.boxed(s) : null;
       throw new Halt(typeof v === "number" ? v : 0);
     };
     // catch/3's goal exited: a deterministic exit drops the catch choicepoint, as SWI drops its frame.
@@ -752,10 +777,12 @@ export class CellMachine {
    * decoded copy of T kept at each solution outside the heap backtracking frees, L unified with their list encoded.
    */
   findall(): Code | null {
-    const hp = this.hp, A = this.A;
-    const t = A[0]!, g = A[1]!, l = A[2]!;
+    const hp = this.hp, A = this.A, g = A[1]!;
     const found: Term[] = [];
-    this.solveAllFrom(() => this.goal(g, this.R[RB]!, this.R[RCC]!), () => void found.push(hp.decode(t, new Map())));
+    const l = this.hold([A[0]!, A[2]!], (at) => {
+      this.solveAllFrom(() => this.goal(g, this.R[RB]!, this.R[RCC]!), () => void found.push(hp.decode(at(0), new Map())));
+      return at(1);
+    });
     if (!hp.unify(l, hp.encode(mkList(found), new Map()))) return this.fail();
     return hp.wakeups.length !== 0 ? this.wake(this.R[RCC]!) : this.proceed();
   }
@@ -775,9 +802,11 @@ export class CellMachine {
     hp.h[q] = hp.functor("-", 2);
     hp.h[q + 1] = A[0]!;
     hp.h[q + 2] = A[1]!;
-    const pair = (q << 3) | STR;
     const pairs: Term[] = [];
-    this.solveEach(A[0]!, () => void pairs.push(copyTerm(hp.decode(pair, new Map()))));
+    const pair = this.hold([(q << 3) | STR], (at) => {
+      this.solveEach(A[0]!, () => void pairs.push(copyTerm(hp.decode(at(0), new Map()))));
+      return at(0);
+    });
     if (pairs.length === 0) return this.fail();
     const b = this.pushCP(K_FIBERS, this.R[RB]!, cc, 0);
     const area = pairs.length * FIBER_S;
@@ -788,12 +817,112 @@ export class CellMachine {
     return this.fail();
   }
 
+  /**
+   * Collect the heap at a call port with A[0..n) holding the call (Heap.collect): the roots are A[0..n), the slots of
+   * every environment on the chains from E and from each choicepoint, each choicepoint's saved arguments (a
+   * concurrent_and choicepoint's caller pair instead of its area), the cells of the variables a bridged generator
+   * decoded, and the cells held across nested solves (hold); each moves with the heap and the runtime boxes, as does
+   * every choicepoint's saved heap top. scheduleCollection then sets where the next one comes. Time: Heap.collect's
+   * plus the frames on the stack.
+   * am[implements a-petta-cell-store.gc.trigger] am[implements a-petta-cell-store.gc.roots]
+   */
+  private collect(n: number): void {
+    const S = this.S, A = this.A, R = this.R, SO = this.SO, hp = this.hp;
+    const envs: number[] = [], cps: number[] = [];
+    const seen = new Set<number>();
+    const chain = (e0: number): void => {
+      for (let e = e0; !seen.has(e); e = S[e]!) {
+        seen.add(e);
+        envs.push(e);
+        if (S[e] === e) break;
+      }
+    };
+    chain(R[RE]!);
+    for (let b = R[RB]!; ; b = S[b]!) {
+      cps.push(b);
+      chain(S[b + 3]!);
+      if (S[b] === b) break;
+    }
+    hp.collect(
+      (mark) => {
+        for (let i = 0; i < n; i++) mark(A[i]!);
+        for (const e of envs) for (let i = e + ENV, end = i + S[e + 3]!; i < end; i++) mark(S[i]!);
+        for (const b of cps) {
+          const kind = S[b + 1]!;
+          if (kind === K_FIBERS) mark((SO[b] as FiberGroup).pair);
+          else for (let i = b + CPH, end = i + S[b + 10]!; i < end; i++) mark(S[i]!);
+          // A decoded variable's cell must stay, bound or not, for the generator's solutions to bind it; its key is
+          // its own cell, so an attributed one keeps its attribute list.
+          if (kind === K_BRIDGE) for (const c of (SO[b] as BridgeRun).back.keys()) mark(c);
+        }
+        for (const c of this.roots) mark(c);
+      },
+      (cell, addr) => {
+        for (let i = 0; i < n; i++) A[i] = cell(A[i]!);
+        for (const e of envs) for (let i = e + ENV, end = i + S[e + 3]!; i < end; i++) S[i] = cell(S[i]!);
+        for (const b of cps) {
+          const kind = S[b + 1]!;
+          S[b + 9] = addr(S[b + 9]!);
+          if (kind === K_FIBERS) {
+            const g = SO[b] as FiberGroup;
+            g.pair = cell(g.pair);
+          } else for (let i = b + CPH, end = i + S[b + 10]!; i < end; i++) S[i] = cell(S[i]!);
+          if (kind === K_BRIDGE) {
+            const run = SO[b] as BridgeRun;
+            const moved = new Map<number, Var>();
+            for (const [c, v] of run.back) moved.set(cell(c), v);
+            run.back = moved;
+          }
+        }
+        for (let i = 0; i < this.roots.length; i++) this.roots[i] = cell(this.roots[i]!);
+      },
+    );
+    this.scheduleCollection();
+  }
+
+  /**
+   * Collect whenever the heap has grown by `cells` since the last collection, or at every call port when `cells` is
+   * 0, instead of by what the last collection kept: tests collect at every call port to reach each root at each point
+   * (gc.test).
+   * am[implements a-petta-cell-store.gc.trigger]
+   */
+  collectEvery(cells: number): void {
+    this.gcGrowth = cells;
+    this.scheduleCollection();
+  }
+
+  /**
+   * Where the next call port collects: once the heap used, its cells and its runtime boxes weighed (BOX_CELLS), has
+   * grown by what it is now, at least GC_MIN_GROWTH cells, so collecting costs a constant per cell or box made; or
+   * by the fixed growth, a fixed growth of 0 being every call port however far backtracking lowers the heap.
+   */
+  private scheduleCollection(): void {
+    const used = this.hp.top + BOX_CELLS * this.hp.boxes.length, g = this.gcGrowth;
+    this.gcAt = g === 0 ? 0 : used + (g ?? Math.max(used, GC_MIN_GROWTH));
+  }
+
+  /**
+   * Run `body` with `cells` held as collector roots, `at(i)` giving cell i where the last collection put it: a JS frame
+   * keeping cells across a nested solve reads them back through `at`, since a collection inside the solve moves them.
+   * am[implements a-petta-cell-store.gc.roots]
+   */
+  hold<T>(cells: readonly number[], body: (at: (i: number) => number) => T): T {
+    const roots = this.roots, k = roots.length;
+    for (const c of cells) roots.push(c);
+    try {
+      return body((i) => roots[k + i]!);
+    } finally {
+      roots.length = k;
+    }
+  }
+
   /** The running computation's state, to put back with loadCtx. */
   private saveCtx(): Ctx {
     const hp = this.hp;
     return {
       R: this.R.slice(),
       h: hp.h,
+      boxes: hp.boxes,
       top: hp.top,
       hb: hp.hb,
       frozen: hp.frozen,
@@ -806,6 +935,8 @@ export class CellMachine {
       result: this.result,
       sLimit: this.sLimit,
       inFiber: this.inFiber,
+      roots: this.roots,
+      gcAt: this.gcAt,
     };
   }
 
@@ -814,6 +945,7 @@ export class CellMachine {
     const hp = this.hp;
     this.R.set(c.R);
     hp.h = c.h;
+    hp.boxes = c.boxes;
     hp.top = c.top;
     hp.hb = c.hb;
     hp.frozen = c.frozen;
@@ -826,6 +958,8 @@ export class CellMachine {
     this.result = c.result;
     this.sLimit = c.sLimit;
     this.inFiber = c.inFiber;
+    this.roots = c.roots;
+    this.gcAt = c.gcAt;
   }
 
   /**
@@ -837,12 +971,15 @@ export class CellMachine {
     const hp = this.hp, S = this.S, R = this.R;
     try {
       hp.h = new Int32Array(HEAP_CELLS);
+      hp.boxes = [];
       hp.top = hp.hb = 1 + GLOBAL_SLOTS;
       hp.frozen = 0;
       hp.setTrailState(null);
       hp.wakeups = [];
       this.sLimit = base + FIBER_S;
       this.inFiber = true;
+      this.roots = [];
+      this.scheduleCollection();
       const bar = base + ENV;
       S[base] = base;
       S[base + 1] = this.OK;
@@ -852,6 +989,7 @@ export class CellMachine {
       S[bar] = bar;
       S[bar + 1] = K_BARRIER;
       S[bar + 2] = 0;
+      S[bar + 3] = base;
       S[bar + 9] = hp.top;
       S[bar + 10] = 0;
       R[RE] = base;
@@ -859,10 +997,9 @@ export class CellMachine {
       R[RB] = bar;
       R[RCC] = -1;
       R[RBAR] = bar;
-      const pair = hp.encode(pairTerm, new Map());
-      const test = hp.h[(pair >> 3) + 2]!;
-      const next: Code = () => this.goal(test, this.R[RB]!, this.R[RCC]!);
-      return { ctx: this.saveCtx(), next, solved: false, pair, bar };
+      this.roots.push(hp.encode(pairTerm, new Map()));
+      const next: Code = () => this.goal(this.hp.h[(this.roots[0]! >> 3) + 2]!, this.R[RB]!, this.R[RCC]!);
+      return { ctx: this.saveCtx(), next, solved: false, bar };
     } finally {
       this.loadCtx(main);
     }
@@ -903,7 +1040,7 @@ export class CellMachine {
       }
       if (!this.result) return "failed";
       w.solved = true;
-      return copyTerm(this.hp.decode(w.pair, new Map()));
+      return copyTerm(this.hp.decode(this.roots[0]!, new Map()));
     } finally {
       w.ctx = this.saveCtx();
       this.loadCtx(main);
@@ -930,7 +1067,9 @@ export class CellMachine {
   /** setup_call_cleanup(S, G, C): S once; G under a cleanup choicepoint holding C, its cut local to it. */
   setupCallCleanup(setup: number, g: number, cleanup: number, cc: number): Code | null {
     const S = this.S, R = this.R;
-    if (!this.solveCell(setup)) return this.fail();
+    const held = this.hold([g, cleanup], (at) => (this.solveCell(setup) ? [at(0), at(1)] : null));
+    if (held === null) return this.fail();
+    [g, cleanup] = held as [number, number];
     this.A[0] = cleanup;
     const b = this.pushCP(K_CLEANUP, R[RB]!, cc, 1);
     this.cleanups++;
@@ -1053,6 +1192,9 @@ export class CellMachine {
 
   /** Call `p` with A[0..n), the continuation being the current one. */
   callw(p: CellProc, n: number, cc: number): Code | null {
+    // A call port is where the collector runs: compiled code calls in tail position, so only A[0..n), the control
+    // stack and the held roots hold cells.
+    if (this.hp.top + BOX_CELLS * this.hp.boxes.length >= this.gcAt) this.collect(n);
     // The catch context of the call, which a throw from inside it unwinds to (unwind).
     this.R[RCC] = cc;
     if (p.det !== undefined) {
@@ -1142,21 +1284,22 @@ export class CellMachine {
         }
         const seen = new Set<string>();
         const found: Term[] = [];
-        // The solve reuses the argument registers, which the answering below reads.
-        const saved = A.slice(0, n);
+        // The solve reuses the argument registers, which the answering below reads, so they are held with the goal.
         om.tabled.delete(p.key);
         try {
-          this.solveEach(g, () => {
-            const a = copyTerm(hp.decode(g, new Map()));
-            const k = variantKeyOf(a);
-            if (!seen.has(k)) {
-              seen.add(k);
-              found.push(a);
-            }
+          this.hold([g, ...A.subarray(0, n)], (at) => {
+            this.solveEach(g, () => {
+              const a = copyTerm(hp.decode(at(0), new Map()));
+              const key = variantKeyOf(a);
+              if (!seen.has(key)) {
+                seen.add(key);
+                found.push(a);
+              }
+            });
+            for (let i = 0; i < n; i++) A[i] = at(1 + i);
           });
         } finally {
           om.tabled.add(p.key);
-          A.set(saved);
         }
         answers.push(...found);
       }

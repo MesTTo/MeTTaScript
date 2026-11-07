@@ -97,7 +97,7 @@ export function bridgeBuiltin(key: string, b: Builtin): (cm: CellMachine, n: num
       if (!bindBack(cm, back, mark)) return false;
       if (pushed.length === 0) return true;
       const vars = new Map<Var, number>();
-      for (const [a2, v2] of back) if (v2.ref === null) vars.set(v2, cm.hp.h[a2]!);
+      for (const [c2, v2] of back) if (v2.ref === null) vars.set(v2, c2);
       const conj = pushed.reduceRight<Term>((acc, g) => (acc === "true" ? g : new Struct(",", [g, acc])), "true");
       return cm.hp.encode(conj, vars);
     } finally {
@@ -143,7 +143,7 @@ function bindBack(cm: CellMachine, back: Map<number, Var>, mark: number): boolea
   const varsOf = (): Map<Var, number> => {
     if (vars === null) {
       vars = new Map<Var, number>();
-      for (const [a2, v2] of back) if (v2.ref === null) vars.set(v2, hp.h[a2]!);
+      for (const [c2, v2] of back) if (v2.ref === null) vars.set(v2, c2);
     }
     return vars;
   };
@@ -156,7 +156,7 @@ function bindBack(cm: CellMachine, back: Map<number, Var>, mark: number): boolea
     if (!(e instanceof AttrUndo)) continue;
     if (addrOf === null) {
       addrOf = new Map<Var, number>();
-      for (const [a2, v2] of back) addrOf.set(v2, a2);
+      for (const [c2, v2] of back) addrOf.set(v2, c2 >> 3);
     }
     const a = addrOf.get(e.v);
     if (a === undefined) continue;
@@ -174,9 +174,9 @@ function bindBack(cm: CellMachine, back: Map<number, Var>, mark: number): boolea
     }
     hp.bind(a + 1, list);
   }
-  for (const [a, v] of back) {
+  for (const [c, v] of back) {
     if (v.ref === null) continue;
-    if (!hp.unify(hp.h[a]!, hp.encode(v.ref, varsOf()))) return false;
+    if (!hp.unify(c, hp.encode(v.ref, varsOf()))) return false;
   }
   return true;
 }
@@ -185,7 +185,8 @@ function bindBack(cm: CellMachine, back: Map<number, Var>, mark: number): boolea
 export interface BridgeRun {
   readonly key: string;
   readonly gen: Iterator<unknown, boolean>;
-  readonly back: Map<number, Var>;
+  /** Decoded variables by their own cells (Heap.decode), which the collector moves (CellMachine.collect). */
+  back: Map<number, Var>;
 }
 
 /**

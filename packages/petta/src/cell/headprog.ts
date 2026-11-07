@@ -73,11 +73,11 @@ function emitTerm(hp: Heap, t0: Term, out: number[], singleton: (i: number) => b
     out[at + 3] = out.length;
   } else if (typeof t === "string") out.push(CONST, hp.atom(t));
   else if (t === NIL) out.push(CONST, hp.NIL);
-  else if (typeof t === "number" || typeof t === "bigint") {
-    const k = hp.int(t);
+  else if (typeof t === "number" || typeof t === "bigint" || t instanceof Float || t instanceof Str) {
+    // A constant the program keeps (Heap.constant), so no collection frees its box.
+    const k = hp.constant(t);
     out.push((k & 7) === BOX ? BOXC : CONST, k);
-  } else if (t instanceof Float || t instanceof Str) out.push(BOXC, hp.box(t));
-  else throw new Error(`cell head program: no cell for ${String(t)}`);
+  } else throw new Error(`cell head program: no cell for ${String(t)}`);
 }
 
 /**

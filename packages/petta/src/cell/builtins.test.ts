@@ -6,11 +6,12 @@
 // through the bridge (bridge.ts), against the object machine's builtins: random arguments over shared and attributed variables, small and big integers, floats with -0.0 and NaN,
 // strings, atoms with '[]' and [], compounds, proper and partial lists and pairs, each call run on both engines, its
 // answers compared in order with the arguments' bindings and, when it throws, the error term. A call the cell engine
-// can only answer with a generator it does not have yet is skipped.
+// can only answer with a generator it does not have yet is skipped. Every case runs under the collector's own
+// schedule and again collecting at every call port, so each call's arguments are moved before it runs.
 // am[verifies a-petta-cell-store.builtins.terms]
 
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { installBuiltins } from "../builtins";
 import { installConsult } from "../consult";
 import { installLibrary } from "../library";
@@ -75,20 +76,25 @@ function objectMachine(): Machine {
   return m;
 }
 /**
- * The machines every case runs on, made once: a cell machine holds a gigabyte of typed arrays, so one per case
- * exhausts the JS heap. Calls leave nothing behind: solveAll undoes every binding and the heap top is reset after.
+ * The machines every case runs on, made once per collector schedule: a cell machine holds a gigabyte of typed arrays,
+ * so one per case exhausts the JS heap. Calls leave nothing behind: solveAll undoes every binding and the heap top is
+ * reset after.
  */
-let shared: { m: Machine; cm: CellMachine } | null = null;
+const shared = new Map<number | null, { m: Machine; cm: CellMachine }>();
+/** The collector's schedule the cases run under: its own (null), or collecting every so many cells (describe.each). */
+let gcEvery: number | null = null;
 function machines(): { m: Machine; cm: CellMachine } {
-  if (shared === null) {
+  let s = shared.get(gcEvery);
+  if (s === undefined) {
     const m = objectMachine();
     const cm = new CellMachine(objectMachine());
     cm.compile = compileCellClause;
     installInlineBuiltins(cm);
     installTermBuiltins(cm);
-    shared = { m, cm };
+    if (gcEvery !== null) cm.collectEvery(gcEvery);
+    shared.set(gcEvery, (s = { m, cm }));
   }
-  return shared;
+  return s;
 }
 
 /** Run name(args) on the object machine and on the cell machine over the same variables. */
@@ -103,11 +109,17 @@ function both(name: string, args: Term[], pool: Var[]): { want: Outcome; got: Ou
   const cells = args.map((a) => hp.encode(a, vars));
   cells.forEach((c, i) => (cm.A[i] = c));
   try {
+    // The arguments are held, since a collection during the solve moves them; show reads them through the hold.
+    let at = (i: number): number => cells[i]!;
     const got = run(
-      (each) => cm.solveAll(cm.proc(name, args.length), args.length, each),
+      (each) =>
+        cm.hold(cells, (held) => {
+          at = held;
+          cm.solveAll(cm.proc(name, args.length), args.length, each);
+        }),
       () => {
         const back = new Map<number, Var>();
-        return canon(cells.map((c) => hp.decode(c, back)));
+        return canon(cells.map((_, i) => hp.decode(at(i), back)));
       },
     );
     return { want, got };
@@ -208,7 +220,15 @@ function codes(vs: Var[]): fc.Arbitrary<Term> {
   return list(fc.oneof(fc.integer({ min: 48, max: 122 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs), fc.constantFrom<Term>("a", -1)), vs);
 }
 
-describe("native term builtins on cells", () => {
+// am[verifies a-petta-cell-store.gc.test]
+describe.each([
+  ["", null],
+  [", collecting at every call port", 0],
+] as const)("native term builtins on cells%s", (_schedule, every) => {
+  beforeEach(() => {
+    gcEvery = every;
+  });
+
   for (const [name, gen] of CASES)
     it(`${name} answers and throws as the object builtin`, () => {
       fc.assert(

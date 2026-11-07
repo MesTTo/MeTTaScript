@@ -5,10 +5,12 @@
 // Purpose: the cell engine's term store. A term is a 32-bit cell whose low three bits are its tag: a variable refers
 // to its own address while unbound, an attributed variable likewise with its att(Module, Value, More) list in the
 // next cell, a compound or list cell points at its cells on the Int32Array heap, an atom or a functor is an interned
-// id, a small integer is inline, and a large integer, a bigint, a float or a string sits in a side table. Assignments
-// are trailed by address and old cell against the newest choicepoint's heap top, as in the WAM, so backtracking
-// resets the heap top and frees everything above it. Decoding to and encoding from the object terms (terms.ts) map
-// variables both ways, which is how builtins written for objects run on cells.
+// id, a small integer is inline, and a large integer, a bigint, a float or a string sits in a side table: the runtime
+// boxes, or the constants code holds. Assignments are trailed by address and old cell against the newest
+// choicepoint's heap top, as in the WAM, so backtracking resets the heap top and frees everything above it, and a
+// collection frees the cells and runtime boxes no root reaches, sliding the rest down in order. Decoding to and
+// encoding from the object terms (terms.ts) map variables both ways, which is how builtins written for objects run on
+// cells.
 // am[implements a-petta-cell-store.terms]
 
 import { Cons, Float, NIL, Str, Struct, Var, deref as derefObj, mkVar, type Term } from "../terms";
@@ -48,6 +50,21 @@ export interface TrailState {
   readonly tr: number;
 }
 
+/** The collector's mark bits, one per heap cell, and live cells before each 32-cell word, made once and shared. */
+let markBits: Uint32Array | null = null;
+let liveBefore: Int32Array | null = null;
+/** The collector's mark bits over the runtime boxes and live boxes before each 32-box word, grown as the table grows. */
+let boxBits = new Uint32Array(0);
+let boxesBefore = new Int32Array(0);
+
+/** The set bits of a 32-bit word (Hacker's Delight 5-2). */
+function popcount(x: number): number {
+  x = x - ((x >>> 1) & 0x55555555);
+  x = (x & 0x33333333) + ((x >>> 2) & 0x33333333);
+  x = (x + (x >>> 4)) & 0x0f0f0f0f;
+  return Math.imul(x, 0x01010101) >>> 24;
+}
+
 /**
  * The heap with its tables. Cell 0 is never used, so no cell's address is 0; ids start at 0 in each table.
  * Fields are read by generated code (h, top, hb, tr), which reloads them after any call that can allocate. A
@@ -75,8 +92,15 @@ export class Heap {
   private trailOld: Int32Array = new Int32Array(TRAIL_START);
   /** TR: the first free trail entry. */
   tr = 0;
-  /** BOX cells' values: numbers beyond 29 bits, bigints, Floats and Strs. */
-  readonly boxes: unknown[] = [];
+  /**
+   * The values of BOX cells made while running, numbered from 0: numbers beyond 29 bits, bigints, Floats and Strs.
+   * The collector frees the ones no live cell holds and moves the rest down (collect); a concurrent_and worker has a
+   * table of its own.
+   */
+  boxes: unknown[] = [];
+  /** The values of BOX cells compiled code and head programs hold, numbered from -1 down, one per value, kept. */
+  private readonly constants: unknown[] = [];
+  private readonly constantIds = new Map<string, number>();
   private readonly atomIds = new Map<string, number>();
   readonly atomNames: string[] = [];
   private readonly funIds = new Map<string, number>();
@@ -119,9 +143,34 @@ export class Heap {
     return (id << 3) | FUN;
   }
 
-  /** A side-table cell holding `x`. */
+  /** A BOX cell holding `x`, made while running, which a collection frees once no live cell holds it. */
   box(x: unknown): number {
     return ((this.boxes.push(x) - 1) << 3) | BOX;
+  }
+
+  /**
+   * The cell of atomic constant `t` for code to keep: an integer within 29 bits inline; any other number, a bigint,
+   * Float or Str a BOX cell numbered below 0, the same cell for the same value, which no collection frees or moves.
+   * Collections free runtime boxes only, so compiled code and head programs make their constants here.
+   */
+  constant(t: number | bigint | Float | Str): number {
+    let v: number | bigint | Float | Str = t;
+    if (typeof v === "bigint" && v >= BigInt(Number.MIN_SAFE_INTEGER) && v <= BigInt(Number.MAX_SAFE_INTEGER)) v = Number(v);
+    if (typeof v === "number" && v >= INT_MIN && v <= INT_MAX) return (v << 3) | INT;
+    const key = typeof v === "number" ? `n${v}` : typeof v === "bigint" ? `b${v}` : v instanceof Float ? `f${Object.is(v.v, -0) ? "-0" : String(v.v)}` : `s${v.s}`;
+    let id = this.constantIds.get(key);
+    if (id === undefined) {
+      id = ~this.constants.length;
+      this.constants.push(v);
+      this.constantIds.set(key, id);
+    }
+    return (id << 3) | BOX;
+  }
+
+  /** The value BOX cell `c` holds: a runtime box when numbered from 0, a constant below. */
+  boxed(c: number): unknown {
+    const id = c >> 3;
+    return id >= 0 ? this.boxes[id] : this.constants[~id];
   }
 
   /** The cell of an integer: inline within 29 bits, boxed beyond, a safe integer as a number and beyond as a bigint. */
@@ -250,6 +299,146 @@ export class Heap {
     this.tr = s.tr;
   }
 
+  /**
+   * Collect the heap, as Appleby, Carlsson, Haridi and Sahlin collect the WAM's (c-gc-design-1106): `roots` marks each
+   * root cell through the function it is given; cells 0 to GLOBAL_SLOTS stay put and their values are roots, as are
+   * the wake queue's cells; a trail entry whose cell is live keeps its old cell live, to a fixpoint. The live cells
+   * then slide down in order, so each choicepoint's saved heap top still divides older cells from newer, and
+   * `relocate` rewrites every root through the two functions it is given, one for a cell and one for a heap address.
+   * A trail entry whose cell is dead is emptied to cell 0, which no term uses. The runtime boxes live cells hold slide
+   * down the same way and the rest are freed; constants stay. Time: the heap below the top in 32-cell words plus the
+   * live cells, the trail and the runtime boxes. Space: a mark bit per cell and per box, and a count per 32 of each.
+   * am[implements a-petta-cell-store.gc.mark] am[implements a-petta-cell-store.gc.compact]
+   */
+  collect(roots: (mark: (c: number) => void) => void, relocate: (cell: (c: number) => number, addr: (a: number) => number) => void): void {
+    const h = this.h, top = this.top, funArity = this.funArity;
+    const words = (top >>> 5) + 2;
+    const bits = (markBits ??= new Uint32Array((HEAP_CELLS >>> 5) + 2));
+    const counts = (liveBefore ??= new Int32Array((HEAP_CELLS >>> 5) + 3));
+    bits.fill(0, 0, words);
+    const boxes = this.boxes, nb = boxes.length, boxWords = (nb >>> 5) + 2;
+    if (boxBits.length < boxWords) {
+      boxBits = new Uint32Array(2 * boxWords);
+      boxesBefore = new Int32Array(2 * boxWords + 1);
+    } else boxBits.fill(0, 0, boxWords);
+    const bbits = boxBits, bcounts = boxesBefore;
+    let fresh = 0;
+    const isSet = (a: number): boolean => (bits[a >>> 5]! & (1 << (a & 31))) !== 0;
+    const set = (a: number): void => {
+      if (!isSet(a)) {
+        bits[a >>> 5]! |= 1 << (a & 31);
+        fresh++;
+      }
+    };
+    const stack: number[] = [];
+    // Marks the cells a term reaches: a variable's cell and what it is bound to, an attributed one's list too, a
+    // structure's functor and arguments, a list pair's two cells, following a list's tail without the stack, and the
+    // runtime box a BOX cell holds.
+    const mark = (c0: number): void => {
+      stack.push(c0);
+      while (stack.length > 0) {
+        let x = stack.pop()!;
+        for (;;) {
+          const tag = x & 7;
+          if (tag === REF || tag === ATV) {
+            const a = x >> 3;
+            if (isSet(a)) break;
+            set(a);
+            if (tag === ATV && !isSet(a + 1)) {
+              set(a + 1);
+              stack.push(h[a + 1]!);
+            }
+            const v = h[a]!;
+            if (v === x) break;
+            x = v;
+            continue;
+          }
+          if (tag === STR) {
+            const p = x >> 3;
+            if (isSet(p)) break;
+            const n = funArity[h[p]! >> 3]!;
+            for (let i = 0; i <= n; i++) set(p + i);
+            for (let i = n; i >= 1; i--) stack.push(h[p + i]!);
+            break;
+          }
+          if (tag === LIS) {
+            const p = x >> 3;
+            if (isSet(p) && isSet(p + 1)) break;
+            set(p);
+            set(p + 1);
+            stack.push(h[p]!);
+            x = h[p + 1]!;
+            continue;
+          }
+          if (tag === BOX && x >= 0) {
+            const id = x >> 3;
+            bbits[id >>> 5]! |= 1 << (id & 31);
+          }
+          break;
+        }
+      }
+    };
+    for (let a = 0; a <= GLOBAL_SLOTS; a++) set(a);
+    for (let a = 1; a <= GLOBAL_SLOTS; a++) mark(h[a]!);
+    for (const w of this.wakeups) {
+      mark(w.attrs);
+      mark(w.value);
+    }
+    roots(mark);
+    const trail = this.trail, old = this.trailOld, tr = this.tr;
+    for (let before = -1; before !== fresh; ) {
+      before = fresh;
+      for (let i = 0; i < tr; i++) if (isSet(trail[i]!)) mark(old[i]!);
+    }
+    let live = 0;
+    for (let w = 0; w < words; w++) {
+      counts[w] = live;
+      live += popcount(bits[w]!);
+    }
+    counts[words] = live;
+    let liveBoxes = 0;
+    for (let w = 0; w < boxWords; w++) {
+      bcounts[w] = liveBoxes;
+      liveBoxes += popcount(bbits[w]!);
+    }
+    // An address's new place is the live cells below it: every live cell below it slides down by the dead ones.
+    const addr = (a: number): number => counts[a >>> 5]! + popcount(bits[a >>> 5]! & ((1 << (a & 31)) - 1));
+    // A runtime box's new number is the live boxes below it, as an address's is.
+    const boxId = (id: number): number => bcounts[id >>> 5]! + popcount(bbits[id >>> 5]! & ((1 << (id & 31)) - 1));
+    const cell = (c: number): number => {
+      const tag = c & 7;
+      if (tag === REF || tag === STR || tag === LIS || tag === ATV) return (addr(c >> 3) << 3) | tag;
+      return tag === BOX && c >= 0 ? (boxId(c >> 3) << 3) | BOX : c;
+    };
+    // Each live cell moves to its new place, never above itself, in increasing order, so no unread cell is written.
+    for (let w = 0; w < words; w++) {
+      let b = bits[w]!;
+      while (b !== 0) {
+        const a = (w << 5) | (31 - Math.clz32(b & -b));
+        b &= b - 1;
+        h[addr(a)] = cell(h[a]!);
+      }
+    }
+    for (let i = 0; i < tr; i++) {
+      const a = trail[i]!;
+      if (isSet(a)) {
+        trail[i] = addr(a);
+        old[i] = cell(old[i]!);
+      } else {
+        trail[i] = 0;
+        old[i] = 0;
+      }
+    }
+    this.wakeups = this.wakeups.map((w) => ({ attrs: cell(w.attrs), value: cell(w.value) }));
+    let kept = 0;
+    for (let id = 0; id < nb; id++) if ((bbits[id >>> 5]! & (1 << (id & 31))) !== 0) boxes[kept++] = boxes[id];
+    boxes.length = kept;
+    this.hb = addr(this.hb);
+    if (this.frozen > 0) this.frozen = addr(this.frozen);
+    this.top = addr(top);
+    relocate(cell, addr);
+  }
+
   /** Whether variable cell `x` (unbound) holds attributes: an attributed cell whose list del_attr/2 emptied is plain. */
   attributed(x: number): boolean {
     return (x & 7) === ATV && this.h[(x >> 3) + 1] !== this.NIL;
@@ -304,7 +493,7 @@ export class Heap {
         continue;
       }
       if (tx === BOX) {
-        if (!boxEq(this.boxes[x >> 3], this.boxes[y >> 3])) return false;
+        if (!boxEq(this.boxed(x), this.boxed(y))) return false;
         continue;
       }
       // Distinct atoms, integers or functor cells.
@@ -347,7 +536,7 @@ export class Heap {
           mix("i" + (c >> 3) + "\u0000");
           break;
         case BOX: {
-          const v = this.boxes[c >> 3];
+          const v = this.boxed(c);
           if (typeof v === "number" || typeof v === "bigint") mix("i" + v + "\u0000");
           else if (v instanceof Float) mix("f" + (Object.is(v.v, -0) ? "-0" : String(v.v)) + "\u0000");
           else if (v instanceof Str) mix("s" + v.s.length + ":" + v.s);
@@ -447,9 +636,9 @@ export class Heap {
   }
 
   /**
-   * Decode a cell to an object term; `vars` maps each unbound variable's address to its object variable, so encode
-   * and decode round trips keep identity. An attributed cell decodes to a variable with its attributes. Time: the
-   * term's size.
+   * Decode a cell to an object term; `vars` maps each unbound variable's own cell, its tagged reference to itself, to
+   * its object variable, so encode and decode round trips keep identity and an attributed variable's key says it is
+   * one even once bound. An attributed cell decodes to a variable with its attributes. Time: the term's size.
    */
   decode(c0: number, vars: Map<number, Var>): Term {
     const h = this.h;
@@ -468,10 +657,10 @@ export class Heap {
       case REF:
       case ATV: {
         const a = c >> 3;
-        let v = vars.get(a);
+        let v = vars.get(c);
         if (v === undefined) {
           v = mkVar();
-          vars.set(a, v);
+          vars.set(c, v);
           if ((c & 7) === ATV) {
             const m = new Map<string, Term>();
             for (let l = h[a + 1]!; (l & 7) === STR; l = h[(l >> 3) + 3]!) {
@@ -488,7 +677,7 @@ export class Heap {
       case INT:
         return c >> 3;
       case BOX:
-        return this.boxes[c >> 3] as Term;
+        return this.boxed(c) as Term;
       case LIS: {
         const items: Term[] = [];
         const cells: number[] = [];

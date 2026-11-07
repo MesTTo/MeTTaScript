@@ -119,12 +119,11 @@ function large(t0: Term): boolean {
   return false;
 }
 
-/** The cell of an atomic template. */
+/** The cell of an atomic template, a constant the code keeps (Heap.constant), so no collection frees its box. */
 function atomicCell(hp: Heap, t: Term): number {
   if (typeof t === "string") return hp.atom(t);
-  if (typeof t === "number" || typeof t === "bigint") return hp.int(t);
   if (t === NIL) return hp.NIL;
-  if (t instanceof Float || t instanceof Str) return hp.box(t);
+  if (typeof t === "number" || typeof t === "bigint" || t instanceof Float || t instanceof Str) return hp.constant(t);
   throw new Error(`cell compiler: no cell for ${String(t)}`);
 }
 
@@ -148,12 +147,12 @@ function runtime(cm: CellMachine): Runtime {
     const c = hp.deref(c0);
     if ((c & 7) === INT) return true;
     if ((c & 7) !== BOX) return false;
-    const v = hp.boxes[c >> 3];
+    const v = hp.boxed(c);
     return typeof v === "number" || typeof v === "bigint";
   };
   const isFloat = (c0: number): boolean => {
     const c = hp.deref(c0);
-    return (c & 7) === BOX && hp.boxes[c >> 3] instanceof Float;
+    return (c & 7) === BOX && hp.boxed(c) instanceof Float;
   };
   const isCompound = (c: number): boolean => {
     const t = hp.deref(c) & 7;
@@ -212,7 +211,7 @@ function runtime(cm: CellMachine): Runtime {
       const tag = c & 7;
       if (tag === INT) return c >> 3;
       if (tag === BOX) {
-        const v = hp.boxes[c >> 3];
+        const v = hp.boxed(c);
         if (typeof v === "number" || typeof v === "bigint" || v instanceof Float) return v;
       }
       return evalArith(hp.decode(c, new Map()));

@@ -39,7 +39,7 @@ export class CellArgs implements ArgVector {
       case LIS:
         return LIST_KEY;
       case BOX: {
-        const v = hp.boxes[c >> 3];
+        const v = hp.boxed(c);
         if (typeof v === "number" || typeof v === "bigint") return v;
         if (v instanceof Float) return "\u0001f" + (Object.is(v.v, -0) ? "-0" : String(v.v));
         if (v instanceof Str) return "\u0001s" + v.s;

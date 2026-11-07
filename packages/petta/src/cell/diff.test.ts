@@ -9,10 +9,12 @@
 // with the same bindings, up to the first 40, and the query must throw on both or neither. Fixed recursive programs
 // (naive reverse, member, a counting loop) check recursion and backtracking through it; database, global variable and
 // attribute programs run on fresh machine pairs, attributes also against SWI-Prolog's measured answers.
+// Every test runs under the collector's own schedule and again collecting at every call port, where a collection
+// meets each root a program holds at that point.
 // am[verifies a-petta-cell-store.compile.diff]
 
 import fc from "fast-check";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { ATTR_PROGRAMS, ATTR_SWI } from "../attr-fixture";
 import { installBuiltins } from "../builtins";
 import { installClpfd } from "../clpfd";
@@ -70,6 +72,9 @@ function onObjects(m: Machine, name: string, args: Term[]): Outcome {
 }
 
 /** An object machine with its builtins, the oracle, and the one cell machine reading its database. */
+/** The collector's schedule the tests run under: its own (null), or collecting every so many cells (describe.each). */
+let gcEvery: number | null = null;
+
 function machines(): { m: Machine; cm: CellMachine } {
   const m = new Machine();
   installBuiltins(m);
@@ -80,22 +85,34 @@ function machines(): { m: Machine; cm: CellMachine } {
   cm.compile = compileCellClause;
   installInlineBuiltins(cm);
   installTermBuiltins(cm);
+  if (gcEvery !== null) cm.collectEvery(gcEvery);
   return { m, cm };
 }
 
 /** The same on the cell machine over the object machine's database. */
 function onCells(cm: CellMachine, name: string, args: Term[]): Outcome {
   const hp = cm.hp;
+  // Junk no root reaches, below the solve's barrier: once a collection frees it, backtracking out of the solve must
+  // return the heap top to where the collection moved the barrier's, not to where it was.
+  const junkFrom = hp.top;
+  hp.encode(new Struct("junk", [new Struct("j", [mkVar(), "a"])]), new Map());
+  const junk = hp.top - junkFrom;
   const vars = new Map<Var, number>();
   const cells = args.map((a) => hp.encode(a, vars));
   cells.forEach((c, i) => (cm.A[i] = c));
+  const top = hp.top;
   const answers: string[] = [];
   try {
-    cm.solveAll(cm.proc(name, args.length), args.length, () => {
-      const back = new Map<number, Var>();
-      answers.push(canon(cells.map((c) => hp.decode(c, back))));
-      return answers.length < MAX_ANSWERS;
-    });
+    // The arguments are held, since a collection during the solve moves them.
+    cm.hold(cells, (at) =>
+      cm.solveAll(cm.proc(name, args.length), args.length, () => {
+        const back = new Map<number, Var>();
+        answers.push(canon(cells.map((_, i) => hp.decode(at(i), back))));
+        return answers.length < MAX_ANSWERS;
+      }),
+    );
+    // Collecting at every call port collects at the solve's first: the junk goes, unless nb values froze the heap.
+    if (gcEvery === 0) expect(hp.top, name).toBeLessThanOrEqual(Math.max(top - junk, hp.frozen));
     return { answers, threw: false };
   } catch (e) {
     lastCellError = thrown(e);
@@ -196,7 +213,15 @@ const program = fc.integer({ min: 1, max: 3 }).chain((preds) =>
   ),
 );
 
-describe("cell engine against the object machine", () => {
+// am[verifies a-petta-cell-store.gc.test] am[verifies a-petta-cell-store.gc.roots]
+describe.each([
+  ["", null],
+  [", collecting at every call port", 0],
+] as const)("cell engine against the object machine%s", (_schedule, every) => {
+  beforeEach(() => {
+    gcEvery = every;
+  });
+
   it("gives every random program's answers in the same order, and throws where it throws", () => {
     fc.assert(
       fc.property(program, fc.boolean(), fc.constant(null).chain(() => {
@@ -264,11 +289,28 @@ describe("cell engine against the object machine", () => {
       tr2(X) :- transaction(assertz(tq2(1))), ( tq2(_) -> X = kept ; X = rolled ).
       as1(X) :- catch(assertion(fail), E, X = E).
       as2(X) :- assertion(true), X = ok.
+      gc1(X) :- T = f(h(1)), ( setarg(1, T, g(2)), atom_length(abc, _), fail ; arg(1, T, X) ).
+      gc2(X) :- put_attr(V, gcm, h(1)), ( put_attr(V, gcm, g(2)), atom_length(abc, _), fail ; get_attr(V, gcm, X) ).
+      gcl(a).
+      gcl(b).
+      gcl(c).
+      gc3(L) :- findall(P, (clause(gcl(X), B), P = X-B, atom_length(abc, _)), L).
+      bxh(1.5, "s", 99999999999, -0.0).
+      bx1(X) :- Y = 3.5, Z = "str", W = 12345678901234, V = 123456789012345678901234567890, atom_length(abc, _), X = f(Y, Z, W, V).
+      bx2(X) :- bxh(A, B, C, D), atom_length(abc, _), X = A-B-C-D.
+      bxjunk :- _ is 2 ** 42, _ is 2.5 * 3, atom_string(abc, _).
+      bx3(X) :- bxjunk, A is 2 ** 41 + 7, F is 1.25 * 2, atom_string(xyz, S), bxjunk, atom_length(abc, _), X = A-F-S.
+      bx4(L) :- findall(X-Y-Z, (between(1, 40, _), bx1(X), bx2(Y), bx3(Z)), L).
       mem(X, [X|_]).
       mem(X, [_|T]) :- mem(X, T).
       db10(X) :- assertz(w10(1)), w10(X), retract(w10(X)), \\+ w10(_).
     `;
-    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7", "gv8", "gv9", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7", "gv10", "gv11", "fn1", "fn2", "wo1", "wo2", "wo3", "ps1", "tr1", "tr2", "as1", "as2"]) {
+    // gc1 and gc2 restore, on backtracking, a value only the trail still holds once setarg/3 or put_attr/3 replaced it;
+    // in gc3 the variables the bridged clause/2 decoded sit inside its argument gcl(X), which dies once the generator
+    // has started, so the collection at atom_length/2 moves them before the next solution binds them. bx1 and bx2
+    // keep float, string and big integer constants of bodies and heads across collections, cold and, run 40 times
+    // in bx4, compiled; bx3's live runtime boxes move down past the dead ones bxjunk made.
+    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7", "gv8", "gv9", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7", "gv10", "gv11", "fn1", "fn2", "wo1", "wo2", "wo3", "ps1", "tr1", "tr2", "as1", "as2", "gc1", "gc2", "gc3", "bx1", "bx2", "bx3", "bx4"]) {
       const a = machines(), b = machines();
       for (const c of readClauses(src)) {
         a.m.addClause(c, true);
@@ -328,6 +370,12 @@ describe("cell engine against the object machine", () => {
     });
     expect(trAt).toBeLessThan(16);
     // tg trails 200000 bindings under one choicepoint, past the trail's first 65536 entries, then undoes them all.
+    // Collecting at each of its calls would collect its 400000 live cells 200000 times; every 4096 cells it still
+    // collects with the trail past its first size.
+    if (gcEvery === 0) {
+      gcEvery = 1 << 12;
+      cm.collectEvery(gcEvery);
+    }
     expect(onCells(cm, "tg", [mkVar()])).toStrictEqual(onObjects(m, "tg", [mkVar()]));
     expect(onCells(cm, "tg", [mkVar()]).answers).toStrictEqual(['"unbound"']);
   });
@@ -346,8 +394,10 @@ describe("cell engine against the object machine", () => {
       ca5(L) :- nb_setval(kca, 1), findall(V, concurrent_and(mem(_, [a]), (nb_current(kca, V) -> true ; V = none)), L).
       ca6(L) :- findall(X, concurrent_and(mem(X, [1, 2, 3]), (X > 1, !)), L).
       ca7(L) :- findall(X, concurrent_and(mem(X, [5, 3]), (count(X), findall(Y, mem(Y, [X, X]), [_, _]))), L).
+      ca8(L) :- findall(X-Z, (concurrent_and(mem(X, [1, 2]), true), mem(Z, [a])), L).
     `;
-    for (const name of ["ca1", "ca2", "ca3", "ca4", "ca5", "ca6", "ca7"]) {
+    // ca8 calls after each solution, so a collection meets the group's pair, which only its choicepoint holds.
+    for (const name of ["ca1", "ca2", "ca3", "ca4", "ca5", "ca6", "ca7", "ca8"]) {
       const a = machines(), b = machines();
       for (const c of readClauses(src)) {
         a.m.addClause(c, true);
