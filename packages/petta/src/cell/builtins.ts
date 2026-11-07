@@ -336,6 +336,22 @@ function freshVar(hp: Heap): number {
 }
 
 /**
+ * A list of `n` fresh variables ending in `tail`, built in one block where each element is its own unbound cell: the
+ * heap's bound raises SWI's stack limit error before anything is built for a length past it (Heap.alloc), where an
+ * array of the variables first ran past JavaScript's longest array (i-petta-length-huge-1108). Time: n.
+ * am[implements a-petta-errors-fix-1108.length]
+ */
+function freshList(hp: Heap, n: number, tail: number): number {
+  if (n <= 0) return tail;
+  const a = hp.alloc(2 * n), h = hp.h;
+  for (let p = a, end = a + 2 * n; p < end; p += 2) {
+    h[p] = p << 3;
+    h[p + 1] = p + 2 < end ? ((p + 2) << 3) | LIS : tail;
+  }
+  return (a << 3) | LIS;
+}
+
+/**
  * The global variable builtins on cells (a-petta-cell-store.runtime.globals, c-globals-design-1106), one store as the
  * object machine's: each key has a slot cell below every choicepoint's heap top; b_setval/2 binds it, trailed with
  * its old cell so backtracking restores it; nb_setval/2 sets it, untrailed, to a copy of the value made at the heap top
@@ -647,10 +663,15 @@ export function installTermBuiltins(cm: CellMachine): void {
       const ar = intArg(hp, A[2]!);
       if (ar === 0) return unify(d, name);
       if (isVarTag(name)) throw instantiationError();
-      const args: number[] = [];
-      for (let i = 0; i < ar; i++) args.push(freshVar(hp));
       if ((name & 7) !== ATM || name === hp.NIL) throw typeError("atomic", culprit(hp, name));
-      return unify(d, mkCompoundCell(hp, hp.atomNames[name >> 3]!, args));
+      if (ar < 0) return unify(d, name);
+      if (ar === 2 && hp.atomNames[name >> 3] === "[|]") return unify(d, freshList(hp, 1, freshVar(hp)));
+      // The compound and its fresh arguments in one block, its size checked by the heap before anything is built.
+      // am[implements a-petta-errors-fix-1108.length]
+      const q = hp.alloc(ar + 1);
+      hp.h[q] = hp.functor(hp.atomNames[name >> 3]!, ar);
+      for (let p = q + 1; p <= q + ar; p++) hp.h[p] = p << 3;
+      return unify(d, (q << 3) | STR);
     }
     if ((d & 7) === STR || (d & 7) === LIS) {
       const [n, f] = compound(hp, d);
@@ -713,9 +734,7 @@ export function installTermBuiltins(cm: CellMachine): void {
     if ((nd & 7) === INT || ((nd & 7) === BOX && typeof hp.boxed(nd) === "number")) {
       const k = numOf(hp, nd) as number;
       if (k < count) return false;
-      const extra: number[] = [];
-      for (let i = count; i < k; i++) extra.push(freshVar(hp));
-      return unify(t, listCells(hp, extra, hp.NIL));
+      return unify(t, freshList(hp, k - count, hp.NIL));
     }
     // A partial list of unbound length enumerates lengths: the object builtin's generator.
     return null;

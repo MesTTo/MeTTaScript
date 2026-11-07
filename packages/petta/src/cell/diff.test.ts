@@ -310,6 +310,11 @@ describe.each([
       agt(T) :- atom_concat(old, 1, O), T = f(O).
       ag1(X) :- agt(T), ( setarg(1, T, new), atom_length(abc, _), fail ; arg(1, T, X) ).
       ag2(L) :- findall(A, (mem(X, [p, q, r]), atom_concat(X, z, A), atom_length(abc, _)), L).
+      sz1(X) :- catch(length(_, 300000000), error(E, _), X = E).
+      sz2(X) :- catch(functor(_, f, 300000000), error(E, _), X = E).
+      sz3(L) :- length(L, 3).
+      sz4(T) :- functor(T, f, 3).
+      sz5(L) :- L = [a|T], length(L, 3), T = [_, b].
       mem(X, [X|_]).
       mem(X, [_|T]) :- mem(X, T).
       db10(X) :- assertz(w10(1)), w10(X), retract(w10(X)), \\+ w10(_).
@@ -322,8 +327,10 @@ describe.each([
     // solutions through its bag: shared variables, runtime boxes, a nested findall, and an inner findall whose goal
     // throws once it has solutions, which the outer findall's list must not hold. In ag1 only the trail holds the
     // runtime atom setarg/3 replaced, and in ag2 only the bag holds the atoms of earlier solutions, at collections.
+    // sz3 to sz5 build lists and compounds of fresh variables from a length.
     // am[verifies a-petta-cell-store.gc.atoms]
-    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7", "gv8", "gv9", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7", "gv10", "gv11", "fn1", "fn2", "wo1", "wo2", "wo3", "ps1", "tr1", "tr2", "as1", "as2", "gc1", "gc2", "gc3", "bx1", "bx2", "bx3", "bx4", "fa2", "fa3", "fa4", "fa5", "ag1", "ag2"]) {
+    // am[verifies a-petta-errors-fix-1108.length]
+    for (const name of ["db1", "db2", "db3", "db4", "db5", "db6", "db7", "db8", "db9", "db10", "sc1", "sc2", "sc3", "sc4", "sc5", "sc6", "gv1", "gv2", "gv3", "gv4", "gv5", "gv6", "gv7", "gv8", "gv9", "ns1", "ns2", "ns3", "ns4", "ns5", "ns6", "ns7", "gv10", "gv11", "fn1", "fn2", "wo1", "wo2", "wo3", "ps1", "tr1", "tr2", "as1", "as2", "gc1", "gc2", "gc3", "bx1", "bx2", "bx3", "bx4", "fa2", "fa3", "fa4", "fa5", "ag1", "ag2", "sz3", "sz4", "sz5"]) {
       const a = machines(), b = machines();
       for (const c of readClauses(src)) {
         a.m.addClause(c, true);
@@ -338,6 +345,15 @@ describe.each([
       const { m, cm } = machines();
       for (const c of readClauses(src)) m.addClause(c, true);
       expect(onCells(cm, "fa1", [mkVar()])).toStrictEqual({ answers: ['"cyclic"'], threw: false });
+    }
+    // length/2 and functor/3 asked for more cells than the heap holds raise SWI's stack limit error, which catch/3
+    // catches (SWI-Prolog 10.1.17 under a 256 MB stack limit answers the same, c-huge-size-swi-1108), where they threw
+    // a JavaScript RangeError past every catch (i-petta-length-huge-1108).
+    // am[verifies a-petta-errors-fix-1108.length]
+    {
+      const { m, cm } = machines();
+      for (const c of readClauses(src)) m.addClause(c, true);
+      for (const name of ["sz1", "sz2"]) expect(onCells(cm, name, [mkVar()]), name).toStrictEqual({ answers: ['"resource_error"("stack")'], threw: false });
     }
   });
 
