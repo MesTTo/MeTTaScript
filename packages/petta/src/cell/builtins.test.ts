@@ -185,6 +185,11 @@ const CASES: [string, (vs: Var[]) => fc.Arbitrary<Term>[]][] = [
   // are integers or variables.
   // length(L, L) has the object builtin enumerate forever too, so a variable length is a fresh one.
   ["length", (vs) => [fc.oneof(list(term(vs, 1), vs), term(vs, 1)), fc.oneof(fc.integer({ min: -1, max: 5 }) as fc.Arbitrary<Term>, fc.constant(null).map(() => mkVar() as Term))]],
+  // am[verifies a-petta-cell-store.tune.bridged]
+  ["$seek_list", (vs) => [fc.oneof(fc.integer({ min: -1, max: 4 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs), atomic()), fc.oneof(list(term(vs, 1), vs), term(vs, 1)), term(vs, 1), term(vs, 1)]],
+  ["$free_variable_set", (vs) => [fc.oneof(fc.tuple(term(vs, 1), carets(vs)).map(([t, g]) => new Struct("^", [t, g]) as Term), term(vs, 2)), term(vs, 1), term(vs, 1)]],
+  [">>", (vs) => [lambdaParams(vs), lambdaBody(vs), term(vs, 1)]],
+  [">>", (vs) => [lambdaParams(vs), lambdaBody(vs), term(vs, 1), term(vs, 1)]],
   ["msort", (vs) => [fc.oneof(list(term(vs, 1), vs), term(vs, 1)), term(vs, 1)]],
   ["sort", (vs) => [fc.oneof(list(term(vs, 1), vs), term(vs, 1)), term(vs, 1)]],
   ["keysort", (vs) => [fc.oneof(list(term(vs, 1), vs), list(fc.tuple(term(vs, 1), term(vs, 1)).map(([k, v]) => new Struct("-", [k, v]) as Term), vs)), term(vs, 1)]],
@@ -208,6 +213,27 @@ const CASES: [string, (vs: Var[]) => fc.Arbitrary<Term>[]][] = [
   ["term_to_atom", (vs) => [fc.oneof(term([], 2), fc.constantFrom<Term>(...vs)), fc.oneof(fc.constantFrom<Term>("f(X, Y, X)", "[1, 2 | T]", "'a b'", "g(", "\"s\""), fc.constantFrom<Term>(...vs))]],
 ];
 
+/** A goal under no, one or two ^ prefixes, as bagof/3 hands its Templ^Goal on. */
+function carets(vs: Var[]): fc.Arbitrary<Term> {
+  return fc.oneof(
+    term(vs, 2),
+    fc.tuple(term(vs, 1), term(vs, 2)).map(([v, g]) => new Struct("^", [v, g]) as Term),
+    fc.tuple(term(vs, 1), term(vs, 1), term(vs, 2)).map(([v, w, g]) => new Struct("^", [v, new Struct("^", [w, g])]) as Term),
+  );
+}
+/** yall parameters: a list, proper or partial, one under Free/, or another term. */
+function lambdaParams(vs: Var[]): fc.Arbitrary<Term> {
+  return fc.oneof(list(term(vs, 1), vs), fc.tuple(term(vs, 1), list(term(vs, 1), vs)).map(([f, p]) => new Struct("/", [f, p]) as Term), term(vs, 1));
+}
+/** A lambda body: goals that succeed, fail or bind, and terms that are not callable or take no arguments. */
+function lambdaBody(vs: Var[]): fc.Arbitrary<Term> {
+  return fc.oneof(
+    fc.constantFrom<Term>("true", "fail", NIL, "[]", 3),
+    fc.constantFrom<Term>(...vs),
+    fc.tuple(term(vs, 1), term(vs, 1)).map(([a, b]) => new Struct("=", [a, b]) as Term),
+    term(vs, 1).map((t) => new Struct("atom", [t]) as Term),
+  );
+}
 /** Text arguments: atoms with letters, digits, spaces and accents, strings, numbers. */
 function text(_vs: Var[]): fc.Arbitrary<Term> {
   return fc.oneof(fc.constantFrom<Term>("", "a", "ab", "abc", "a b", "é", "12", "x1", "[]", NIL), fc.constantFrom<Term>(new Str(""), new Str("ab"), new Str("é z")), fc.integer({ min: -3, max: 30 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(new Float(1.5)));

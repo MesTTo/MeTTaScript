@@ -16,7 +16,7 @@ import { Float, NIL, PrologError, Str, Struct, domainError, existenceError, inst
 import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, INT, LIS, REF, STR, boxEq, type Heap } from "./heap";
 import { copyTerm } from "../machine";
 import type { Term } from "../terms";
-import { onObjects } from "./bridge";
+import { onObjects, bridgeBuiltin } from "./bridge";
 import type { CellMachine } from "./machine";
 
 const isVarTag = (c: number): boolean => (c & 7) === REF || (c & 7) === ATV;
@@ -252,6 +252,15 @@ function varsOf(hp: Heap, c0: number): number[] {
     }
   }
   return out;
+}
+
+/** The compound name(args...) built on the heap, the atom name when there are no arguments. */
+function compoundCells(hp: Heap, name: string, args: readonly number[]): number {
+  if (args.length === 0) return hp.atom(name);
+  const q = hp.alloc(args.length + 1);
+  hp.h[q] = hp.functor(name, args.length);
+  for (let i = 0; i < args.length; i++) hp.h[q + 1 + i] = args[i]!;
+  return (q << 3) | STR;
 }
 
 /** The list of cells `items` ending in `tail`, built on the heap. */
@@ -584,17 +593,18 @@ export function installTermBuiltins(cm: CellMachine): void {
   const def = (name: string, arity: number, f: () => boolean): void => {
     cm.proc(name, arity).det = f;
   };
-  // A builtin deterministic in some modes: f answers those (true or false), null leaves the call to the object
-  // builtin's generator through the bridge (Machine.callNondet).
-  const detOr = (name: string, arity: number, f: () => boolean | null): void => {
+  // A builtin native in the modes f answers: true or false, or a goal cell to run next with its cut local; null leaves
+  // the call to the object builtin through the bridge, its generator (Machine.callNondet) or its det function, with
+  // its answers and errors as they are.
+  const detOr = (name: string, arity: number, f: () => boolean | number | null): void => {
     const key = `${name}/${arity}`;
     const b = cm.om.builtins.get(key);
     if (b === undefined) throw new Error(`cell builtins: no object builtin ${key}`);
+    const run = b.nondet === undefined ? bridgeBuiltin(key, b) : null;
     cm.proc(name, arity).ctl = (m, n, cc) => {
       const r = f();
-      if (r === null) return m.callNondet(key, b, n, cc);
-      if (!r) return m.fail();
-      return hp.wakeups.length !== 0 ? m.wake(cc) : m.proceed();
+      if (r !== null) return m.answer(r, cc);
+      return run === null ? m.callNondet(key, b, n, cc) : m.answer(run(m, n), cc);
     };
   };
   const unify = (x: number, y: number): boolean => hp.unify(x, y);
@@ -709,6 +719,73 @@ export function installTermBuiltins(cm: CellMachine): void {
     // A partial list of unbound length enumerates lengths: the object builtin's generator.
     return null;
   });
+
+  // '$seek_list'(+N, +List, -RestN, -RestList), nth0/nth1's skip: past up to N cells of List, RestN of N left.
+  // am[implements a-petta-cell-store.tune.bridged]
+  def("$seek_list", 4, () => {
+    let i = intArg(hp, A[0]!);
+    if (i < 0) return false;
+    let t = hp.deref(A[1]!);
+    while (i > 0 && (t & 7) === LIS) {
+      i--;
+      t = hp.deref(hp.h[(t >> 3) + 1]!);
+    }
+    return unify(A[2]!, hp.int(i)) && unify(A[3]!, t);
+  });
+
+  // '$free_variable_set'(Templ^Goal, Goal1, Witness), bagof/3's: Goal past its ^ prefixes, and v/N of its variables
+  // in order that neither Templ nor a ^ binds, v when none (library.ts reads the first two arguments of any compound
+  // of two or more; another term goes to it).
+  // am[implements a-petta-cell-store.tune.bridged]
+  const F_HAT = hp.functor("^", 2);
+  detOr("$free_variable_set", 3, () => {
+    const d = hp.deref(A[0]!);
+    if ((d & 7) !== STR || hp.funArity[hp.h[d >> 3]! >> 3]! < 2) return null;
+    const bound = new Set(varsOf(hp, hp.h[(d >> 3) + 1]!));
+    let goal = hp.deref(hp.h[(d >> 3) + 2]!);
+    while ((goal & 7) === STR && hp.h[goal >> 3] === F_HAT) {
+      for (const v of varsOf(hp, hp.h[(goal >> 3) + 1]!)) bound.add(v);
+      goal = hp.deref(hp.h[(goal >> 3) + 2]!);
+    }
+    const free = varsOf(hp, goal).filter((v) => !bound.has(v));
+    return unify(A[1]!, goal) && unify(A[2]!, free.length === 0 ? hp.atom("v") : compoundCells(hp, "v", free));
+  });
+
+  // yall's Params>>Lambda called with k more arguments (library.ts): a copy of Params and Lambda, sharing the
+  // variables of Free in Free/Params, its parameters unified with the arguments and the rest appended to its body,
+  // which runs next with its cut local. Params not a proper list goes to the object builtin, which throws before it
+  // binds anything; a body taking arguments that is not an atom or a compound throws as the object builtin does.
+  // am[implements a-petta-cell-store.tune.bridged]
+  const F_SLASH = hp.functor("/", 2), F_L = hp.functor("l", 2);
+  for (let k = 0; k <= 7; k++)
+    detOr(">>", 2 + k, () => {
+      let ps = hp.deref(A[0]!);
+      const map = new Map<number, number>();
+      if ((ps & 7) === STR && hp.h[ps >> 3] === F_SLASH) {
+        for (const v of varsOf(hp, hp.h[(ps >> 3) + 1]!)) map.set(v, v);
+        ps = hp.deref(hp.h[(ps >> 3) + 2]!);
+      }
+      const q = hp.alloc(3);
+      hp.h[q] = F_L;
+      hp.h[q + 1] = ps;
+      hp.h[q + 2] = A[1]!;
+      const copied = copyCells(hp, (q << 3) | STR, map, false) >> 3;
+      const params = properCells(hp, hp.h[copied + 1]!);
+      if (params === null) return null;
+      let i = 0;
+      for (; i < params.length && i < k; i++) if (!unify(params[i]!, A[2 + i]!)) return false;
+      const body = hp.h[copied + 2]!;
+      if (i === k) return body;
+      // The parameters are bound by now, so the body's errors are thrown here as library.ts addCallArgs throws them.
+      const g = hp.deref(body);
+      const extra = Array.from(A.subarray(2 + i, 2 + k));
+      if ((g & 7) === ATM && g !== hp.NIL) return compoundCells(hp, hp.atomNames[g >> 3]!, extra);
+      if (isVarTag(g)) throw instantiationError();
+      if ((g & 7) !== STR) throw typeError("callable", culprit(hp, g));
+      const p = g >> 3, f = hp.h[p]! >> 3, own: number[] = [];
+      for (let j = 1; j <= hp.funArity[f]!; j++) own.push(hp.h[p + j]!);
+      return compoundCells(hp, hp.funNames[f]!, [...own, ...extra]);
+    });
 
   // Sorting: Array.prototype.sort is stable, as the object builtins rely on.
   def("msort", 2, () => unify(A[1]!, listCells(hp, properListArg(hp, A[0]!).sort((x, y) => compareCells(hp, x, y)), hp.NIL)));

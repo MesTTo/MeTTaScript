@@ -1210,6 +1210,17 @@ export class CellMachine {
     return (q << 3) | STR;
   }
 
+  /**
+   * Go on after a builtin answered `r`: fail on false, proceed on true, or run the goal cell it gave with its cut
+   * local, after the hooks the call woke in either case, as flushWakeups puts them in front of pushed goals.
+   */
+  answer(r: boolean | number, cc: number): Code | null {
+    if (r === false) return this.fail();
+    const woke = this.hp.wakeups.length !== 0;
+    if (r === true) return woke ? this.wake(cc) : this.proceed();
+    return this.goal(woke ? this.conj(this.wakeGoal(), r) : r, this.R[RB]!, cc);
+  }
+
   /** Call `p` with A[0..n), the continuation being the current one. */
   callw(p: CellProc, n: number, cc: number): Code | null {
     // A call port is where the collector runs: compiled code calls in tail position, so only A[0..n), the control
@@ -1229,16 +1240,8 @@ export class CellMachine {
       if (b !== undefined) {
         if (b.nondet !== undefined) p.ctl = (cm, k, c) => cm.callNondet(p.key, b, k, c);
         else {
-          // A bridged det builtin answers true or false, or a goal cell it pushed, run next with its cut local after
-          // the hooks the call woke, as flushWakeups puts them in front of pushed goals.
           const run = bridgeBuiltin(p.key, b);
-          p.ctl = (cm, k, c) => {
-            const r = run(cm, k);
-            if (r === false) return cm.fail();
-            const woke = cm.hp.wakeups.length !== 0;
-            if (r === true) return woke ? cm.wake(c) : cm.proceed();
-            return cm.goal(woke ? cm.conj(cm.wakeGoal(), r) : r, cm.R[RB]!, c);
-          };
+          p.ctl = (cm, k, c) => cm.answer(run(cm, k), c);
         }
         return this.callw(p, n, cc);
       }
