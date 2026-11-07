@@ -54,7 +54,9 @@ export function functorKey(name: string, arity: number): string {
 function termKey(t: Term): Key | null {
   if (typeof t === "string" || typeof t === "number" || typeof t === "bigint") return t;
   if (t instanceof Var || t instanceof Slot) return null;
-  if (t instanceof Ground) return termKey(t.t);
+  // A Ground held as cells answers from its root cell, without decoding (cell/ground.ts).
+  // am[implements a-petta-next-1108.speed.cut.ground]
+  if (t instanceof Ground) return t.cells === null ? termKey(t.t) : t.cells.name === null ? LIST_KEY : functorKey(t.cells.name, t.cells.arity);
   if (t instanceof Struct) return functorKey(t.name, t.args.length);
   if (t instanceof Cons) return LIST_KEY;
   if (t === NIL) return NIL_KEY;
@@ -116,7 +118,7 @@ function cmpKeyOrder(a: Key, b: Key): number {
 
 /** The arguments of a stored or live compound: a structure's arguments, a list cell's head and tail. */
 function compoundArgs(t: Term): Term[] | null {
-  if (t instanceof Ground) return compoundArgs(t.t);
+  if (t instanceof Ground) return t.cells === null ? compoundArgs(t.t) : t.cells.args();
   if (t instanceof Struct) return t.args;
   if (t instanceof Cons) return [t.head, t.tail];
   return null;

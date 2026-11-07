@@ -173,6 +173,15 @@ export class Heap {
   }
 
   /**
+   * Whether atom cell `c` is pinned, so no collection frees or reuses its id: a stored term may keep its cell
+   * (cell/ground.ts), where an atom a run made is kept by name.
+   * am[implements a-petta-next-1108.speed.cut.ground]
+   */
+  pinned(c: number): boolean {
+    return this.atomPinned[c >> 3] === 1;
+  }
+
+  /**
    * The cell of atom `name` for a term a run builds in cells: a collection in the main context frees it once no live
    * cell, trail entry or findall bag holds it, as SWI collects atoms (pl-atom.c), unless `atom` pinned it.
    * am[implements a-petta-cell-store.gc.atoms]

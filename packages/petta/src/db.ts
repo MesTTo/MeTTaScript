@@ -4,9 +4,10 @@
 
 
 // Purpose: the clause database: predicates as ordered clause lists under SWI's logical update view, an image's
-// clauses kept undecoded until a predicate's first read; which clauses a call scans is SWI's own clause selection
-// (swi-index.ts), told of every change through a ClauseObserver; and the ground-term hash that argument hash indexes
-// compare, whose leaf mixers the cell heap's hash shares.
+// clauses kept undecoded until a predicate's first read and the ground subterms of a clause asserted on cells kept
+// as cells until an object reader asks; which clauses a call scans is SWI's own clause selection (swi-index.ts), told
+// of every change through a ClauseObserver; and the ground-term hash that argument hash indexes compare, whose leaf
+// mixers the cell heap's hash shares.
 // am[implements a-pe-runtime]
 
 import { Cons, Float, NIL, Str, Struct, Var, deref, type Term } from "./terms";
@@ -64,9 +65,38 @@ export class Clause {
   }
 }
 
-/** A stored clause's ground compound subterm, shared by every renaming instead of copied. */
+/**
+ * A ground compound kept as cells copied off a cell heap (cell/ground.ts CellGround), the form a clause asserted on
+ * cells keeps its ground subterms in: one V8 object a subterm where object terms took one or two a node
+ * (c-msf-objects-1108), decoded into object terms when an object reader first asks.
+ * am[implements a-petta-next-1108.speed.cut.ground]
+ */
+export interface GroundCells {
+  /** The term as object terms. */
+  decode(): Term;
+  /** The root's functor name, null for a list cell. */
+  readonly name: string | null;
+  readonly arity: number;
+  /** The root's arguments as stored terms: atomic ones as terms, compound ones as Ground holders over the same cells. */
+  args(): Term[];
+}
+
+/**
+ * A stored clause's ground compound subterm, shared by every renaming instead of copied: an object term, or the cells
+ * an assert on cells copied it as, decoded into `t` on its first read.
+ */
 export class Ground {
-  constructor(public readonly t: Term) {}
+  private term: Term | null;
+  constructor(
+    t: Term | null,
+    readonly cells: GroundCells | null = null,
+  ) {
+    this.term = t;
+  }
+
+  get t(): Term {
+    return (this.term ??= this.cells!.decode());
+  }
 }
 
 /**

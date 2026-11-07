@@ -7,11 +7,13 @@
 // built body through the meta-call interpreter, made without V8 compiling anything, until hot enough for generated
 // code (c-cold-plan-facts-1106, a-petta-cell-store.compile.rulecold). The program has one term program per head argument in order; matching one against an
 // argument cell reads it where it is bound (read mode) and builds the template where it is unbound (write mode), as the
-// generated head code does, constants compared as canonical cells and boxes by content through unification.
+// generated head code does, constants compared as canonical cells and boxes by content through unification. A ground
+// subterm an assert on this machine kept as cells (ground.ts) is copied onto the heap in one pass.
 // am[implements a-petta-cell-store.compile.cold]
 
 import { Cons, Float, NIL, Str, Struct, type Term } from "../terms";
 import { Ground, Slot, type Clause } from "../db";
+import { CellGround } from "./ground";
 import { ATV, BOX, LIS, REF, STR, type Heap } from "./heap";
 
 /** [VAR1, i]: slot i's first occurrence takes the cell. */
@@ -249,7 +251,20 @@ function atomicCell(hp: Heap, t: Term): number {
  * Build template t0 on the heap as build does from a program: a slot stamped `mark` in `seen` is its value in `vals`,
  * another a fresh variable that joins them; a list's spine is built without recursion on its tail. Time: its size.
  */
+/**
+ * The cells a stored ground term holds when this heap can copy them in (cell/ground.ts): an assert on this machine
+ * made them, so their atom and functor ids are this heap's. Null for any other term.
+ * am[implements a-petta-next-1108.speed.cut.ground]
+ */
+function heldCells(hp: Heap, t: Term): CellGround | null {
+  if (!(t instanceof Ground)) return null;
+  const cells = t.cells;
+  return cells instanceof CellGround && cells.hp === hp ? cells : null;
+}
+
 function buildTerm(hp: Heap, t0: Term, vals: Int32Array, seen: Int32Array, mark: number): number {
+  const cg = heldCells(hp, t0);
+  if (cg !== null) return cg.copyTo(hp);
   const t = t0 instanceof Ground ? t0.t : t0;
   if (t instanceof Slot) {
     if (seen[t.i] === mark) return vals[t.i]!;
@@ -266,6 +281,11 @@ function buildTerm(hp: Heap, t0: Term, vals: Int32Array, seen: Int32Array, mark:
     for (;;) {
       const r = rest as Cons;
       hp.h[last] = buildTerm(hp, r.head, vals, seen, mark);
+      const cells = heldCells(hp, r.tail);
+      if (cells !== null) {
+        hp.h[last + 1] = cells.copyTo(hp);
+        return (first << 3) | LIS;
+      }
       rest = r.tail instanceof Ground ? r.tail.t : r.tail;
       if (!(rest instanceof Cons)) break;
       const next = hp.alloc(2);
@@ -286,6 +306,8 @@ function buildTerm(hp: Heap, t0: Term, vals: Int32Array, seen: Int32Array, mark:
 
 /** Unify template t0 with cell c0 as match does from a program, slots as buildTerm takes them. */
 function matchTermOf(hp: Heap, t0: Term, c0: number, vals: Int32Array, seen: Int32Array, mark: number): boolean {
+  const cg = heldCells(hp, t0);
+  if (cg !== null) return hp.unify(c0, cg.copyTo(hp));
   let t = t0 instanceof Ground ? t0.t : t0;
   let c = c0;
   // A list's tail is matched in this loop, so a long list in a head takes no stack.
@@ -303,6 +325,8 @@ function matchTermOf(hp: Heap, t0: Term, c0: number, vals: Int32Array, seen: Int
       if (tag === LIS) {
         const p = d >> 3;
         if (!matchTermOf(hp, t.head, hp.h[p]!, vals, seen, mark)) return false;
+        const cells = heldCells(hp, t.tail);
+        if (cells !== null) return hp.unify(hp.h[p + 1]!, cells.copyTo(hp));
         t = t.tail instanceof Ground ? t.tail.t : t.tail;
         c = hp.h[p + 1]!;
         continue;
