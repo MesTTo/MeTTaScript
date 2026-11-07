@@ -4,7 +4,8 @@
 
 
 // Purpose: the clause database: predicates as ordered clause lists under SWI's logical update view; which clauses
-// a call scans is SWI's own clause selection (swi-index.ts), told of every change through a ClauseObserver.
+// a call scans is SWI's own clause selection (swi-index.ts), told of every change through a ClauseObserver; and the
+// ground-term hash that argument hash indexes compare, whose leaf mixers the cell heap's hash shares.
 // am[implements a-pe-runtime]
 
 import { Cons, Float, NIL, Str, Struct, Var, deref, type Term } from "./terms";
@@ -16,16 +17,23 @@ export class Slot {
 }
 
 export class Clause {
-  /** Generation in which the clause was retracted; Infinity while it lives. */
-  died = Infinity;
+  /**
+   * Generation in which the clause was retracted, 0 while it lives (generations start at 1): a small integer V8 keeps
+   * in the object, where Infinity kept a heap number per clause (c-fact-bytes-1107). Read and written as `died`.
+   * am[implements a-petta-cell-store.tune.clause-bytes]
+   */
+  private diedAt = 0;
   /** The file a consult loaded the clause from (clause_property/2 file(F)); null for asserted clauses. */
   file: string | null = null;
   /**
-   * groundHash of each head argument (null where it has a variable), computed on first use (clauseArgHash); a head of
-   * one argument holds its hash directly, so a predicate of a million one-argument facts keeps no array per clause.
+   * groundHash of each head argument (null where it has a variable), computed on first use (clauseArgHash): a head of
+   * one argument holds its hash directly, and a head whose arguments are all atomic or variables holds false and has
+   * each hashed again when asked, so a predicate of a million facts keeps no array per clause (c-fact-bytes-1107); a
+   * head with a compound argument keeps the array, since hashing a compound walks it.
    * am[implements a-petta-speed-1105.memory.per-clause]
+   * am[implements a-petta-cell-store.tune.clause-bytes]
    */
-  argHashes: (number | null)[] | number | null | undefined = undefined;
+  argHashes: (number | null)[] | number | null | false | undefined = undefined;
   /** The index key of the first head argument (swi-index.ts ClauseList.keyOf), computed on first use. */
   key0: string | number | bigint | null | undefined = undefined;
   /** The compiled body (compile.ts), made once the clause has been entered COMPILE_AFTER times; null until then. */
@@ -44,6 +52,15 @@ export class Clause {
     public readonly born: number,
     public readonly seq: number,
   ) {}
+
+  /** Generation in which the clause was retracted; Infinity while it lives. */
+  get died(): number {
+    return this.diedAt === 0 ? Infinity : this.diedAt;
+  }
+
+  set died(gen: number) {
+    this.diedAt = gen === Infinity ? 0 : gen;
+  }
 }
 
 /** A stored clause's ground compound subterm, shared by every renaming instead of copied. */
@@ -243,20 +260,87 @@ export function compileClause(head: Term, body: Term): { head: Term; body: Term;
 }
 
 /**
- * A 32-bit FNV-1a hash of a ground term's structure, null if it has a variable: equal ground terms hash equally and
- * unify only if equal, so a differing hash rules a clause out without unifying (1 and 1.0, atoms and strings, [] and
- * '[]' all hash apart). Stored clause terms are read through Slot (a variable) and Ground holders.
+ * FNV-1a's 32-bit offset basis and prime (groundHash).
+ * am[implements a-hp-speed]
+ */
+export const FNV_BASIS = 0x811c9dc5;
+const FNV_PRIME = 0x01000193;
+
+/** FNV-1a state h after code unit c. */
+const mixCode = (h: number, c: number): number => Math.imul(h ^ c, FNV_PRIME);
+
+/** FNV-1a state h after the UTF-16 code units of s. Time: s's length. */
+function mixText(h: number, s: string): number {
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), FNV_PRIME);
+  return h;
+}
+
+/** mixInt's digits, least significant first: a safe integer has at most 16. */
+const DIGITS = new Uint8Array(16);
+
+/**
+ * FNV-1a state h after the decimal text of safe integer n, as mixText(h, String(n)) gives it, without making the text.
+ * Time: n's digits.
+ * am[implements a-petta-cell-store.tune.clause-bytes]
+ */
+function mixInt(h: number, n: number): number {
+  if (n < 0) {
+    h = mixCode(h, 0x2d);
+    n = -n;
+  }
+  let k = 0;
+  do {
+    const d = n % 10;
+    DIGITS[k++] = d;
+    n = (n - d) / 10;
+  } while (n > 0);
+  while (k > 0) h = mixCode(h, 0x30 + DIGITS[--k]!);
+  return h;
+}
+
+/**
+ * groundHash's leaves and compound headers, each the FNV-1a state h after the leaf's text: "a" name NUL for an atom,
+ * "i" digits NUL for an integer, "f" String(v) NUL for a float ("-0" for negative zero), "s" length ":" text for a
+ * string, "n" for [], "l" for a list cell and "c" name "/" arity NUL for a compound. The cell heap's groundHash mixes
+ * its cells through these, so a cell term hashes as its object term does.
+ * am[implements a-petta-cell-store.tune.clause-bytes]
+ */
+export const hashAtom = (h: number, name: string): number => mixCode(mixText(mixCode(h, 0x61), name), 0);
+export const hashInt = (h: number, n: number | bigint): number =>
+  mixCode(typeof n === "number" ? mixInt(mixCode(h, 0x69), n) : mixText(mixCode(h, 0x69), String(n)), 0);
+export const hashFloat = (h: number, v: number): number => mixCode(mixText(mixCode(h, 0x66), Object.is(v, -0) ? "-0" : String(v)), 0);
+export const hashStr = (h: number, s: string): number => mixText(mixCode(mixInt(mixCode(h, 0x73), s.length), 0x3a), s);
+export const hashNil = (h: number): number => mixCode(h, 0x6e);
+export const hashList = (h: number): number => mixCode(h, 0x6c);
+export const hashFunctor = (h: number, name: string, n: number): number => mixCode(mixInt(mixCode(mixText(mixCode(h, 0x63), name), 0x2f), n), 0);
+
+/** groundHash of an atomic term, from state h; null for a variable, a slot or a compound. */
+function atomicHash(h: number, t: Term): number | null {
+  if (typeof t === "string") return hashAtom(h, t);
+  if (typeof t === "number" || typeof t === "bigint") return hashInt(h, t);
+  if (t instanceof Float) return hashFloat(h, t.v);
+  if (t instanceof Str) return hashStr(h, t.s);
+  if (t === NIL) return hashNil(h);
+  return null;
+}
+
+/**
+ * A 32-bit FNV-1a hash of a ground term's structure as a signed integer (a small integer to V8), null if it has a
+ * variable: equal ground terms hash equally and unify only if equal, so a differing hash rules a clause out without
+ * unifying (1 and 1.0, atoms and strings, [] and '[]' all hash apart). Stored clause terms are read through Slot (a
+ * variable) and Ground holders. An atomic term is hashed without allocating.
  * Time: linear in the size of the term.
  * am[implements a-hp-speed]
  */
 export function groundHash(t0: Term): number | null {
-  let h = 0x811c9dc5;
-  const mix = (s: string): void => {
-    for (let i = 0; i < s.length; i++) {
-      h ^= s.charCodeAt(i);
-      h = Math.imul(h, 0x01000193);
-    }
-  };
+  let t1 = t0 instanceof Ground ? t0.t : t0;
+  if (t1 instanceof Slot) return null;
+  t1 = deref(t1);
+  if (!(t1 instanceof Cons || t1 instanceof Struct)) {
+    const a = atomicHash(FNV_BASIS, t1);
+    return a === null ? null : a | 0;
+  }
+  let h = FNV_BASIS;
   const stack: Term[] = [t0];
   while (stack.length > 0) {
     let t = stack.pop()!;
@@ -264,29 +348,40 @@ export function groundHash(t0: Term): number | null {
     if (t instanceof Slot) return null;
     t = deref(t);
     if (t instanceof Var) return null;
-    if (typeof t === "string") mix("a" + t + "\u0000");
-    else if (typeof t === "number" || typeof t === "bigint") mix("i" + t + "\u0000");
-    else if (t instanceof Float) mix("f" + (Object.is(t.v, -0) ? "-0" : String(t.v)) + "\u0000");
-    else if (t instanceof Str) mix("s" + t.s.length + ":" + t.s);
-    else if (t === NIL) mix("n");
-    else if (t instanceof Cons) {
-      mix("l");
+    if (t instanceof Cons) {
+      h = hashList(h);
       stack.push(t.tail, t.head);
     } else if (t instanceof Struct) {
-      mix("c" + t.name + "/" + t.args.length + "\u0000");
+      h = hashFunctor(h, t.name, t.args.length);
       for (let i = t.args.length - 1; i >= 0; i--) stack.push(t.args[i]!);
-    } else return null;
+    } else {
+      const a = atomicHash(h, t);
+      if (a === null) return null;
+      h = a;
+    }
   }
-  return h >>> 0;
+  return h | 0;
 }
 
-/** The hashes of a clause's head arguments (cached on the clause). */
-/** groundHash of head argument `i` of `c`, null where it has a variable. */
+/** Clause.argHashes for a head: one argument's hash itself, false when every argument is atomic or a slot, else the array. */
+function headArgHashes(head: Term): (number | null)[] | number | null | false {
+  const args = head instanceof Struct ? head.args : [];
+  if (args.length === 1) return groundHash(args[0]!);
+  for (const a of args) if (a instanceof Ground || a instanceof Cons || a instanceof Struct) return args.map(groundHash);
+  return false;
+}
+
+/**
+ * groundHash of head argument `i` of `c`, null where it has a variable. Time: the argument's size the first time for a
+ * head with a compound argument, then constant; an atomic argument's text each time otherwise.
+ * am[implements a-petta-cell-store.tune.clause-bytes]
+ */
 export function clauseArgHash(c: Clause, i: number): number | null {
   let h = c.argHashes;
-  if (h === undefined) {
-    const args = c.head instanceof Struct ? c.head.args : [];
-    h = c.argHashes = args.length === 1 ? groundHash(args[0]!) : args.map(groundHash);
+  if (h === undefined) h = c.argHashes = headArgHashes(c.head);
+  if (h === false) {
+    const a = (c.head as Struct).args[i];
+    return a === undefined ? null : groundHash(a);
   }
   if (typeof h === "number" || h === null) return i === 0 ? h : null;
   return h[i] ?? null;

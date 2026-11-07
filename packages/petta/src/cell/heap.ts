@@ -14,6 +14,7 @@
 // am[implements a-petta-cell-store.terms]
 
 import { Cons, Float, NIL, Str, Struct, Var, deref as derefObj, mkVar, type Term } from "../terms";
+import { FNV_BASIS, hashAtom, hashFloat, hashFunctor, hashInt, hashList, hashNil, hashStr } from "../db";
 
 /** Cell tags, the cell's low three bits (c-cell-terms-design-1106). */
 export const REF = 0;
@@ -514,52 +515,49 @@ export class Heap {
   }
 
   /**
-   * db.ts groundHash of the term at cell c0: the same FNV-1a over the same text as of its decoded object term, null
-   * where it has a variable, so a ground call argument is compared with the hashes stored for clause arguments
-   * (db.ts ArgHashIndex). Time: the term's size.
+   * db.ts groundHash of the term at cell c0: the same FNV-1a over the same text as of its decoded object term, mixed
+   * by db.ts's own leaf mixers, null where it has a variable, so a ground call argument is compared with the hashes
+   * stored for clause arguments (db.ts ArgHashIndex). Time: the term's size.
    * am[implements a-petta-speed-1105.outliers.spaces]
+   * am[implements a-petta-cell-store.tune.clause-bytes]
    */
   groundHash(c0: number): number | null {
-    let h = 0x811c9dc5;
-    const mix = (s: string): void => {
-      for (let i = 0; i < s.length; i++) {
-        h ^= s.charCodeAt(i);
-        h = Math.imul(h, 0x01000193);
-      }
-    };
-    const st: number[] = [c0];
-    while (st.length > 0) {
-      const c = this.deref(st.pop()!);
+    let h = FNV_BASIS;
+    let st: number[] | null = null;
+    for (let next = c0; ; ) {
+      const c = this.deref(next);
       switch (c & 7) {
         case ATM:
-          mix(c === this.NIL ? "n" : "a" + this.atomNames[c >> 3] + "\u0000");
+          h = c === this.NIL ? hashNil(h) : hashAtom(h, this.atomNames[c >> 3]!);
           break;
         case INT:
-          mix("i" + (c >> 3) + "\u0000");
+          h = hashInt(h, c >> 3);
           break;
         case BOX: {
           const v = this.boxed(c);
-          if (typeof v === "number" || typeof v === "bigint") mix("i" + v + "\u0000");
-          else if (v instanceof Float) mix("f" + (Object.is(v.v, -0) ? "-0" : String(v.v)) + "\u0000");
-          else if (v instanceof Str) mix("s" + v.s.length + ":" + v.s);
+          if (typeof v === "number" || typeof v === "bigint") h = hashInt(h, v);
+          else if (v instanceof Float) h = hashFloat(h, v.v);
+          else if (v instanceof Str) h = hashStr(h, v.s);
           else return null;
           break;
         }
         case LIS:
-          mix("l");
-          st.push(this.h[(c >> 3) + 1]!, this.h[c >> 3]!);
+          h = hashList(h);
+          (st ??= []).push(this.h[(c >> 3) + 1]!, this.h[c >> 3]!);
           break;
         case STR: {
           const p = c >> 3, f = this.h[p]! >> 3, n = this.funArity[f]!;
-          mix("c" + this.funNames[f] + "/" + n + "\u0000");
+          h = hashFunctor(h, this.funNames[f]!, n);
+          st ??= [];
           for (let i = n; i >= 1; i--) st.push(this.h[p + i]!);
           break;
         }
         default:
           return null;
       }
+      if (st === null || st.length === 0) return h | 0;
+      next = st.pop()!;
     }
-    return h >>> 0;
   }
 
   // ---- the bridge to object terms ----
