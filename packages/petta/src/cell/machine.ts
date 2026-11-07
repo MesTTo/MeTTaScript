@@ -95,9 +95,14 @@ const FIBER_S = 1 << 18;
 /** Trampoline bounces a worker runs before the next takes its turn, as the object machine's workers run SLICE goals. */
 const SLICE = 2000;
 
-/** A computation's state beyond its stack frames: registers, heap array, trail, queue, and where its stack must end. */
+/**
+ * A computation's state beyond its stack frames: registers, the arguments of a call left pending for the trampoline
+ * (callLater), which a slice can end on, heap array, trail, queue, and where its stack must end.
+ * am[implements a-cell-fiber-args-1107]
+ */
 interface Ctx {
   readonly R: Int32Array;
+  readonly A: Int32Array;
   readonly h: Int32Array;
   readonly boxes: unknown[];
   readonly top: number;
@@ -109,6 +114,7 @@ interface Ctx {
   readonly pend: CellProc | null;
   readonly pendN: number;
   readonly pendCC: number;
+  readonly cleanups: number;
   readonly result: boolean;
   readonly sLimit: number;
   readonly inFiber: boolean;
@@ -921,6 +927,7 @@ export class CellMachine {
     const hp = this.hp;
     return {
       R: this.R.slice(),
+      A: this.A.slice(0, this.pendN),
       h: hp.h,
       boxes: hp.boxes,
       top: hp.top,
@@ -932,6 +939,7 @@ export class CellMachine {
       pend: this.pend,
       pendN: this.pendN,
       pendCC: this.pendCC,
+      cleanups: this.cleanups,
       result: this.result,
       sLimit: this.sLimit,
       inFiber: this.inFiber,
@@ -944,6 +952,7 @@ export class CellMachine {
   private loadCtx(c: Ctx): void {
     const hp = this.hp;
     this.R.set(c.R);
+    this.A.set(c.A);
     hp.h = c.h;
     hp.boxes = c.boxes;
     hp.top = c.top;
@@ -955,6 +964,7 @@ export class CellMachine {
     this.pend = c.pend;
     this.pendN = c.pendN;
     this.pendCC = c.pendCC;
+    this.cleanups = c.cleanups;
     this.result = c.result;
     this.sLimit = c.sLimit;
     this.inFiber = c.inFiber;
@@ -979,6 +989,7 @@ export class CellMachine {
       this.sLimit = base + FIBER_S;
       this.inFiber = true;
       this.roots = [];
+      this.cleanups = 0;
       this.scheduleCollection();
       const bar = base + ENV;
       S[base] = base;

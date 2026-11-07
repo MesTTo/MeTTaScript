@@ -395,15 +395,24 @@ describe.each([
       ca6(L) :- findall(X, concurrent_and(mem(X, [1, 2, 3]), (X > 1, !)), L).
       ca7(L) :- findall(X, concurrent_and(mem(X, [5, 3]), (count(X), findall(Y, mem(Y, [X, X]), [_, _]))), L).
       ca8(L) :- findall(X-Z, (concurrent_and(mem(X, [1, 2]), true), mem(Z, [a])), L).
+      cnt([], N, N).
+      cnt([_|T], A, N) :- A1 is A + 1, cnt(T, A1, N).
+      ca9(S) :- findall(N-C, concurrent_and(mem(N, [15000, 12000]), (length(Ls, N), cnt(Ls, 0, C))), L), msort(L, S).
     `;
-    // ca8 calls after each solution, so a collection meets the group's pair, which only its choicepoint holds.
-    for (const name of ["ca1", "ca2", "ca3", "ca4", "ca5", "ca6", "ca7", "ca8"]) {
+    // ca8 calls after each solution, so a collection meets the group's pair, which only its choicepoint holds; ca9's
+    // workers count lists past a slice, each slice ending with a call pending on its own list and counter.
+    // am[verifies a-cell-fiber-args-1107]
+    for (const name of ["ca1", "ca2", "ca3", "ca4", "ca5", "ca6", "ca7", "ca8", "ca9"]) {
+      // ca9's 27000 calls would each collect a worker's whole list at every call port; every 4096 cells still collects.
+      const every = gcEvery;
+      if (name === "ca9" && every === 0) gcEvery = 1 << 12;
       const a = machines(), b = machines();
       for (const c of readClauses(src)) {
         a.m.addClause(c, true);
         b.m.addClause(c, true);
       }
       expect(onCells(b.cm, name, [mkVar()]), name).toStrictEqual(onObjects(a.m, name, [mkVar()]));
+      gcEvery = every;
     }
   });
 
