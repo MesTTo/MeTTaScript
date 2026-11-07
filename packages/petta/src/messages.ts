@@ -84,6 +84,11 @@ function formalText(f: Term): string {
       return `No permission to ${w(a[0]!)} ${w(a[1]!)} \`${p(a[2]!)}'`;
     case "representation_error/1":
       return `Cannot represent due to \`${w(a[0]!)}'`;
+    // SWI's messages.pl: out_of_stack's headline for a stack overflow, which here carries no stack_overflow dict to
+    // give the limit and sizes, and iso_message's wording for any other resource (c-stack-limit-1107).
+    // am[implements a-petta-cell-store.control.overflow]
+    case "resource_error/1":
+      return deref(a[0]!) === "stack" ? "Stack limit exceeded" : `Not enough resources: ${w(a[0]!)}`;
   }
   const items = listToArray(f);
   return "Unknown error term: " + p(items === null ? f : f);

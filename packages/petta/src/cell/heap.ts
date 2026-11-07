@@ -13,7 +13,7 @@
 // ways, which is how builtins written for objects run on cells.
 // am[implements a-petta-cell-store.terms]
 
-import { Cons, Float, NIL, Str, Struct, Var, deref as derefObj, mkVar, type Term } from "../terms";
+import { Cons, Float, NIL, PrologError, Str, Struct, Var, deref as derefObj, mkVar, type Term } from "../terms";
 import { FNV_BASIS, hashAtom, hashFloat, hashFunctor, hashInt, hashList, hashNil, hashStr } from "../db";
 
 /** Cell tags, the cell's low three bits (c-cell-terms-design-1106). */
@@ -37,6 +37,15 @@ export const GLOBAL_SLOTS = 4096;
 /** Trail entries at first; the trail doubles when full, up to TRAIL_MAX (a-petta-cell-store.control.bounds). */
 const TRAIL_START = 1 << 16;
 const TRAIL_MAX = 1 << 28;
+
+/**
+ * The error a run gets when a cell stack runs out, the heap, the trail or the control stack: SWI-Prolog's
+ * error(resource_error(stack), _), which catch/3 catches as SWI's own stack limit error (c-stack-limit-1107).
+ * am[implements a-petta-cell-store.control.overflow]
+ */
+export function stackExhausted(): PrologError {
+  return new PrologError(new Struct("error", [new Struct("resource_error", ["stack"]), mkVar()]));
+}
 
 /** A woken attribute: the attributed variable's attribute list and the value it was bound to (attr_unify_hook). */
 export interface Wakeup {
@@ -253,7 +262,7 @@ export class Heap {
   /** `n` cells from the heap top; the caller fills them. */
   alloc(n: number): number {
     const a = this.top;
-    if (a + n > HEAP_CELLS) throw new Error("cell heap exhausted");
+    if (a + n > HEAP_CELLS) throw stackExhausted();
     this.top = a + n;
     return a;
   }
@@ -309,7 +318,7 @@ export class Heap {
    */
   private growTrail(): void {
     const n = this.trail.length * 2;
-    if (n > TRAIL_MAX) throw new Error("cell trail exhausted");
+    if (n > TRAIL_MAX) throw stackExhausted();
     const t = new Int32Array(n), o = new Int32Array(n);
     t.set(this.trail);
     o.set(this.trailOld);

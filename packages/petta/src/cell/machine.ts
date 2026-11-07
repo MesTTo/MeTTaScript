@@ -21,7 +21,7 @@ import { CellArgs } from "./args";
 import { Bag } from "./bag";
 import { bridgeBuiltin, nextSolution, objectTrailMark, startNondet, takeSolution, type BridgeRun } from "./bridge";
 import { build, headProgram, matchHead, runHead, type HeadProgram } from "./headprog";
-import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, Heap, INT, REF, STR, type TrailState, type Wakeup } from "./heap";
+import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, Heap, INT, REF, STR, stackExhausted, type TrailState, type Wakeup } from "./heap";
 
 /** Code the trampoline runs: the code to run next, or null at a run's exit. */
 export type Code = () => Code | null;
@@ -58,8 +58,8 @@ export const ENV = 5;
 /**
  * A choicepoint at b: S[b] previous, S[b+1] kind, S[b+2] trail top, S[b+3] E, S[b+4] CP, S[b+5] cut barrier,
  * S[b+6] catch context, S[b+7] next candidate, S[b+8] the alternative's code id, S[b+9] heap top, S[b+10] the saved
- * argument count, the argument cells after; SO[b], SO[b+1] and SO[b+2] a Clauses choicepoint's scan, predicate and
- * call argument hashes, GEN[b] its generation.
+ * argument count, the argument cells after; SO[b] to SO[b+3] a Clauses choicepoint's scan, predicate, call argument
+ * hashes and database generation.
  */
 export const CPH = 11;
 
@@ -77,11 +77,18 @@ const NEST = 4;
  */
 const COMPILE_AFTER = 32;
 /**
- * Control stack cells: environments and choicepoints. A frame that would pass the end fails the run hard, as a full
- * heap does, where a typed array would drop the writes (i-cell-bounds-unchecked-1106).
+ * Control stack cells: environments and choicepoints. A frame that would pass the end raises SWI's stack limit error
+ * (Heap's stackExhausted), where a typed array would drop the writes (i-cell-bounds-unchecked-1106). PeTTa runs SWI
+ * with an 8 GB stack limit, under which a non-tail recursion over a list of three million elements runs, where 1 << 24
+ * cells held a million and a half frames (c-stack-limit-1107); 1 << 28 cells hold some thirty million, the most a
+ * choicepoint index stored in a 29-bit integer cell can name. Compiled code keeps this array, so it never grows, and
+ * the pages a run does not reach take no memory.
  * am[implements a-petta-cell-store.control.bounds]
+ * am[implements a-petta-cell-store.control.overflow]
  */
-const S_LIMIT = 1 << 24;
+const S_LIMIT = 1 << 28;
+/** A bit per control stack cell, marking the environments a walk of the frames has visited (CellMachine.frames). */
+let frameBits = new Uint32Array(0);
 /**
  * Heap cells a run may grow by between collections however little the last one kept: 16 MB, so short runs never
  * collect (a-petta-cell-store.gc.trigger).
@@ -232,11 +239,12 @@ export class CellMachine {
   readonly A = new Int32Array(256);
   /** Choicepoint data that is not a number: a Clauses choicepoint's scan and predicate. */
   readonly SO: unknown[] = [];
-  readonly GEN = new Float64Array(S_LIMIT);
   /**
    * For each choicepoint, the trail index up to which a cut back to it has tidied (cutTo): what a tidy kept stays
    * kept, so a later cut to the same choicepoint scans only newer entries, where rescanning them made he_minimalmetta
-   * spend 77% of its time tidying (Machine.tidyTrail keeps the same mark).
+   * spend 77% of its time tidying (Machine.tidyTrail keeps the same mark). As long as the stack, its pages taking
+   * memory only where choicepoints go: doubling it as the stack grew instead copied and touched the part below
+   * hyperpose_primes' workers, 22 MB more at the peak.
    */
   private readonly TIDIED = new Int32Array(S_LIMIT);
   readonly CODE: Code[] = [];
@@ -469,7 +477,7 @@ export class CellMachine {
     this.proc(":", 2).ctl = (cm, _k, cc) => cm.goal(cm.A[1]!, cm.R[RB]!, cc);
     this.RETRY = def(() => {
       const b = this.R[RB]!;
-      const r = this.tryClauses(this.SO[b + 1] as Pred, this.SO[b] as Scan, this.S[b + 7]!, this.GEN[b]!, this.S[b + 6]!, b);
+      const r = this.tryClauses(this.SO[b + 1] as Pred, this.SO[b] as Scan, this.S[b + 7]!, this.SO[b + 3] as number, this.S[b + 6]!, b);
       return r === undefined ? this.fail() : r;
     });
     this.args = new CellArgs(this.hp, this.A, 0);
@@ -509,7 +517,7 @@ export class CellMachine {
   /** Push an environment of `n` cell slots whose continuation is the current one. */
   allocate(n: number, cb: number, cc: number): number {
     const S = this.S, R = this.R, e = this.top();
-    if (e + ENV + n > this.sLimit) throw new Error("cell control stack exhausted");
+    if (e + ENV + n > this.sLimit) throw stackExhausted();
     S[e] = R[RE]!;
     S[e + 1] = R[RCP]!;
     S[e + 2] = cb;
@@ -524,7 +532,7 @@ export class CellMachine {
   /** Push a choicepoint saving the continuation, the heap and trail tops and A[0..n); returns its index. */
   pushCP(kind: number, cb: number, cc: number, n: number): number {
     const S = this.S, R = this.R, hp = this.hp, b = this.top();
-    if (b + CPH + n > this.sLimit) throw new Error("cell control stack exhausted");
+    if (b + CPH + n > this.sLimit) throw stackExhausted();
     S[b] = R[RB]!;
     S[b + 1] = kind;
     S[b + 2] = hp.tr;
@@ -876,10 +884,11 @@ export class CellMachine {
       return at(0);
     });
     if (pairs.length === 0) return this.fail();
+    const area = pairs.length * FIBER_S;
+    // The workers' areas are checked before the group's choicepoint goes on, so an overflow leaves no group half made.
+    if (this.top() + CPH + area > this.sLimit) throw stackExhausted();
     const b = this.pushCP(K_FIBERS, this.R[RB]!, cc, 0);
     this.fiberGroups++;
-    const area = pairs.length * FIBER_S;
-    if (b + CPH + area > this.sLimit) throw new Error("cell control stack exhausted");
     this.S[b + 10] = area;
     const group: FiberGroup = { workers: pairs.map((p, k) => this.newFiber(p, b + CPH + k * FIBER_S)), i: 0, pair };
     this.SO[b] = group;
@@ -896,53 +905,46 @@ export class CellMachine {
    * am[implements a-petta-cell-store.gc.trigger] am[implements a-petta-cell-store.gc.roots]
    */
   private collect(n: number): void {
-    const S = this.S, A = this.A, R = this.R, SO = this.SO, hp = this.hp;
-    const envs: number[] = [], cps: number[] = [];
-    const seen = new Set<number>();
-    const chain = (e0: number): void => {
-      for (let e = e0; !seen.has(e); e = S[e]!) {
-        seen.add(e);
-        envs.push(e);
-        if (S[e] === e) break;
-      }
-    };
-    chain(R[RE]!);
-    for (let b = R[RB]!; ; b = S[b]!) {
-      cps.push(b);
-      chain(S[b + 3]!);
-      if (S[b] === b) break;
-    }
+    const S = this.S, A = this.A, SO = this.SO, hp = this.hp;
     hp.collect(
       (mark) => {
         for (let i = 0; i < n; i++) mark(A[i]!);
-        for (const e of envs) for (let i = e + ENV, end = i + S[e + 3]!; i < end; i++) mark(S[i]!);
-        for (const b of cps) {
-          const kind = S[b + 1]!;
-          if (kind === K_FIBERS) mark((SO[b] as FiberGroup).pair);
-          else for (let i = b + CPH, end = i + S[b + 10]!; i < end; i++) mark(S[i]!);
-          // A decoded variable's cell must stay, bound or not, for the generator's solutions to bind it; its key is
-          // its own cell, so an attributed one keeps its attribute list.
-          if (kind === K_BRIDGE) for (const c of (SO[b] as BridgeRun).back.keys()) mark(c);
-        }
+        this.frames(
+          (e) => {
+            for (let i = e + ENV, end = i + S[e + 3]!; i < end; i++) mark(S[i]!);
+          },
+          (b) => {
+            const kind = S[b + 1]!;
+            if (kind === K_FIBERS) mark((SO[b] as FiberGroup).pair);
+            else for (let i = b + CPH, end = i + S[b + 10]!; i < end; i++) mark(S[i]!);
+            // A decoded variable's cell must stay, bound or not, for the generator's solutions to bind it; its key is
+            // its own cell, so an attributed one keeps its attribute list.
+            if (kind === K_BRIDGE) for (const c of (SO[b] as BridgeRun).back.keys()) mark(c);
+          },
+        );
         for (const c of this.roots) mark(c);
       },
       (cell, addr) => {
         for (let i = 0; i < n; i++) A[i] = cell(A[i]!);
-        for (const e of envs) for (let i = e + ENV, end = i + S[e + 3]!; i < end; i++) S[i] = cell(S[i]!);
-        for (const b of cps) {
-          const kind = S[b + 1]!;
-          S[b + 9] = addr(S[b + 9]!);
-          if (kind === K_FIBERS) {
-            const g = SO[b] as FiberGroup;
-            g.pair = cell(g.pair);
-          } else for (let i = b + CPH, end = i + S[b + 10]!; i < end; i++) S[i] = cell(S[i]!);
-          if (kind === K_BRIDGE) {
-            const run = SO[b] as BridgeRun;
-            const moved = new Map<number, Var>();
-            for (const [c, v] of run.back) moved.set(cell(c), v);
-            run.back = moved;
-          }
-        }
+        this.frames(
+          (e) => {
+            for (let i = e + ENV, end = i + S[e + 3]!; i < end; i++) S[i] = cell(S[i]!);
+          },
+          (b) => {
+            const kind = S[b + 1]!;
+            S[b + 9] = addr(S[b + 9]!);
+            if (kind === K_FIBERS) {
+              const g = SO[b] as FiberGroup;
+              g.pair = cell(g.pair);
+            } else for (let i = b + CPH, end = i + S[b + 10]!; i < end; i++) S[i] = cell(S[i]!);
+            if (kind === K_BRIDGE) {
+              const run = SO[b] as BridgeRun;
+              const moved = new Map<number, Var>();
+              for (const [c, v] of run.back) moved.set(cell(c), v);
+              run.back = moved;
+            }
+          },
+        );
         for (let i = 0; i < this.roots.length; i++) this.roots[i] = cell(this.roots[i]!);
       },
       // Atoms are freed only where every cell that can hold one is marked: not while a concurrent_and worker's heap,
@@ -951,6 +953,34 @@ export class CellMachine {
       this.inFiber || this.fiberGroups > 0 ? null : (mark) => this.bag.markAtoms(mark),
     );
     this.scheduleCollection();
+  }
+
+  /**
+   * Call `env` once for each environment on the chains from E and from every choicepoint, and `cp` for each
+   * choicepoint, newest first: the frames a collection reads, the same ones on each walk while the links stay. A bit
+   * per stack cell up to the top marks the environments visited, where a set of them overflowed V8's limit at sixteen
+   * million frames (c-stack-limit-1107). Time: the frames, plus the stack's top in 32-cell words to clear the bits.
+   * am[implements a-petta-cell-store.gc.roots]
+   * am[implements a-petta-cell-store.control.overflow]
+   */
+  private frames(env: (e: number) => void, cp: (b: number) => void): void {
+    const S = this.S, R = this.R, words = (this.top() >>> 5) + 1;
+    if (frameBits.length < words) frameBits = new Uint32Array(2 * words);
+    else frameBits.fill(0, 0, words);
+    const bits = frameBits;
+    const chain = (e0: number): void => {
+      for (let e = e0; (bits[e >>> 5]! & (1 << (e & 31))) === 0; e = S[e]!) {
+        bits[e >>> 5]! |= 1 << (e & 31);
+        env(e);
+        if (S[e] === e) break;
+      }
+    };
+    chain(R[RE]!);
+    for (let b = R[RB]!; ; b = S[b]!) {
+      chain(S[b + 3]!);
+      cp(b);
+      if (S[b] === b) break;
+    }
   }
 
   /**
@@ -1517,7 +1547,7 @@ export class CellMachine {
           this.SO[cp] = scan;
           this.SO[cp + 1] = pred;
           this.SO[cp + 2] = callHashes;
-          this.GEN[cp] = gen;
+          this.SO[cp + 3] = gen;
         } else hp.hb = hp.top;
         S[cp + 7] = j;
       } else if (cp >= 0) {

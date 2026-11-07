@@ -422,6 +422,7 @@ describe.each([
       ca10(L) :- ca1(A), ca3(B), ca4(C), ca2(D), ca6(E), L = [A, B, C, D, E].
       ca11(L) :- findall(X, concurrent_and(mem(_, [a]), (nb_setval(kx, f(1)), X = set)), _), findall(Y, concurrent_and(mem(_, [b]), catch(b_getval(kx, Y), _, Y = none)), L).
       ca12(X) :- atom_concat(main, 1, A), findall(Y, concurrent_and(mem(Y, [1, 2]), (atom_concat(w, Y, B), atom_length(B, _))), _), X = A.
+      ca13(X) :- catch(concurrent_and(between(1, 2000, _), true), error(E, _), X = E).
     `;
     // ca8 calls after each solution, so a collection meets the group's pair, which only its choicepoint holds; ca9's
     // workers count lists past a slice, each slice ending with a call pending on its own list and counter. ca10 runs
@@ -442,6 +443,14 @@ describe.each([
       }
       expect(onCells(b.cm, name, [mkVar()]), name).toStrictEqual(onObjects(a.m, name, [mkVar()]));
       gcEvery = every;
+    }
+    // Two thousand workers' areas pass the control stack's end, which raises SWI's stack limit error for catch/3, where
+    // the object machine, whose fibers take no stack area, runs them (c-stack-limit-1107).
+    // am[verifies a-petta-cell-store.control.overflow]
+    {
+      const { m, cm } = machines();
+      for (const c of readClauses(src)) m.addClause(c, true);
+      expect(onCells(cm, "ca13", [mkVar()])).toStrictEqual({ answers: ['"resource_error"("stack")'], threw: false });
     }
   });
 
