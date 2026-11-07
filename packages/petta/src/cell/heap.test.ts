@@ -6,10 +6,13 @@
 // variable renaming with sharing kept; cell unification succeeds exactly when the object machine's does, leaving the
 // same bindings; and undoing the trail returns every cell to what it was; and both engines bind attributed and plain
 // variables the way SWI-Prolog does; and a collection frees exactly the cells no root reaches, keeping what the roots
-// reach, its order and its trail's undo, and exactly the runtime atoms nothing it scans holds, keeping pinned ones.
+// reach, its order and its trail's undo, and exactly the runtime atoms nothing it scans holds, keeping pinned ones;
+// and a heap made after collections commits only the memory it writes.
 // am[verifies a-petta-cell-store.terms]
 
 import fc from "fast-check";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { Machine } from "../machine";
 import { Cons, Float, NIL, Str, Struct, Var, deref, mkVar, type Term } from "../terms";
@@ -330,5 +333,29 @@ describe("cell term store", () => {
       ),
       { numRuns: 400 },
     );
+  });
+});
+
+describe("cell memory reservation", () => {
+  // A heap made after earlier ones were collected takes no more resident memory than the cells it writes: macOS's
+  // malloc served a freed gigabyte SharedArrayBuffer to the next one zeroed by hand, so each such heap committed a
+  // gigabyte, and this file ran 172 s on the Mac mini (c-mac-malloc-reuse-1108). The collections are forced, which
+  // V8 allows once its flag is set at run time.
+  // am[verifies a-petta-next-1108.startup.cut.wasm]
+  it("makes heaps after collections without committing their reservations", () => {
+    setFlagsFromString("--expose-gc");
+    const gc = runInNewContext("gc") as () => void;
+    const before = process.memoryUsage().rss;
+    const touch = (i: number): number => {
+      const hp = new Heap();
+      hp.h[12345] = i;
+      return process.memoryUsage().rss;
+    };
+    let peak = before;
+    for (let i = 0; i < 6; i++) {
+      peak = Math.max(peak, touch(i));
+      gc();
+    }
+    expect(peak - before).toBeLessThan(256 * 2 ** 20);
   });
 });

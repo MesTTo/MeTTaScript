@@ -33,16 +33,31 @@ export const INT_MAX = (1 << 28) - 1;
 
 /** Heap cells. Linux commits pages as they are touched, so the size is address space until the heap grows into it. */
 export const HEAP_CELLS = 1 << 28;
+/** A WebAssembly memory page, the unit WebAssembly.Memory reserves in. */
+const PAGE_BYTES = 1 << 16;
+/** The part of the WebAssembly API reserved() uses, which ES2022's library does not declare. */
+type WasmGlobal = { WebAssembly: { Memory: new (d: { initial: number; maximum: number; shared: boolean }) => { readonly buffer: SharedArrayBuffer } } };
 /**
- * Memory for `cells` 32-bit cells, as a SharedArrayBuffer: its pages are committed only where written, as a plain
- * buffer's are, but V8 does not count shared memory as the isolate's external memory, so the gigabyte arrays the cell
- * engine reserves set off no memory-pressure collections, five at every start in a worker (c-cell-external-memory-1108,
- * c-sab-unaccounted-1108); its fixed-length views run as fast as plain ones, where views of a resizable buffer that
- * could grow on demand ran 24 to 36 percent more instructions (c-rab-views-slow-1108).
+ * `cells` 32-bit cells as a `View` of a shared WebAssembly memory. V8 maps such memory straight from the system, its
+ * pages committed only where written and unmapped when collected, and does not count shared memory as the isolate's
+ * external memory, so the gigabyte arrays the cell engine reserves set off no memory-pressure collections, five at
+ * every start in a worker (c-cell-external-memory-1108, c-sab-unaccounted-1108). A SharedArrayBuffer takes its memory
+ * from malloc instead, and macOS's malloc zeroes a freed gigabyte block by hand for the next buffer it serves, so each
+ * heap made after a collection cost 12 ms and a resident gigabyte there, and heap.test.ts ran 172 s against 23 s
+ * before (c-mac-malloc-reuse-1108). Fixed-length views run as fast as plain ones, where views of a resizable buffer
+ * that could grow on demand ran 24 to 36 percent more instructions (c-rab-views-slow-1108).
  * am[implements a-petta-next-1108.startup.cut.shared]
+ * am[implements a-petta-next-1108.startup.cut.wasm]
+ * am[addresses i-heap-test-mac-1108]
  * am[rests-on c-sab-unaccounted-1108]
+ * am[rests-on c-mac-malloc-reuse-1108]
  */
-export const reserved = (cells: number): SharedArrayBuffer => new SharedArrayBuffer(4 * cells);
+export const reserved = <V extends Int32Array | Uint32Array>(View: new (buffer: SharedArrayBuffer, byteOffset: number, length: number) => V, cells: number): V => {
+  const pages = Math.ceil((4 * cells) / PAGE_BYTES);
+  const memory = new (globalThis as unknown as WasmGlobal).WebAssembly.Memory({ initial: pages, maximum: pages, shared: true });
+  return new View(memory.buffer, 0, cells);
+};
+
 /** Global variable slots reserved at the heap's bottom (b_setval/2): PeTTa names a few dozen globals. */
 export const GLOBAL_SLOTS = 4096;
 /** Trail entries at first; the trail doubles when full, up to TRAIL_MAX (a-petta-cell-store.control.bounds). */
@@ -96,7 +111,7 @@ function popcount(x: number): number {
  */
 export class Heap {
   /** The cells of the computation running now: the main run's, or a concurrent_and worker's own. */
-  h: Int32Array = new Int32Array(reserved(HEAP_CELLS));
+  h: Int32Array = reserved(Int32Array, HEAP_CELLS);
   /** H: the first free cell. */
   /** Cells 1 to GLOBAL_SLOTS hold b_setval/2's values, below every choicepoint's heap top so always trailed. */
   top = 1 + GLOBAL_SLOTS;
@@ -418,8 +433,8 @@ export class Heap {
   ): void {
     const h = this.h, top = this.top, funArity = this.funArity;
     const words = (top >>> 5) + 2;
-    const bits = (markBits ??= new Uint32Array(reserved((HEAP_CELLS >>> 5) + 2)));
-    const counts = (liveBefore ??= new Int32Array(reserved((HEAP_CELLS >>> 5) + 3)));
+    const bits = (markBits ??= reserved(Uint32Array, (HEAP_CELLS >>> 5) + 2));
+    const counts = (liveBefore ??= reserved(Int32Array, (HEAP_CELLS >>> 5) + 3));
     bits.fill(0, 0, words);
     const boxes = this.boxes, nb = boxes.length, boxWords = (nb >>> 5) + 2;
     if (boxBits.length < boxWords) {
