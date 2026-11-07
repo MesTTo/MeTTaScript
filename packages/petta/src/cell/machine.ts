@@ -11,6 +11,7 @@
 // held, the roots being the registers, the stack's frames and the cells JS frames hold across nested solves.
 // am[implements a-petta-cell-store.control]
 
+import { getHeapStatistics } from "node:v8";
 import { argHashIndex, clauseArgHash, type Clause, type Pred } from "../db";
 import { copyTerm, variantKeyOf, type Builtin, type Machine } from "../machine";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "../swi-index";
@@ -96,6 +97,17 @@ const BOX_CELLS = 20;
  * workers grow their heaps at once and each starts empty (hyperpose_primes runs four).
  */
 const FIBER_MIN_GROWTH = GC_MIN_GROWTH >> 3;
+/**
+ * How often a call port checks V8's heap (boundV8Heap): every 65536 calls, a few microseconds each time.
+ */
+const V8_CHECK_MASK = 0xffff;
+/**
+ * V8's heap beyond twice its live size that a run may hold before the machine collects it: V8's own growing factor
+ * reached four times live on tilepuzzle (c-v8-growth-tilepuzzle-1107), and the goal bounds peak memory at twice
+ * PeTTa's plus 150 MB; --optimize-for-size's factor of two cost up to two and a half times the CPU
+ * (c-optimize-for-size-1107), where this bound kept tilepuzzle's CPU (c-v8-bound-experiment-1107).
+ */
+const V8_SLACK = 64 << 20;
 /** Control stack cells each concurrent_and worker gets in its choicepoint's area. */
 const FIBER_S = 1 << 18;
 /** Trampoline bounces a worker runs before the next takes its turn, as the object machine's workers run SLICE goals. */
@@ -302,6 +314,14 @@ export class CellMachine {
   private readonly heapPool: Int32Array[] = [];
   /** concurrent_and choicepoints whose workers still hold heap arrays, so a cut or a ball knows to look (releaseFibersAbove). */
   private fiberGroups = 0;
+  /**
+   * A major collection of V8's heap, which the hosted runtime hands the machine (hosted.ts) so it can hold V8's heap
+   * to twice its live size plus V8_SLACK; null leaves V8 to its own growth.
+   */
+  majorGc: (() => void) | null = null;
+  private v8Tick = 0;
+  /** V8's used heap after the last collection this machine asked for. */
+  private v8Live = 0;
 
   constructor(readonly om: Machine) {
     if (om.db.cellMachine !== null) throw new Error("cell machine: a database has one cell machine, the clauses' code being bound to it");
@@ -953,6 +973,17 @@ export class CellMachine {
     }
   }
 
+  /**
+   * Collect V8's heap with `gc` when its size has passed twice the live size the last such collection left plus
+   * V8_SLACK, and note the new live size.
+   * am[implements a-petta-cell-store.tune.v8bound]
+   */
+  private boundV8Heap(gc: () => void): void {
+    if (getHeapStatistics().total_heap_size <= 2 * this.v8Live + V8_SLACK) return;
+    gc();
+    this.v8Live = getHeapStatistics().used_heap_size;
+  }
+
   /** The running computation's state, to put back with loadCtx. */
   private saveCtx(): Ctx {
     const hp = this.hp;
@@ -1269,6 +1300,7 @@ export class CellMachine {
     // A call port is where the collector runs: compiled code calls in tail position, so only A[0..n), the control
     // stack and the held roots hold cells.
     if (this.hp.top + BOX_CELLS * this.hp.boxes.length >= this.gcAt) this.collect(n);
+    if (this.majorGc !== null && (++this.v8Tick & V8_CHECK_MASK) === 0) this.boundV8Heap(this.majorGc);
     // The catch context of the call, which a throw from inside it unwinds to (unwind).
     this.R[RCC] = cc;
     if (p.det !== undefined) {

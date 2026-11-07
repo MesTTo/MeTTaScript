@@ -11,6 +11,8 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import { installBuiltins, formatString } from "./builtins";
 import { installClpfd } from "./clpfd";
 import { installProcess } from "./process";
@@ -169,6 +171,11 @@ export class HostedPetta {
     cm.compile = compileCellClause;
     installInlineBuiltins(cm);
     installTermBuiltins(cm);
+    // V8 exposes gc to contexts made after its expose-gc flag is set: a fresh context's gc collects this isolate's
+    // heap, which the machine uses to bound it (CellMachine.boundV8Heap).
+    // am[implements a-petta-cell-store.tune.v8bound]
+    setFlagsFromString("--expose-gc");
+    cm.majorGc = runInNewContext("gc") as () => void;
     return cm.solveCell(cm.hp.encode(g, new Map()));
   }
 
