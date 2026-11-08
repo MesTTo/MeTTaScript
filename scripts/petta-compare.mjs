@@ -5,7 +5,7 @@
 // Purpose: score the petta engine against PeTTa's own results: run each vendored ee5cacb example through
 // packages/petta's CLI the way test.sh runs it and compare with its oracle record, writing a per-example table;
 // with --petta, also run PeTTa itself on SWI-Prolog beside it and measure both engines' wall time and peak
-// resident set per example against g-petta-speed-1105.
+// resident set per example, on a quiet host, against g-petta-speed-1105.
 // am[implements a-mettascript-petta-1104.oracle]
 //
 // Usage: node scripts/petta-compare.mjs [--jobs=N] [--timeout=S] [--filter=substr] [--names=a,b]
@@ -22,11 +22,14 @@
 // the largest peak of each engine. PeTTa's own output is judged against the oracle too: the first disagreement
 // means this host's setup is not the oracle's (the swipl on PATH, or a library PeTTa loads), so the sweep stops there
 // and writes nothing.
+// At --jobs=1 each example's runs are checked against other work on the host: when other processes averaged
+// QUIET_CORES or more over the example's window (the busy time of every core less the runs' own CPU time), the example
+// runs again once the host is quiet, so no row times a neighbour's gate; each row keeps the other work its window saw.
 // The examples PeTTa itself runs unbounded run to a 10 s cap on both and stay out of the totals.
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { hostname } from "node:os";
+import { cpus, hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -59,6 +62,41 @@ const MEASURE = PETTA !== null;
 if (MEASURE && spawnSync(TIME, ["-q", "-f", "%M", "true"]).status !== 0) throw new Error(`${TIME} is not GNU time with -q`);
 if (ROWS && !MEASURE) throw new Error("--rows needs --petta");
 
+// Other work on the host while a measured example runs, in cores: the CPU time all cores spent busy (os.cpus()'s
+// tick counters), less what this process and the example's runs took (GNU time's %U + %S over each run's process
+// tree), over the wall time. Exact at --jobs=1, where no other run of ours overlaps an example's window.
+// am[implements a-petta-next-1108.speed.quietrows]
+const CHECKED = MEASURE && JOBS === 1;
+// A window is clean while other work averaged under 1.5 cores: on the Mac mini the idle desktop takes 0.6 to 1.0 cores,
+// a gate in its OrbStack VM 3.5 to 5.6, and each busy neighbour core already slows the cell engine by 3 to 6 percent
+// (c-mac-other-cores-1108), so the bound sits half a core above the idle desktop.
+// am[rests-on c-mac-other-cores-1108]
+const QUIET_CORES = 1.5;
+let childMs = 0;
+const mark = () => {
+  const u = process.cpuUsage();
+  const busy = cpus().reduce((s, c) => s + c.times.user + c.times.nice + c.times.sys + c.times.irq, 0);
+  return { t: performance.now(), busy, own: (u.user + u.system) / 1000 + childMs };
+};
+const otherCores = (m) => {
+  const n = mark();
+  return (n.busy - m.busy - (n.own - m.own)) / (n.t - m.t);
+};
+const clock = () => new Date().toTimeString().slice(0, 8);
+/** Wait until a 5 s window finds other work on the host under QUIET_CORES, logging when a wait starts and ends. */
+async function quietHost() {
+  for (let waited = false; ; waited = true) {
+    const m = mark();
+    await new Promise((r) => setTimeout(r, 5000));
+    const other = otherCores(m);
+    if (other < QUIET_CORES) {
+      if (waited) process.stdout.write(`${clock()} quiet: other work takes ${other.toFixed(2)} cores\n`);
+      return;
+    }
+    if (!waited) process.stdout.write(`${clock()} waiting: other work takes ${other.toFixed(2)} cores\n`);
+  }
+}
+
 const FAIL_RE =
   /Type mismatch|Type conflict|Determinism check failed|Conflicting determinism declarations|Deterministic function .* overlapping clauses|Deterministic function .* is not exhaustive|Strict mode rejected residual runtime type goal|Strict mode cannot express the unresolved nominal intersection|SpaceOf declaration .* rejects existing row|Strict mode requires a declared or inferable type|No matching typed overload|Declared output type variable|Declared parametric parameter|Arrows are prefix|--strict-det requires|Effect-polymorphic declaration|Effect variable|car-atom expects a non-empty expression|Syntax error|is unbound: a -\[.*\]-> function requires bound arguments|is not a proper list: its -\[.*\]-> proof requires a bound proper list/;
 
@@ -87,11 +125,12 @@ for (const base of PETTA ? [corpus, PETTA] : [corpus]) {
 /**
  * One run of argv in cwd with stdin closed, killed with its whole process group at the cap (run.sh's swipl and
  * time's command are grandchildren). Measured runs go under GNU time, whose last stderr line, cut from the stderr
- * returned, gives the peak resident set of the run's process tree in KB.
+ * returned, gives the peak resident set of the run's process tree in KB and its CPU time, added to childMs; a run
+ * killed at its cap prints no such line, so its cpuMs is null.
  * am[implements a-petta-speed-1105.baseline]
  */
 function run(argv, cwd, env, capMs) {
-  const full = MEASURE ? [TIME, "-q", "-f", "@@petta-rss %M", ...argv] : argv;
+  const full = MEASURE ? [TIME, "-q", "-f", "@@petta-rss %M %U %S", ...argv] : argv;
   return new Promise((done) => {
     const t0 = performance.now();
     const child = spawn(full[0], full.slice(1), { cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
@@ -117,12 +156,15 @@ function run(argv, cwd, env, capMs) {
       const ms = Math.round(performance.now() - t0);
       let stderr = err.toString("utf8");
       let rssKB = null;
-      const m = MEASURE ? /@@petta-rss (\d+)\n$/.exec(tail) : null;
+      let cpuMs = null;
+      const m = MEASURE ? /@@petta-rss (\d+) ([\d.]+) ([\d.]+)\n$/.exec(tail) : null;
       if (m) {
         rssKB = Number(m[1]);
-        stderr = stderr.replace(/@@petta-rss \d+\n$/, "");
+        cpuMs = (Number(m[2]) + Number(m[3])) * 1000;
+        childMs += cpuMs;
+        stderr = stderr.replace(/@@petta-rss [\d. ]+\n$/, "");
       }
-      done({ status, signal, timedOut, ms, rssKB, stdout: out.toString("utf8"), stderr });
+      done({ status, signal, timedOut, ms, rssKB, cpuMs, stdout: out.toString("utf8"), stderr });
     });
   });
 }
@@ -166,29 +208,42 @@ let next = 0;
 // The first example whose PeTTa run disagrees with its oracle; workers take no further example once it is set.
 // am[addresses i-bench-wrong-swipl]
 let pettaBroken = null;
-// Time: REPEAT x (PeTTa's + ours) runtime per example, over JOBS workers. Space: one capped stdout/stderr pair per job.
+// Time: REPEAT x (PeTTa's + ours) runtime per example, over JOBS workers, again for each window other work overlapped.
+// Space: one capped stdout/stderr pair per job.
 async function worker() {
   while (next < names.length && pettaBroken === null) {
     const name = names[next++];
     const oracle = JSON.parse(readFileSync(join(corpus, "oracle", name + ".json"), "utf8"));
     const unbounded = oracle.status === "timeout";
     const capMs = MEASURE && unbounded ? UNBOUNDED_MS : TIMEOUT_MS;
-    let o = null;
-    let p = null;
-    for (let i = 0; i < REPEAT; i++) {
-      if (PETTA) {
-        const r = await petta(name, oracle.mode, capMs);
-        p = fold(p, judge(name, oracle, r), r);
-        if (p.verdict !== "match") {
-          pettaBroken ??= { name, verdict: p.verdict, stderr: r.stderr.slice(0, 1000) };
-          return;
+    let o, p, other;
+    // A window holding a run killed at its cap has no CPU account, so it is kept unchecked: such rows are untimed
+    // (unbounded) or a timeout verdict. am[implements a-petta-next-1108.speed.quietrows]
+    for (;;) {
+      o = p = null;
+      const window = CHECKED ? mark() : null;
+      let accounted = true;
+      for (let i = 0; i < REPEAT; i++) {
+        if (PETTA) {
+          const r = await petta(name, oracle.mode, capMs);
+          accounted &&= r.cpuMs !== null;
+          p = fold(p, judge(name, oracle, r), r);
+          if (p.verdict !== "match") {
+            pettaBroken ??= { name, verdict: p.verdict, stderr: r.stderr.slice(0, 1000) };
+            return;
+          }
         }
+        const r = await ours(name, oracle.mode, capMs);
+        accounted &&= r.cpuMs !== null;
+        o = fold(o, judge(name, oracle, r), r);
       }
-      const r = await ours(name, oracle.mode, capMs);
-      o = fold(o, judge(name, oracle, r), r);
+      other = window !== null && accounted ? otherCores(window) : null;
+      if (other === null || other < QUIET_CORES) break;
+      process.stdout.write(`${clock()} again ${name}: other work took ${other.toFixed(2)} cores\n`);
+      await quietHost();
     }
     const rec = { name, verdict: o.verdict, status: o.r.timedOut ? "timeout" : o.r.status, oracleStatus: oracle.status, ms: o.ms };
-    if (MEASURE) Object.assign(rec, { rssKB: o.rssKB, unbounded, petta: { verdict: p.verdict, ms: p.ms, rssKB: p.rssKB } });
+    if (MEASURE) Object.assign(rec, { rssKB: o.rssKB, unbounded, otherCores: other, petta: { verdict: p.verdict, ms: p.ms, rssKB: p.rssKB } });
     if (o.verdict !== "match") {
       rec.stdout = o.r.stdout.slice(0, 2000);
       rec.stderr = o.r.stderr.slice(0, 2000);
@@ -196,11 +251,12 @@ async function worker() {
     }
     results.push(rec);
     if (!OUT) {
-      const timing = MEASURE ? ` petta ${p.ms}ms ${p.rssKB}KB ours ${o.rssKB}KB` : "";
+      const timing = MEASURE ? ` petta ${p.ms}ms ${p.rssKB}KB ours ${o.rssKB}KB${other === null ? "" : ` other ${other.toFixed(2)}`}` : "";
       process.stdout.write(`${o.verdict.padEnd(8)} ${String(o.ms).padStart(6)}ms ${name}${timing}\n`);
     }
   }
 }
+if (CHECKED) await quietHost();
 await Promise.all(Array.from({ length: JOBS }, worker));
 if (pettaBroken !== null) {
   const swipl = spawnSync("swipl", ["--version"], { encoding: "utf8" }).stdout.trim();
@@ -245,12 +301,12 @@ if (ROWS) {
   const head = [
     `# g-petta-speed-1105 rows: node scripts/petta-compare.mjs ${process.argv.slice(2).join(" ")}`,
     `# host ${hostname()}; petta ${git("rev-parse", "--short", "HEAD")}${git("status", "--porcelain", "--untracked-files=no") ? "+dirty" : ""}; node ${process.version}; ${swipl}; PeTTa ${spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd: PETTA, encoding: "utf8" }).stdout.trim() || "unknown"}`,
-    `# ms: fastest of ${REPEAT} wall times; rss_kb: largest peak resident set; slow: ours > max(5 x petta, petta + 500 ms); heavy: ours > 2 x petta + 150 MB; unbounded: PeTTa itself runs past any cap, so both ran to ${UNBOUNDED_MS / 1000} s and the row is out of the totals`,
+    `# ms: fastest of ${REPEAT} wall times; rss_kb: largest peak resident set; slow: ours > max(5 x petta, petta + 500 ms); heavy: ours > 2 x petta + 150 MB; unbounded: PeTTa itself runs past any cap, so both ran to ${UNBOUNDED_MS / 1000} s and the row is out of the totals; other_cores: other work on the host during the example's runs, in cores${CHECKED ? `, the example run again while it reached ${QUIET_CORES}` : ""}`,
     `# ${JSON.stringify(summary.speed)}`,
-    ["name", "class", "verdict", "petta_verdict", "petta_ms", "petta_rss_kb", "ours_ms", "ours_rss_kb", "slow", "heavy", "unbounded"].join("\t"),
+    ["name", "class", "verdict", "petta_verdict", "petta_ms", "petta_rss_kb", "ours_ms", "ours_rss_kb", "slow", "heavy", "unbounded", "other_cores"].join("\t"),
   ];
   const rows = results.map((r) =>
-    [r.name, classOf(r.name), r.verdict, r.petta.verdict, r.petta.ms, r.petta.rssKB, r.ms, r.rssKB, r.unbounded ? "" : +slow(r), r.unbounded ? "" : +heavy(r), +r.unbounded].join("\t"),
+    [r.name, classOf(r.name), r.verdict, r.petta.verdict, r.petta.ms, r.petta.rssKB, r.ms, r.rssKB, r.unbounded ? "" : +slow(r), r.unbounded ? "" : +heavy(r), +r.unbounded, r.otherCores === null ? "" : r.otherCores.toFixed(2)].join("\t"),
   );
   writeFileSync(ROWS, [...head, ...rows, ""].join("\n"));
 }
