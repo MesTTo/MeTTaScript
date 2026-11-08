@@ -1,342 +1,342 @@
 # g-petta-speed-1105 rows: node scripts/petta-compare.mjs --petta=/Users/mesto/ai-tmp/petta-speed/PeTTa --class=normal,strict --jobs=1 --timeout=1800 --repeat=3 --rows=rows-cell.tsv
 # host MaherMacMinis-Mac-mini.local; petta ; node v26.0.0; SWI-Prolog version 10.0.2 for arm64-darwin; PeTTa ee5cacb
-# ms: fastest of 3 wall times; rss_kb: largest peak resident set; slow: ours > max(5 x petta, petta + 500 ms); heavy: ours > 2 x petta + 150 MB; unbounded: PeTTa itself runs past any cap, so both ran to 10 s and the row is out of the totals
-# {"examples":335,"pettaS":82.1,"oursS":104.5,"ratio":1.27,"slow":0,"heavy":0,"met":true}
-name	class	verdict	petta_verdict	petta_ms	petta_rss_kb	ours_ms	ours_rss_kb	slow	heavy	unbounded
-add_atom_fun_space	normal	match	match	125	19136	110	89984	0	0	0
-and_or	normal	match	match	125	19152	103	86368	0	0	0
-atom_data_open_specialization	normal	match	match	127	19216	127	104736	0	0	0
-atomops	normal	match	match	127	19152	129	104496	0	0	0
-booleansolver	normal	match	match	128	19104	105	86624	0	0	0
-builin_types	normal	match	match	129	19472	158	109792	0	0	0
-callquoteevalreduce	normal	match	match	133	19872	198	116336	0	0	0
-callquoteevalreduce2	normal	match	match	130	19456	146	110032	0	0	0
-case	normal	match	match	125	19184	112	92912	0	0	0
-case2	normal	match	match	126	19200	117	94416	0	0	0
-caseconstrain	normal	match	match	126	19120	102	85632	0	0	0
-caseempty	normal	match	match	127	19168	119	96608	0	0	0
-caseempty_key_once	normal	match	match	129	19568	156	104448	0	0	0
-casenew	normal	match	match	126	19168	118	93680	0	0	0
-chain	normal	match	match	125	19072	109	88144	0	0	0
-collapse	normal	match	match	124	19088	100	86032	0	0	0
-comments	normal	match	match	125	19120	105	89312	0	0	0
-constanthead	normal	match	match	126	19152	114	95264	0	0	0
-curry	normal	match	match	128	19392	148	110352	0	0	0
-cut	normal	match	match	126	19184	120	95728	0	0	0
-destructured_param_shapes	normal	match	match	129	19168	127	103808	0	0	0
-det_constructor_unbound_arg	normal	match	match	127	19168	122	100208	0	0	0
-det_fold_commit	normal	match	match	206	23328	534	150656	0	0	0
-determinism	normal	match	match	127	19456	135	107136	0	0	0
-determinism_builtins	normal	match	match	130	19728	166	110128	0	0	0
-determinism_clause_partition	normal	match	match	126	19168	115	93056	0	0	0
-determinism_closure_param	normal	match	match	128	19200	136	103616	0	0	0
-determinism_closure_through_fold	normal	match	match	197	23104	485	142256	0	0	0
-determinism_lco	normal	match	match	160	19504	266	116848	0	0	0
-effect_polymorphism	normal	match	match	130	19584	156	109168	0	0	0
-empty	normal	match	match	128	19152	107	89280	0	0	0
-empty_space_read	normal	match	match	134	19712	174	112528	0	0	0
-eval	normal	match	match	128	19440	152	109264	0	0	0
-eval_lambda	normal	match	match	126	19088	136	106176	0	0	0
-factorial	normal	match	match	127	19136	123	103232	0	0	0
-fib	normal	match	match	535	19712	386	124688	0	0	0
-fibadd	normal	match	match	534	19728	399	131712	0	0	0
-fibsmart	normal	match	match	126	19248	128	105120	0	0	0
-fibsmartimport	normal	match	match	127	19248	132	108432	0	0	0
-foldall	normal	match	match	130	19712	165	109696	0	0	0
-foldallmatch	normal	match	match	127	19136	123	100304	0	0	0
-foldallspacecount	normal	match	match	126	19200	122	99696	0	0	0
-forall	normal	match	match	132	19840	171	113248	0	0	0
-functionhead	normal	match	match	127	19184	128	103056	0	0	0
-functionhead2	normal	match	match	129	19424	135	107232	0	0	0
-functionhead3	normal	match	match	127	19184	138	104000	0	0	0
-functionremoval	normal	match	match	129	19216	145	106480	0	0	0
-functionremovalspec	normal	match	match	129	19168	135	104880	0	0	0
-functiontypes	normal	match	match	129	19104	138	108128	0	0	0
-get_type_confirms	normal	match	match	129	19312	149	104896	0	0	0
-git_import	normal	match	match	131	19696	161	108016	0	0	0
-git_import2	normal	match	match	126	19104	112	94240	0	0	0
-greedy_chess	normal	match	match	10000		10004				1
-he_assert	normal	match	match	147	20304	254	124528	0	0	0
-he_atomspace	normal	match	match	147	20304	261	125424	0	0	0
-he_equalreduct	normal	match	match	147	20368	254	123008	0	0	0
-he_error	normal	match	match	146	20288	253	122368	0	0	0
-he_evaluation	normal	match	match	146	20240	257	124672	0	0	0
-he_math	normal	match	match	127	19120	131	104592	0	0	0
-he_minimalmetta	normal	match	match	7876	88528	12525	219664	0	0	0
-he_quoting	normal	match	match	146	20160	251	126320	0	0	0
-he_types	normal	match	match	146	20304	252	125472	0	0	0
-holbenchmark	normal	match	match	2195	837680	3246	452016	0	0	0
-holfunctions	normal	match	match	129	19472	161	111904	0	0	0
-holfunctions_intrinsicop	normal	match	match	128	19152	128	99712	0	0	0
-hyperpose_primes	normal	match	match	2734	20432	3193	147696	0	0	0
-identity	normal	match	match	127	19152	112	90384	0	0	0
-if	normal	match	match	126	19088	104	86032	0	0	0
-if2	normal	match	match	127	19008	105	86528	0	0	0
-if3	normal	match	match	127	19120	107	86592	0	0	0
-if4	normal	match	match	127	19088	108	86080	0	0	0
-ifcasenondet	normal	match	match	128	19104	125	101072	0	0	0
-ifsimple	normal	match	match	126	19120	100	81904	0	0	0
-import_duplicate_cycle	normal	match	match	128	19184	122	96448	0	0	0
-import_error_surface	normal	match	match	145	20288	248	124912	0	0	0
-import_relative_nested	normal	match	match	143	26208	162	94160	0	0	0
-import_space_identity	normal	match	match	128	19136	115	90432	0	0	0
-inferred_sentinel_param	normal	match	match	128	19216	130	104384	0	0	0
-invertfunction	normal	match	match	128	19040	126	99552	0	0	0
-invertpeanoplus	normal	match	match	128	19152	141	103808	0	0	0
-is_alpha_member_test	normal	match	match	128	19344	150	108272	0	0	0
-isvar_det_param	normal	match	match	128	19152	129	103200	0	0	0
-iter	normal	match	match	127	19104	124	99216	0	0	0
-lambda	normal	match	match	131	19632	159	112240	0	0	0
-lambda_fresh_names	normal	match	match	131	20208	162	127632	0	0	0
-late_decl_user	normal	match	match	127	19072	120	98000	0	0	0
-late_definition	normal	match	match	127	19152	115	94912	0	0	0
-late_import	normal	match	match	128	19232	134	106768	0	0	0
-let_superpose_if_case	normal	match	match	128	19168	136	106304	0	0	0
-letext	normal	match	match	127	19120	108	86800	0	0	0
-letlet	normal	match	match	127	19184	115	93088	0	0	0
-letstar	normal	match	match	126	19120	105	86256	0	0	0
-lib_roman_he_if_error	normal	match	match	208	23424	533	149264	0	0	0
-lib_roman_pair_helpers	normal	match	match	197	22992	486	144096	0	0	0
-lib_trust_datastructures_call	normal	match	match	133	19824	186	113872	0	0	0
-lib_trust_declared_caller	normal	match	match	128	19072	129	102288	0	0	0
-lib_trust_library_call	normal	match	match	128	19200	127	102784	0	0	0
-lib_trust_origin_recompile	normal	match	match	129	19200	134	109456	0	0	0
-lib_trust_user_redeclaration	normal	match	match	128	19168	129	101728	0	0	0
-library	normal	match	match	196	23120	483	143568	0	0	0
-listhead	normal	match	match	127	19200	128	100208	0	0	0
-llm_cities	normal	match	match	183	32208	230	107664	0	0	0
-logicprog	normal	match	match	129	19168	135	105248	0	0	0
-logicprogset	normal	match	match	127	19168	123	95136	0	0	0
-matchnested	normal	match	match	128	19136	128	101840	0	0	0
-matchnested2	normal	match	match	127	19200	125	101696	0	0	0
-matchsingle	normal	match	match	128	19168	126	100960	0	0	0
-matchtypes	normal	match	match	130	19152	126	100032	0	0	0
-matespace	normal	match	match	5361	640080	3965	953360	0	0	0
-matespace2	normal	match	match	7302	576480	4397	830720	0	0	0
-matespacefast	normal	match	match	4458	3472320	8137	3049504	0	0	0
-math	normal	match	match	127	19024	133	103952	0	0	0
-measure	normal	match	match	143	20368	254	123616	0	0	0
-meta_types	normal	match	match	128	19072	111	89440	0	0	0
-metta4_prog	normal	match	match	126	19104	110	92256	0	0	0
-metta4_streams	normal	match	match	130	19120	146	105792	0	0	0
-mettaset	normal	match	match	126	19120	116	91968	0	0	0
-multicall	normal	match	match	127	19136	118	94784	0	0	0
-multiset_operations	normal	match	match	127	19024	123	96640	0	0	0
-mutex_and_transaction	normal	match	match	130	20224	148	114912	0	0	0
-myinterpreter	normal	match	match	128	19040	127	102000	0	0	0
-nars_direct	normal	match	match	195	28304	504	155840	0	0	0
-nars_tuffy	normal	match	match	355	25392	811	180272	0	0	0
-nestedcons	normal	match	match	126	19136	111	89552	0	0	0
-newtons_method	normal	match	match	141	19968	210	118016	0	0	0
-nilbc	normal	match	match	175	21088	366	147120	0	0	0
-once	normal	match	match	128	19136	119	94848	0	0	0
-outputtype	normal	match	match	128	19232	133	105488	0	0	0
-parametric_types	normal	match	match	128	19168	122	100096	0	0	0
-parse	normal	match	match	127	19120	116	93808	0	0	0
-partial_builtin_arity	normal	match	match	128	19184	116	93472	0	0	0
-partial_list_pattern	normal	match	match	128	19152	123	97584	0	0	0
-partialdef	normal	match	match	128	19136	121	96864	0	0	0
-patrick_iterate_fib	normal	match	match	135	19840	194	115632	0	0	0
-patrick_iterate_quad	normal	match	match	594	19776	470	148256	0	0	0
-patrick_test	normal	match	match	134	19808	192	116720	0	0	0
-peano	normal	match	match	1928	23840	804	131648	0	0	0
-peanofast	normal	match	match	455	366560	605	349584	0	0	0
-permutations	normal	match	match	864	146352	1958	234288	0	0	0
-pln_direct	normal	match	match	224	25360	586	159392	0	0	0
-pln_roman	normal	match	match	264	28192	667	166768	0	0	0
-pln_tuffy	normal	match	match	240	28608	644	155808	0	0	0
-plntest	normal	match	match	136	19728	192	118288	0	0	0
-plntestdirect	normal	match	match	137	19792	206	114208	0	0	0
-prologimport	normal	match	match	138	20112	213	115184	0	0	0
-python	normal	match	match	147	26464	194	106896	0	0	0
-python_import	normal	match	match	142	26128	152	89312	0	0	0
-recursive_types	normal	match	match	128	19088	117	90880	0	0	0
-recursive_types2	normal	match	match	128	19184	138	110400	0	0	0
-repeated_var_shared_inhabitant	normal	match	match	128	19216	129	105360	0	0	0
-repl	normal	match	match	10000		10002				1
-repr	normal	match	match	127	19152	113	89504	0	0	0
-roman_test	normal	match	match	203	23104	529	150416	0	0	0
-scale	normal	match	match	1277	427232	2787	821920	0	0	0
-selfprog	normal	match	match	127	19136	123	97152	0	0	0
-semidet_partial_constructs	normal	match	match	130	19632	158	111440	0	0	0
-singleton_call	normal	match	match	127	19136	123	96560	0	0	0
-smartdispatch	normal	match	match	128	19168	131	101552	0	0	0
-spacefunction	normal	match	match	127	19152	128	103360	0	0	0
-spaceof_existing_rows	normal	match	match	126	19104	111	90128	0	0	0
-spaces	normal	match	match	130	19168	122	98928	0	0	0
-spaces_find	normal	match	match	130	19664	150	105024	0	0	0
-spaces_removeallatoms	normal	match	match	132	19840	176	111248	0	0	0
-spaces_succeedspredicate	normal	match	match	130	19648	155	107984	0	0	0
-spaces2	normal	match	match	127	19168	121	95344	0	0	0
-spaces3	normal	match	match	127	19120	125	97376	0	0	0
-specialize	normal	match	match	136	20000	210	122976	0	0	0
-specialize_recursive_wrap	normal	match	match	129	19104	137	106864	0	0	0
-specializecyclic	normal	match	match	131	19472	156	111632	0	0	0
-specialized_call_exception	normal	match	match	128	19184	125	99056	0	0	0
-specializefunctiontypes	normal	match	match	128	19152	126	101472	0	0	0
-specializetypedclosure	normal	match	match	130	19200	140	108672	0	0	0
-staged_recompile_swap	normal	match	match	128	19184	128	102160	0	0	0
-state	normal	match	match	127	19120	108	87840	0	0	0
-streamops	normal	match	match	127	19120	124	96096	0	0	0
-strict_alias_late	strict	match	match	136	19904	167	109824	0	0	0
-strict_alias_product	strict	match	match	133	19840	176	117712	0	0	0
-strict_branch_constructor_result	strict	match	match	129	19504	144	111984	0	0	0
-strict_branch_output_ascription	strict	match	match	130	19616	159	108288	0	0	0
-strict_branch_parametric_narrowing	strict	match	match	128	19200	137	108608	0	0	0
-strict_brand_control_flow	strict	match	match	128	19184	125	101152	0	0	0
-strict_brand_expectation	strict	match	match	132	19680	173	114432	0	0	0
-strict_contextual_data_tuple	strict	match	match	135	19776	188	119952	0	0	0
-strict_contextual_list	strict	match	match	206	23184	519	153664	0	0	0
-strict_deferred_guard_alpha	strict	match	match	128	19120	116	92256	0	0	0
-strict_destructured_param	strict	match	match	129	19472	153	105520	0	0	0
-strict_det_closure_inferred	strict	match	match	131	19760	163	109360	0	0	0
-strict_dynamic_list_recursion	strict	match	match	131	19472	150	106688	0	0	0
-strict_foreign_heap	strict	match	match	138	19840	198	118512	0	0	0
-strict_foreign_product_instantiation	strict	match	match	139	19840	216	116976	0	0	0
-strict_forward_decl	strict	match	match	131	19360	145	104112	0	0	0
-strict_lambda_branch_isolation	strict	match	match	128	19264	137	104560	0	0	0
-strict_lib_he	strict	match	match	149	20304	271	126064	0	0	0
-strict_lib_import	strict	match	match	131	19664	152	106368	0	0	0
-strict_list_accessor_types	strict	match	match	137	19952	213	119296	0	0	0
-strict_map_flat_data_tuple	strict	match	match	198	23088	497	145056	0	0	0
-strict_match_contextual_result	strict	match	match	130	19456	154	107168	0	0	0
-strict_match_schema	strict	match	match	131	19440	143	107056	0	0	0
-strict_mixed_list_widening	strict	match	match	128	19200	131	104144	0	0	0
-strict_nested_product_parameter	strict	match	match	213	23680	561	150896	0	0	0
-strict_newtype_pattern_binding	strict	match	match	130	19440	144	106480	0	0	0
-strict_newtypes	strict	match	match	132	19824	176	111376	0	0	0
-strict_pass_declared	strict	match	match	129	19184	135	109040	0	0	0
-strict_positional_tuple_types	strict	match	match	130	19552	148	107392	0	0	0
-strict_quoted_compound_output	strict	match	match	128	19136	115	93952	0	0	0
-strict_quoted_structural_product	strict	match	match	127	19136	121	96720	0	0	0
-strict_roman_if_error	strict	match	match	196	22928	480	144192	0	0	0
-strict_semidet_closure_inferred	strict	match	match	133	19632	169	109280	0	0	0
-strict_spaceof_failed_decl_cleanup	strict	match	match	126	19120	116	93104	0	0	0
-strict_symmetric_var_conflict	strict	match	match	130	19184	140	103824	0	0	0
-strict_the_ascription	strict	match	match	129	19248	144	105424	0	0	0
-strict_tuple_types	strict	match	match	218	25344	575	153664	0	0	0
-strict_type_flow	strict	match	match	201	23072	488	144800	0	0	0
-strict_typed_space	strict	match	match	131	19408	145	103568	0	0	0
-strict_typed_space_at_pattern	strict	match	match	136	19792	208	118240	0	0	0
-strict_union_atom_lists	strict	match	match	134	19792	187	114208	0	0	0
-strict_union_case_narrowing	strict	match	match	128	19184	128	103328	0	0	0
-strict_union_catch	strict	match	match	199	23040	494	145648	0	0	0
-strict_union_constructor_narrowing	strict	match	match	128	19168	133	104864	0	0	0
-strict_union_prior_branch_narrowing	strict	match	match	134	19744	186	116480	0	0	0
-strict_union_reducible_helper_not_ctor	strict	match	match	132	19776	167	111664	0	0	0
-strict_union_structural_branch	strict	match	match	130	19264	137	103984	0	0	0
-strict_union_types	strict	match	match	205	23312	513	147456	0	0	0
-strictdet_basics	strict	match	match	132	19872	172	109968	0	0	0
-strictdet_bool_call_operand	strict	match	match	129	19248	135	108736	0	0	0
-strictdet_bool_cert_control_operand	strict	match	match	132	19712	164	111552	0	0	0
-strictdet_builtin_arg_shapes	strict	match	match	132	19792	173	113824	0	0	0
-strictdet_callpredicate_declared	strict	match	match	128	19216	128	103520	0	0	0
-strictdet_case_fallthrough_narrowing	strict	match	match	130	19712	158	115056	0	0	0
-strictdet_chainer_andthen_destructure	strict	match	match	128	19456	141	105264	0	0	0
-strictdet_closures	strict	match	match	132	19760	163	114128	0	0	0
-strictdet_collapse_let_nonempty	strict	match	match	129	19168	135	109616	0	0	0
-strictdet_collapse_letstar_nonempty	strict	match	match	128	19168	140	105504	0	0	0
-strictdet_collapse_proper_list	strict	match	match	130	19520	143	106448	0	0	0
-strictdet_decons_semidet	strict	match	match	127	19168	121	97696	0	0	0
-strictdet_destructured_tuple_recon	strict	match	match	130	19424	141	104656	0	0	0
-strictdet_det_bool_ops	strict	match	match	129	19456	142	108000	0	0	0
-strictdet_det_exhaustive_limits	strict	match	match	131	19760	160	115520	0	0	0
-strictdet_effect_polymorphism	strict	match	match	138	20128	214	117584	0	0	0
-strictdet_explicit_arrow_positions	strict	match	match	131	19264	132	104176	0	0	0
-strictdet_forward_mutual_bool	strict	match	match	134	19568	157	115056	0	0	0
-strictdet_higher_order_builtins	strict	match	match	132	19872	178	114048	0	0	0
-strictdet_if_equal_narrowing	strict	match	match	137	19824	179	114672	0	0	0
-strictdet_if_union_subtraction_variable_head	strict	match	match	131	19600	171	113168	0	0	0
-strictdet_inferred_call_selection	strict	match	match	127	19216	127	101696	0	0	0
-strictdet_is_member_literal	strict	match	match	129	19200	135	113072	0	0	0
-strictdet_is_member_nested_bool	strict	match	match	128	19120	127	103296	0	0	0
-strictdet_let_nominal_destructure	strict	match	match	127	19200	130	102656	0	0	0
-strictdet_let_resolved_fold_product	strict	match	match	201	23104	494	146640	0	0	0
-strictdet_let_typed_list_selection	strict	match	match	128	19152	135	109648	0	0	0
-strictdet_let_value_cut	strict	match	match	128	19072	120	96912	0	0	0
-strictdet_lib_combinatorics	strict	match	match	135	19792	198	114064	0	0	0
-strictdet_lib_datastructures	strict	match	match	132	19856	173	111104	0	0	0
-strictdet_lib_datetime	strict	match	match	134	19952	183	112560	0	0	0
-strictdet_lib_he	strict	match	match	149	20416	275	125536	0	0	0
-strictdet_lib_mm2	strict	match	match	130	19264	136	111792	0	0	0
-strictdet_lib_patrick	strict	match	match	136	19760	201	116816	0	0	0
-strictdet_lib_roman	strict	match	match	219	23632	590	156448	0	0	0
-strictdet_lib_spaces	strict	match	match	129	19648	147	106608	0	0	0
-strictdet_lib_tabling	strict	match	match	130	19248	137	105168	0	0	0
-strictdet_lib_trust_fixture	strict	match	match	129	19232	128	102048	0	0	0
-strictdet_lib_vector	strict	match	match	134	19824	180	115616	0	0	0
-strictdet_lib_zar	strict	match	match	132	19552	143	106752	0	0	0
-strictdet_min_atom_tuple	strict	match	match	127	19232	128	104912	0	0	0
-strictdet_min_computed_elements	strict	match	match	129	19184	132	103712	0	0	0
-strictdet_mutual_bool_output	strict	match	match	131	19568	153	109536	0	0	0
-strictdet_nested_bool_operand	strict	match	match	129	19200	137	108992	0	0	0
-strictdet_nested_constructed_tuple_case_newtype_field	strict	match	match	132	19600	159	106080	0	0	0
-strictdet_nested_nominal_arg	strict	match	match	129	19568	140	113824	0	0	0
-strictdet_newtype_head_param	strict	match	match	130	19472	144	109264	0	0	0
-strictdet_nonempty_branch	strict	match	match	130	19456	143	105568	0	0	0
-strictdet_outer_brand_case_open_fallthrough	strict	match	match	130	19536	161	111760	0	0	0
-strictdet_outer_brand_let_binding	strict	match	match	131	19536	156	111360	0	0	0
-strictdet_proper_bool_case	strict	match	match	128	19168	132	102944	0	0	0
-strictdet_proper_bool_if	strict	match	match	128	19200	131	107584	0	0	0
-strictdet_query_shape_bool	strict	match	match	134	19840	176	112416	0	0	0
-strictdet_remove_atom_nominal	strict	match	match	128	19136	129	105888	0	0	0
-strictdet_repeated_var_overlapping_unions	strict	match	match	129	19232	128	103568	0	0	0
-strictdet_runtime_add_cleanup	strict	match	match	126	19088	115	92336	0	0	0
-strictdet_runtime_recompile_fresh_callee_summary	strict	match	match	130	19520	147	106944	0	0	0
-strictdet_semidet_arrow	strict	match	match	132	19776	166	111344	0	0	0
-strictdet_semidet_lco	strict	match	match	163	19456	272	115808	0	0	0
-strictdet_space_ops_manifest	strict	match	match	128	19216	127	103936	0	0	0
-strictdet_space_update_payload	strict	match	match	130	19520	156	108944	0	0	0
-strictdet_unified_cross_file_cache	strict	match	match	130	19216	138	107984	0	0	0
-strictdet_unify_pattern_det	strict	match	match	127	19216	129	103952	0	0	0
-string	normal	match	match	126	19072	101	82816	0	0	0
-supercollapse	normal	match	match	129	19168	134	110400	0	0	0
-superpose_empty	normal	match	match	128	19152	128	100752	0	0	0
-superpose_nested	normal	match	match	129	19136	130	104288	0	0	0
-superpose_primes	normal	match	match	142	19712	148	107296	0	0	0
-swrite_variable_identity	normal	match	match	134	21760	198	113248	0	0	0
-syntactic_compare	normal	match	match	127	19056	110	87616	0	0	0
-tabling_fib	normal	match	match	132	19568	422	127408	0	0	0
-test_add_primitive	normal	match	match	129	19248	150	105792	0	0	0
-test_alpha_unique_atom	normal	match	match	132	19632	182	118384	0	0	0
-test_datetime	normal	match	match	135	19728	184	121664	0	0	0
-test_memo_aggregate	normal	match	match	135	19728	154	110624	0	0	0
-test_memo_dependency_invalidation	normal	match	match	134	19504	147	108672	0	0	0
-test_memo_multi_answer	normal	match	match	133	19568	147	108688	0	0	0
-test_memo_partial_body	normal	match	match	137	19744	165	114208	0	0	0
-test_memo_per_arity	normal	match	match	135	19728	162	111344	0	0	0
-test_memo_same_name_multi_arity	normal	match	match	136	19936	179	116464	0	0	0
-test_memo_stats	normal	match	match	133	19632	146	105776	0	0	0
-test_memo_variant_nonground	normal	match	match	134	19632	147	106624	0	0	0
-test_string_comments	normal	match	match	128	19152	119	94928	0	0	0
-test_unify_eval_branches	normal	match	match	147	20272	258	125296	0	0	0
-tests	normal	match	match	130	19328	151	110352	0	0	0
-tilepuzzle	normal	match	match	1920	126384	4038	270032	0	0	0
-torch	normal	match	match	142	25840	205	109888	0	0	0
-translatepredicate	normal	match	match	126	19120	105	85776	0	0	0
-translatorrule	normal	match	match	127	19136	124	96832	0	0	0
-translatorrule_fib	normal	match	match	129	19200	136	111440	0	0	0
-translatorrule_for	normal	match	match	128	19248	134	106576	0	0	0
-twostage	normal	match	match	129	19168	117	93072	0	0	0
-type_context_compile	normal	match	match	128	19152	126	99680	0	0	0
-type_decl_kind_conflicts	normal	match	match	130	19488	143	106000	0	0	0
-type_decl_removal_kinds	normal	match	match	130	19664	152	108912	0	0	0
-type_decl_removal_recompile	normal	match	match	128	19152	127	101712	0	0	0
-type_deferred_guard_alpha	normal	match	match	147	20288	256	121824	0	0	0
-type_edge_cases	normal	match	match	150	20336	283	137536	0	0	0
-type_inference	normal	match	match	128	19376	148	107952	0	0	0
-type_list_parametric	normal	match	match	200	23104	489	142672	0	0	0
-type_overload_resolved	normal	match	match	128	19152	129	104032	0	0	0
-type_overload_runtime_error	normal	match	match	130	19200	137	113184	0	0	0
-type_parametric_params	normal	match	match	131	19408	148	105712	0	0	0
-type_pipeline	normal	match	match	150	20272	279	131696	0	0	0
-type_previous_try_coverage	normal	match	match	155	20448	308	138352	0	0	0
-type_runtime_output_fallback	normal	match	match	150	20416	281	124752	0	0	0
-type_single_monomorphic_resolved	normal	match	match	128	19136	118	94480	0	0	0
-type_single_poly_resolved	normal	match	match	197	23088	484	144816	0	0	0
-typed_space_proven_update	normal	match	match	130	19280	153	115424	0	0	0
-types	normal	match	match	129	19408	145	103728	0	0	0
-types_dependent	normal	match	match	130	19488	141	105040	0	0	0
-types_nondet	normal	match	match	137	19840	195	116320	0	0	0
-unbound_atom_not_equation	normal	match	match	129	19376	151	106816	0	0	0
-xor	normal	match	match	127	19136	124	97712	0	0	0
+# ms: fastest of 3 wall times; rss_kb: largest peak resident set; slow: ours > max(5 x petta, petta + 500 ms); heavy: ours > 2 x petta + 150 MB; unbounded: PeTTa itself runs past any cap, so both ran to 10 s and the row is out of the totals; other_cores: other work on the host during the example's runs, in cores, the example run again while it reached 1.5
+# {"examples":335,"pettaS":82.3,"oursS":97.7,"ratio":1.19,"slow":0,"heavy":0,"met":true}
+name	class	verdict	petta_verdict	petta_ms	petta_rss_kb	ours_ms	ours_rss_kb	slow	heavy	unbounded	other_cores
+add_atom_fun_space	normal	match	match	127	19120	114	89552	0	0	0	0.73
+and_or	normal	match	match	127	19088	106	82736	0	0	0	1.01
+atom_data_open_specialization	normal	match	match	129	19184	132	102672	0	0	0	0.78
+atomops	normal	match	match	128	19168	132	101392	0	0	0	0.64
+booleansolver	normal	match	match	126	19072	109	84192	0	0	0	0.85
+builin_types	normal	match	match	132	19472	149	108112	0	0	0	0.78
+callquoteevalreduce	normal	match	match	136	19872	198	119936	0	0	0	1.01
+callquoteevalreduce2	normal	match	match	130	19408	151	110544	0	0	0	0.73
+case	normal	match	match	128	19184	118	91920	0	0	0	0.70
+case2	normal	match	match	128	19152	120	94112	0	0	0	0.70
+caseconstrain	normal	match	match	126	19104	103	81728	0	0	0	0.71
+caseempty	normal	match	match	129	19168	124	97280	0	0	0	0.82
+caseempty_key_once	normal	match	match	131	19568	156	107264	0	0	0	0.58
+casenew	normal	match	match	128	19056	122	93840	0	0	0	1.20
+chain	normal	match	match	128	19088	112	86064	0	0	0	0.99
+collapse	normal	match	match	126	19120	105	80864	0	0	0	0.62
+comments	normal	match	match	127	19136	109	89856	0	0	0	0.71
+constanthead	normal	match	match	128	19200	118	93760	0	0	0	0.71
+curry	normal	match	match	130	19408	150	105152	0	0	0	0.61
+cut	normal	match	match	128	19152	124	96080	0	0	0	0.95
+destructured_param_shapes	normal	match	match	129	19232	129	99824	0	0	0	0.80
+det_constructor_unbound_arg	normal	match	match	129	19152	126	99200	0	0	0	0.69
+det_fold_commit	normal	match	match	208	23392	536	161328	0	0	0	0.66
+determinism	normal	match	match	131	19456	139	103632	0	0	0	0.66
+determinism_builtins	normal	match	match	132	19840	172	111232	0	0	0	0.70
+determinism_clause_partition	normal	match	match	128	19152	119	93072	0	0	0	0.99
+determinism_closure_param	normal	match	match	129	19200	138	101280	0	0	0	0.74
+determinism_closure_through_fold	normal	match	match	199	23088	487	153264	0	0	0	0.87
+determinism_lco	normal	match	match	160	19424	269	117840	0	0	0	0.60
+effect_polymorphism	normal	match	match	130	19600	156	107712	0	0	0	0.83
+empty	normal	match	match	127	19136	111	89904	0	0	0	0.62
+empty_space_read	normal	match	match	136	19712	173	113152	0	0	0	0.72
+eval	normal	match	match	130	19440	154	109872	0	0	0	0.70
+eval_lambda	normal	match	match	130	19200	137	101152	0	0	0	0.79
+factorial	normal	match	match	128	19168	128	98400	0	0	0	0.71
+fib	normal	match	match	538	19712	406	122080	0	0	0	0.70
+fibadd	normal	match	match	541	19776	403	133008	0	0	0	0.68
+fibsmart	normal	match	match	129	19296	131	98768	0	0	0	0.75
+fibsmartimport	normal	match	match	129	19280	133	104016	0	0	0	0.60
+foldall	normal	match	match	131	19696	164	113712	0	0	0	0.83
+foldallmatch	normal	match	match	127	19136	126	96992	0	0	0	0.76
+foldallspacecount	normal	match	match	128	19184	124	96928	0	0	0	0.65
+forall	normal	match	match	132	19872	172	122608	0	0	0	1.13
+functionhead	normal	match	match	128	19168	131	99792	0	0	0	0.79
+functionhead2	normal	match	match	129	19424	137	104192	0	0	0	0.67
+functionhead3	normal	match	match	129	19216	139	103024	0	0	0	0.72
+functionremoval	normal	match	match	129	19200	148	104368	0	0	0	0.54
+functionremovalspec	normal	match	match	131	19200	141	105632	0	0	0	0.80
+functiontypes	normal	match	match	129	19152	141	102784	0	0	0	0.64
+get_type_confirms	normal	match	match	129	19408	150	106448	0	0	0	0.68
+git_import	normal	match	match	132	19664	160	108512	0	0	0	0.73
+git_import2	normal	match	match	127	19040	115	93056	0	0	0	0.79
+greedy_chess	normal	match	match	10001		10003				1	
+he_assert	normal	match	match	148	20288	257	125008	0	0	0	0.71
+he_atomspace	normal	match	match	147	20304	146	105600	0	0	0	0.57
+he_equalreduct	normal	match	match	146	20240	255	122480	0	0	0	0.58
+he_error	normal	match	match	148	20336	124	97232	0	0	0	1.13
+he_evaluation	normal	match	match	147	20352	256	123232	0	0	0	0.61
+he_math	normal	match	match	128	19120	133	101808	0	0	0	0.76
+he_minimalmetta	normal	match	match	7916	88560	8153	215616	0	0	0	0.71
+he_quoting	normal	match	match	146	20240	119	94800	0	0	0	0.91
+he_types	normal	match	match	146	20352	120	93808	0	0	0	0.64
+holbenchmark	normal	match	match	2253	837584	3289	446864	0	0	0	0.74
+holfunctions	normal	match	match	131	19600	155	110192	0	0	0	0.60
+holfunctions_intrinsicop	normal	match	match	128	19168	129	98832	0	0	0	0.84
+hyperpose_primes	normal	match	match	2618	20480	3303	148928	0	0	0	0.76
+identity	normal	match	match	127	19120	113	89296	0	0	0	0.60
+if	normal	match	match	128	19072	106	83024	0	0	0	0.75
+if2	normal	match	match	127	19088	107	82464	0	0	0	0.75
+if3	normal	match	match	126	19072	108	83632	0	0	0	0.99
+if4	normal	match	match	127	19088	110	84160	0	0	0	0.74
+ifcasenondet	normal	match	match	128	19168	126	97504	0	0	0	0.67
+ifsimple	normal	match	match	127	19056	101	79760	0	0	0	0.73
+import_duplicate_cycle	normal	match	match	128	19184	122	96512	0	0	0	0.77
+import_error_surface	normal	match	match	146	20320	118	93664	0	0	0	0.76
+import_relative_nested	normal	match	match	142	26240	163	93296	0	0	0	0.81
+import_space_identity	normal	match	match	128	19120	113	89248	0	0	0	0.86
+inferred_sentinel_param	normal	match	match	128	19168	131	101424	0	0	0	0.61
+invertfunction	normal	match	match	128	19152	126	98640	0	0	0	0.80
+invertpeanoplus	normal	match	match	129	19168	140	103312	0	0	0	0.58
+is_alpha_member_test	normal	match	match	129	19376	149	108032	0	0	0	0.91
+isvar_det_param	normal	match	match	128	19056	129	99680	0	0	0	0.59
+iter	normal	match	match	129	19120	127	99600	0	0	0	1.11
+lambda	normal	match	match	130	19584	158	108288	0	0	0	0.75
+lambda_fresh_names	normal	match	match	131	20144	164	131552	0	0	0	0.71
+late_decl_user	normal	match	match	128	19152	121	99584	0	0	0	0.65
+late_definition	normal	match	match	127	19152	116	90352	0	0	0	0.58
+late_import	normal	match	match	129	19264	134	105568	0	0	0	0.64
+let_superpose_if_case	normal	match	match	128	19152	135	104000	0	0	0	1.03
+letext	normal	match	match	126	19088	108	84560	0	0	0	0.66
+letlet	normal	match	match	127	19184	118	89648	0	0	0	0.56
+letstar	normal	match	match	126	19104	105	82240	0	0	0	0.68
+lib_roman_he_if_error	normal	match	match	207	23472	237	126080	0	0	0	0.81
+lib_roman_pair_helpers	normal	match	match	198	23072	480	152336	0	0	0	0.61
+lib_trust_datastructures_call	normal	match	match	133	19808	185	117568	0	0	0	0.80
+lib_trust_declared_caller	normal	match	match	129	19136	130	100208	0	0	0	0.67
+lib_trust_library_call	normal	match	match	128	19168	128	99504	0	0	0	0.76
+lib_trust_origin_recompile	normal	match	match	130	19216	134	107600	0	0	0	0.87
+lib_trust_user_redeclaration	normal	match	match	128	19216	130	101440	0	0	0	0.80
+library	normal	match	match	197	22976	134	107936	0	0	0	0.63
+listhead	normal	match	match	128	19168	126	100800	0	0	0	0.62
+llm_cities	normal	match	match	180	32320	236	113424	0	0	0	1.03
+logicprog	normal	match	match	129	19168	135	102576	0	0	0	0.65
+logicprogset	normal	match	match	128	19136	123	98256	0	0	0	1.10
+matchnested	normal	match	match	128	19184	122	99792	0	0	0	0.82
+matchnested2	normal	match	match	127	19216	125	99584	0	0	0	0.71
+matchsingle	normal	match	match	128	19120	124	99648	0	0	0	0.73
+matchtypes	normal	match	match	129	19152	126	98816	0	0	0	0.65
+matespace	normal	match	match	5374	640144	3974	952464	0	0	0	0.68
+matespace2	normal	match	match	7429	576640	4379	827008	0	0	0	0.65
+matespacefast	normal	match	match	4465	3472272	8240	3049776	0	0	0	0.73
+math	normal	match	match	127	19168	131	101920	0	0	0	0.65
+measure	normal	match	match	143	20448	148	110848	0	0	0	0.69
+meta_types	normal	match	match	126	19120	109	87728	0	0	0	0.75
+metta4_prog	normal	match	match	126	19104	109	88624	0	0	0	0.70
+metta4_streams	normal	match	match	129	19168	147	102384	0	0	0	0.69
+mettaset	normal	match	match	127	19008	114	89936	0	0	0	0.64
+multicall	normal	match	match	127	19184	118	93360	0	0	0	0.64
+multiset_operations	normal	match	match	126	19104	123	95072	0	0	0	1.15
+mutex_and_transaction	normal	match	match	129	20160	147	114976	0	0	0	0.70
+myinterpreter	normal	match	match	127	19120	128	100784	0	0	0	0.90
+nars_direct	normal	match	match	195	28336	477	152256	0	0	0	0.62
+nars_tuffy	normal	match	match	354	25376	815	171376	0	0	0	0.63
+nestedcons	normal	match	match	127	19136	111	89488	0	0	0	0.81
+newtons_method	normal	match	match	143	19952	211	119648	0	0	0	0.71
+nilbc	normal	match	match	175	21072	360	142624	0	0	0	0.85
+once	normal	match	match	127	19152	118	91680	0	0	0	0.86
+outputtype	normal	match	match	129	19104	131	100784	0	0	0	0.68
+parametric_types	normal	match	match	128	19200	123	100400	0	0	0	0.59
+parse	normal	match	match	127	19104	116	90960	0	0	0	0.94
+partial_builtin_arity	normal	match	match	128	19168	117	93920	0	0	0	0.83
+partial_list_pattern	normal	match	match	128	19136	121	97840	0	0	0	0.54
+partialdef	normal	match	match	129	19104	120	94880	0	0	0	0.73
+patrick_iterate_fib	normal	match	match	136	19760	194	117376	0	0	0	0.71
+patrick_iterate_quad	normal	match	match	596	19744	475	144400	0	0	0	0.60
+patrick_test	normal	match	match	134	19760	192	118592	0	0	0	1.03
+peano	normal	match	match	1930	23824	805	133024	0	0	0	0.61
+peanofast	normal	match	match	462	366592	612	357936	0	0	0	0.81
+permutations	normal	match	match	856	146336	1983	240416	0	0	0	0.77
+pln_direct	normal	match	match	226	25280	559	153232	0	0	0	0.64
+pln_roman	normal	match	match	263	28208	650	162320	0	0	0	0.62
+pln_tuffy	normal	match	match	241	28640	632	160192	0	0	0	0.54
+plntest	normal	match	match	136	19728	198	113744	0	0	0	0.64
+plntestdirect	normal	match	match	137	19776	205	114288	0	0	0	0.97
+prologimport	normal	match	match	139	20064	215	119136	0	0	0	0.71
+python	normal	match	match	144	26448	189	107664	0	0	0	0.73
+python_import	normal	match	match	142	26272	152	87264	0	0	0	0.76
+recursive_types	normal	match	match	127	19168	115	92992	0	0	0	0.88
+recursive_types2	normal	match	match	129	19152	135	105040	0	0	0	0.60
+repeated_var_shared_inhabitant	normal	match	match	128	19280	129	101312	0	0	0	0.67
+repl	normal	match	match	10000		10002				1	
+repr	normal	match	match	127	19120	112	87696	0	0	0	0.68
+roman_test	normal	match	match	205	23184	526	161376	0	0	0	0.67
+scale	normal	match	match	1278	427184	2808	927344	0	0	0	0.78
+selfprog	normal	match	match	128	19104	123	97280	0	0	0	0.93
+semidet_partial_constructs	normal	match	match	131	19632	157	110816	0	0	0	0.57
+singleton_call	normal	match	match	128	19152	124	97888	0	0	0	0.96
+smartdispatch	normal	match	match	128	19200	130	98000	0	0	0	0.68
+spacefunction	normal	match	match	129	19168	129	100608	0	0	0	0.70
+spaceof_existing_rows	normal	match	match	128	19088	111	89712	0	0	0	0.70
+spaces	normal	match	match	127	19152	124	97968	0	0	0	0.82
+spaces_find	normal	match	match	130	19648	115	92240	0	0	0	0.55
+spaces_removeallatoms	normal	match	match	132	19888	177	113552	0	0	0	0.70
+spaces_succeedspredicate	normal	match	match	131	19616	115	92960	0	0	0	0.71
+spaces2	normal	match	match	127	19136	122	94672	0	0	0	0.58
+spaces3	normal	match	match	127	19136	123	94624	0	0	0	0.67
+specialize	normal	match	match	137	19936	209	123344	0	0	0	0.66
+specialize_recursive_wrap	normal	match	match	129	19168	135	100160	0	0	0	1.12
+specializecyclic	normal	match	match	131	19392	155	108928	0	0	0	0.66
+specialized_call_exception	normal	match	match	129	19168	125	98768	0	0	0	0.67
+specializefunctiontypes	normal	match	match	127	19088	126	98512	0	0	0	0.65
+specializetypedclosure	normal	match	match	129	19168	142	103328	0	0	0	0.79
+staged_recompile_swap	normal	match	match	129	19120	128	100368	0	0	0	0.77
+state	normal	match	match	127	19104	108	86384	0	0	0	0.67
+streamops	normal	match	match	128	19120	123	97056	0	0	0	0.63
+strict_alias_late	strict	match	match	133	19904	175	111824	0	0	0	0.78
+strict_alias_product	strict	match	match	133	19824	184	110496	0	0	0	0.63
+strict_branch_constructor_result	strict	match	match	130	19488	144	110272	0	0	0	0.75
+strict_branch_output_ascription	strict	match	match	131	19616	154	109824	0	0	0	0.85
+strict_branch_parametric_narrowing	strict	match	match	128	19216	134	101760	0	0	0	1.03
+strict_brand_control_flow	strict	match	match	127	19152	126	100224	0	0	0	0.78
+strict_brand_expectation	strict	match	match	133	19680	182	117568	0	0	0	0.65
+strict_contextual_data_tuple	strict	match	match	133	19776	187	112768	0	0	0	0.78
+strict_contextual_list	strict	match	match	206	23248	530	157872	0	0	0	0.68
+strict_deferred_guard_alpha	strict	match	match	127	19088	115	91680	0	0	0	0.81
+strict_destructured_param	strict	match	match	129	19472	150	106192	0	0	0	0.62
+strict_det_closure_inferred	strict	match	match	131	19808	162	109696	0	0	0	0.67
+strict_dynamic_list_recursion	strict	match	match	132	19472	157	108160	0	0	0	0.77
+strict_foreign_heap	strict	match	match	137	19856	198	115888	0	0	0	0.72
+strict_foreign_product_instantiation	strict	match	match	142	19920	214	118560	0	0	0	0.81
+strict_forward_decl	strict	match	match	130	19472	147	107712	0	0	0	0.80
+strict_lambda_branch_isolation	strict	match	match	129	19264	137	101072	0	0	0	0.70
+strict_lib_he	strict	match	match	147	20384	253	123456	0	0	0	0.61
+strict_lib_import	strict	match	match	131	19568	150	106032	0	0	0	0.70
+strict_list_accessor_types	strict	match	match	136	19920	203	116768	0	0	0	0.66
+strict_map_flat_data_tuple	strict	match	match	199	23056	491	157456	0	0	0	0.55
+strict_match_contextual_result	strict	match	match	131	19520	155	108416	0	0	0	0.69
+strict_match_schema	strict	match	match	131	19440	143	104576	0	0	0	0.83
+strict_mixed_list_widening	strict	match	match	128	19248	130	100048	0	0	0	0.56
+strict_nested_product_parameter	strict	match	match	212	23552	570	161056	0	0	0	0.84
+strict_newtype_pattern_binding	strict	match	match	130	19456	145	104784	0	0	0	0.64
+strict_newtypes	strict	match	match	133	19856	180	115056	0	0	0	0.66
+strict_pass_declared	strict	match	match	130	19216	136	100096	0	0	0	0.90
+strict_positional_tuple_types	strict	match	match	131	19632	146	108848	0	0	0	0.63
+strict_quoted_compound_output	strict	match	match	127	19168	117	91520	0	0	0	0.64
+strict_quoted_structural_product	strict	match	match	127	19168	123	98272	0	0	0	0.83
+strict_roman_if_error	strict	match	match	196	23008	123	103680	0	0	0	0.66
+strict_semidet_closure_inferred	strict	match	match	132	19680	163	112992	0	0	0	0.69
+strict_spaceof_failed_decl_cleanup	strict	match	match	126	19120	116	92368	0	0	0	0.70
+strict_symmetric_var_conflict	strict	match	match	130	19248	142	105040	0	0	0	0.68
+strict_the_ascription	strict	match	match	131	19248	146	109760	0	0	0	0.97
+strict_tuple_types	strict	match	match	217	25248	572	162752	0	0	0	0.68
+strict_type_flow	strict	match	match	201	23152	495	158624	0	0	0	0.75
+strict_typed_space	strict	match	match	130	19424	146	104032	0	0	0	0.79
+strict_typed_space_at_pattern	strict	match	match	136	19696	203	116448	0	0	0	0.64
+strict_union_atom_lists	strict	match	match	136	19776	189	115344	0	0	0	0.68
+strict_union_case_narrowing	strict	match	match	128	19152	128	101472	0	0	0	0.91
+strict_union_catch	strict	match	match	202	23056	494	156128	0	0	0	0.76
+strict_union_constructor_narrowing	strict	match	match	129	19216	132	102784	0	0	0	0.90
+strict_union_prior_branch_narrowing	strict	match	match	136	19728	185	115840	0	0	0	1.42
+strict_union_reducible_helper_not_ctor	strict	match	match	132	19904	171	113264	0	0	0	0.69
+strict_union_structural_branch	strict	match	match	129	19216	135	100960	0	0	0	0.61
+strict_union_types	strict	match	match	204	23280	517	159488	0	0	0	0.64
+strictdet_basics	strict	match	match	133	19888	174	111648	0	0	0	0.61
+strictdet_bool_call_operand	strict	match	match	129	19248	135	101328	0	0	0	0.90
+strictdet_bool_cert_control_operand	strict	match	match	132	19616	161	112016	0	0	0	0.62
+strictdet_builtin_arg_shapes	strict	match	match	132	19856	175	112160	0	0	0	0.67
+strictdet_callpredicate_declared	strict	match	match	129	19184	129	99856	0	0	0	1.08
+strictdet_case_fallthrough_narrowing	strict	match	match	130	19760	154	108320	0	0	0	0.81
+strictdet_chainer_andthen_destructure	strict	match	match	130	19520	141	104384	0	0	0	0.71
+strictdet_closures	strict	match	match	131	19776	162	109504	0	0	0	0.57
+strictdet_collapse_let_nonempty	strict	match	match	130	19168	136	100848	0	0	0	1.01
+strictdet_collapse_letstar_nonempty	strict	match	match	129	19216	138	103200	0	0	0	0.66
+strictdet_collapse_proper_list	strict	match	match	129	19456	142	106736	0	0	0	0.64
+strictdet_decons_semidet	strict	match	match	128	19200	120	98384	0	0	0	0.70
+strictdet_destructured_tuple_recon	strict	match	match	130	19408	139	104192	0	0	0	0.69
+strictdet_det_bool_ops	strict	match	match	129	19520	139	102512	0	0	0	0.77
+strictdet_det_exhaustive_limits	strict	match	match	131	19744	154	109808	0	0	0	0.66
+strictdet_effect_polymorphism	strict	match	match	138	20096	210	117216	0	0	0	0.70
+strictdet_explicit_arrow_positions	strict	match	match	129	19264	129	101440	0	0	0	0.89
+strictdet_forward_mutual_bool	strict	match	match	132	19520	153	111392	0	0	0	0.77
+strictdet_higher_order_builtins	strict	match	match	132	19872	174	112512	0	0	0	0.66
+strictdet_if_equal_narrowing	strict	match	match	135	19856	185	117968	0	0	0	0.61
+strictdet_if_union_subtraction_variable_head	strict	match	match	132	19680	171	116096	0	0	0	0.94
+strictdet_inferred_call_selection	strict	match	match	129	19152	126	100160	0	0	0	0.91
+strictdet_is_member_literal	strict	match	match	129	19200	132	103744	0	0	0	0.72
+strictdet_is_member_nested_bool	strict	match	match	128	19152	128	100960	0	0	0	0.82
+strictdet_let_nominal_destructure	strict	match	match	129	19232	129	100288	0	0	0	0.85
+strictdet_let_resolved_fold_product	strict	match	match	200	23088	497	157488	0	0	0	0.63
+strictdet_let_typed_list_selection	strict	match	match	128	19264	136	100416	0	0	0	0.69
+strictdet_let_value_cut	strict	match	match	128	19216	122	98592	0	0	0	0.66
+strictdet_lib_combinatorics	strict	match	match	135	19792	115	91696	0	0	0	0.67
+strictdet_lib_datastructures	strict	match	match	131	19856	115	93376	0	0	0	0.70
+strictdet_lib_datetime	strict	match	match	134	19936	179	119472	0	0	0	0.71
+strictdet_lib_he	strict	match	match	149	20416	273	122640	0	0	0	0.90
+strictdet_lib_mm2	strict	match	match	129	19280	109	86096	0	0	0	0.76
+strictdet_lib_patrick	strict	match	match	135	19792	201	123312	0	0	0	0.70
+strictdet_lib_roman	strict	match	match	218	23632	580	164672	0	0	0	0.65
+strictdet_lib_spaces	strict	match	match	131	19648	110	87568	0	0	0	0.63
+strictdet_lib_tabling	strict	match	match	130	19248	135	102432	0	0	0	0.67
+strictdet_lib_trust_fixture	strict	match	match	127	19232	130	98864	0	0	0	0.55
+strictdet_lib_vector	strict	match	match	133	19840	112	87552	0	0	0	0.87
+strictdet_lib_zar	strict	match	match	129	19552	109	85744	0	0	0	0.69
+strictdet_min_atom_tuple	strict	match	match	128	19200	127	100208	0	0	0	0.57
+strictdet_min_computed_elements	strict	match	match	128	19168	130	101104	0	0	0	0.74
+strictdet_mutual_bool_output	strict	match	match	131	19616	151	109744	0	0	0	0.97
+strictdet_nested_bool_operand	strict	match	match	128	19248	134	100640	0	0	0	1.27
+strictdet_nested_constructed_tuple_case_newtype_field	strict	match	match	131	19600	164	111968	0	0	0	0.78
+strictdet_nested_nominal_arg	strict	match	match	129	19536	139	105120	0	0	0	0.78
+strictdet_newtype_head_param	strict	match	match	130	19360	143	108736	0	0	0	0.83
+strictdet_nonempty_branch	strict	match	match	130	19424	142	104160	0	0	0	0.79
+strictdet_outer_brand_case_open_fallthrough	strict	match	match	130	19504	162	109456	0	0	0	0.61
+strictdet_outer_brand_let_binding	strict	match	match	132	19504	162	112352	0	0	0	0.79
+strictdet_proper_bool_case	strict	match	match	129	19216	130	100400	0	0	0	0.81
+strictdet_proper_bool_if	strict	match	match	128	19232	131	99296	0	0	0	0.78
+strictdet_query_shape_bool	strict	match	match	133	19776	178	115216	0	0	0	0.57
+strictdet_remove_atom_nominal	strict	match	match	129	19200	130	102016	0	0	0	0.99
+strictdet_repeated_var_overlapping_unions	strict	match	match	128	19216	128	99136	0	0	0	0.82
+strictdet_runtime_add_cleanup	strict	match	match	128	19072	116	91824	0	0	0	0.94
+strictdet_runtime_recompile_fresh_callee_summary	strict	match	match	130	19568	145	107488	0	0	0	0.70
+strictdet_semidet_arrow	strict	match	match	130	19760	158	111104	0	0	0	0.62
+strictdet_semidet_lco	strict	match	match	161	19504	272	117424	0	0	0	0.67
+strictdet_space_ops_manifest	strict	match	match	128	19200	128	100992	0	0	0	0.51
+strictdet_space_update_payload	strict	match	match	129	19552	154	107472	0	0	0	0.77
+strictdet_unified_cross_file_cache	strict	match	match	129	19232	139	103056	0	0	0	0.61
+strictdet_unify_pattern_det	strict	match	match	127	19184	127	101920	0	0	0	0.69
+string	normal	match	match	128	19072	101	78624	0	0	0	0.79
+supercollapse	normal	match	match	129	19216	131	101536	0	0	0	0.66
+superpose_empty	normal	match	match	127	19056	128	99552	0	0	0	0.77
+superpose_nested	normal	match	match	128	19152	130	103360	0	0	0	0.55
+superpose_primes	normal	match	match	142	19712	149	106944	0	0	0	1.03
+swrite_variable_identity	normal	match	match	135	21824	185	111776	0	0	0	0.74
+syntactic_compare	normal	match	match	127	19072	109	88208	0	0	0	0.58
+tabling_fib	normal	match	match	132	19632	454	128880	0	0	0	0.70
+test_add_primitive	normal	match	match	129	19328	146	107024	0	0	0	0.81
+test_alpha_unique_atom	normal	match	match	132	19760	179	120816	0	0	0	0.64
+test_datetime	normal	match	match	135	19808	190	116432	0	0	0	0.71
+test_memo_aggregate	normal	match	match	134	19792	154	107824	0	0	0	0.81
+test_memo_dependency_invalidation	normal	match	match	133	19680	146	105264	0	0	0	0.83
+test_memo_multi_answer	normal	match	match	134	19664	147	106464	0	0	0	0.58
+test_memo_partial_body	normal	match	match	135	19792	162	107568	0	0	0	0.72
+test_memo_per_arity	normal	match	match	134	19664	163	108176	0	0	0	0.80
+test_memo_same_name_multi_arity	normal	match	match	137	19824	177	116224	0	0	0	0.83
+test_memo_stats	normal	match	match	132	19600	146	104720	0	0	0	0.86
+test_memo_variant_nonground	normal	match	match	133	19600	145	105440	0	0	0	0.72
+test_string_comments	normal	match	match	129	19152	119	92816	0	0	0	1.03
+test_unify_eval_branches	normal	match	match	146	20240	128	104720	0	0	0	0.69
+tests	normal	match	match	129	19456	149	111456	0	0	0	0.54
+tilepuzzle	normal	match	match	1924	126400	3858	271392	0	0	0	0.60
+torch	normal	match	match	141	25792	196	110768	0	0	0	0.96
+translatepredicate	normal	match	match	126	19040	104	81344	0	0	0	0.85
+translatorrule	normal	match	match	129	19120	122	97024	0	0	0	0.87
+translatorrule_fib	normal	match	match	128	19168	134	103616	0	0	0	0.66
+translatorrule_for	normal	match	match	128	19184	131	100208	0	0	0	0.80
+twostage	normal	match	match	127	19120	117	90208	0	0	0	0.66
+type_context_compile	normal	match	match	128	19152	125	100512	0	0	0	0.82
+type_decl_kind_conflicts	normal	match	match	129	19424	142	106112	0	0	0	0.57
+type_decl_removal_kinds	normal	match	match	130	19472	148	108336	0	0	0	0.89
+type_decl_removal_recompile	normal	match	match	127	19200	128	101648	0	0	0	0.69
+type_deferred_guard_alpha	normal	match	match	147	20208	254	122784	0	0	0	0.94
+type_edge_cases	normal	match	match	149	20400	288	147872	0	0	0	0.60
+type_inference	normal	match	match	129	19392	145	105600	0	0	0	1.05
+type_list_parametric	normal	match	match	198	22976	491	156240	0	0	0	0.64
+type_overload_resolved	normal	match	match	129	19152	131	102608	0	0	0	0.57
+type_overload_runtime_error	normal	match	match	130	19104	137	108816	0	0	0	0.78
+type_parametric_params	normal	match	match	130	19408	149	107472	0	0	0	0.57
+type_pipeline	normal	match	match	150	20400	285	136816	0	0	0	0.64
+type_previous_try_coverage	normal	match	match	156	20432	310	153696	0	0	0	0.64
+type_runtime_output_fallback	normal	match	match	150	20368	283	125648	0	0	0	0.64
+type_single_monomorphic_resolved	normal	match	match	128	19168	108	84160	0	0	0	0.53
+type_single_poly_resolved	normal	match	match	200	22976	135	107728	0	0	0	1.05
+typed_space_proven_update	normal	match	match	130	19408	151	113664	0	0	0	0.57
+types	normal	match	match	129	19424	142	104592	0	0	0	0.81
+types_dependent	normal	match	match	129	19312	139	102752	0	0	0	0.81
+types_nondet	normal	match	match	136	19872	192	122528	0	0	0	0.69
+unbound_atom_not_equation	normal	match	match	129	19424	148	107744	0	0	0	0.63
+xor	normal	match	match	129	19168	123	98352	0	0	0	0.61
