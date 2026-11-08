@@ -12,7 +12,7 @@
 // outside concurrent_and's workers the atoms a run made go once no cell or findall bag holds them.
 // am[implements a-petta-cell-store.control]
 
-import { getHeapStatistics } from "node:v8";
+import { getHeapSpaceStatistics, getHeapStatistics } from "node:v8";
 import { argHashIndex, clauseArgHash, type Clause, type Pred } from "../db";
 import { copyTerm, variantKeyOf, type Builtin, type Machine } from "../machine";
 import { MAX_LOOKAHEAD, clauseScan, type Scan } from "../swi-index";
@@ -126,21 +126,56 @@ const BOX_CELLS = 20;
  */
 const FIBER_MIN_GROWTH = GC_MIN_GROWTH >> 3;
 /**
- * How often a call port checks V8's heap (boundV8Heap): every 65536 calls, a few microseconds each time.
+ * The most calls between two checks of V8's heap (boundV8Heap), each a microsecond or two; nearer MemBalancer's limit
+ * a check comes sooner, when the old generation would reach the limit at the rate it grew per call before.
  */
-const V8_CHECK_MASK = 0xffff;
+const V8_CHECK_CALLS = 1 << 16;
 /**
- * How far V8's heap may grow past the live size the machine's last collection of it left, V8_GROWTH times it plus
- * V8_SLACK, before the machine collects it again: V8's own growing factor reached four times live on tilepuzzle
- * (c-v8-growth-tilepuzzle-1107), and the goal bounds peak memory at twice PeTTa's plus 150 MB; --optimize-for-size's
- * factor of two cost up to two and a half times the CPU (c-optimize-for-size-1107), and V8's own growing factor at
- * 1.5 (--heap-growing-percent=50) cost more instructions than this bound for a lower peak only on scale. At 1.5 times
- * plus 32 MB tilepuzzle's and scale's peaks fall by 66 and 86 MB from twice plus 64 MB, for 9 and 3 percent more
- * instructions there and none measurable on the other long examples (c-v8-bound-sweep-1107).
- * am[implements a-petta-cell-store.tune.v8bound-tight]
+ * MemBalancer's constant c (Kirisame et al., Optimal Heap Limits for Reducing Browser Memory Use, PLDI 2022) as V8
+ * sets it (src/flags/flag-definitions.h, memory_balancer_c_value): V8's own growing factor let the heap reach four
+ * times live on tilepuzzle (c-v8-growth-tilepuzzle-1107), and V8's balancer cannot be switched on from inside the
+ * CLI (i-membalancer-runtime-flag-crash-1108), so the machine applies the rule itself (membalancerLimit).
+ * am[implements a-petta-speed-general-1108.heap]
  */
-const V8_GROWTH = 1.5;
-const V8_SLACK = 32 << 20;
+const MB_C = 3e-10;
+/** The weight V8's MemBalancer keeps of the smoothed allocation and collection samples at each new one (memory-balancer.h). */
+const MB_ALLOC_DECAY = 0.95;
+const MB_GC_DECAY = 0.5;
+/** The least room V8's MemBalancer leaves past the live size (memory-balancer.cc, kMinHeapExtraSpace). */
+const MB_MIN_EXTRA = 2 << 20;
+
+/**
+ * The size MemBalancer lets V8's old generation reach before it is collected: `live` bytes after a collection plus
+ * sqrt(live x allocation / speed / c), allocation and collection speed in bytes a millisecond, and no less than
+ * MB_MIN_EXTRA past live (V8's MemoryBalancer::RefreshLimit).
+ * am[implements a-petta-speed-general-1108.heap]
+ */
+export const membalancerLimit = (live: number, allocation: number, speed: number): number =>
+  live + Math.max(MB_MIN_EXTRA, Math.sqrt((live * allocation) / speed / MB_C));
+
+/** V8's old generation in bytes of objects, as V8's OldGenerationSizeOfObjects counts it: every space but the young and read-only ones. */
+function oldGeneration(): number {
+  let n = 0;
+  for (const s of getHeapSpaceStatistics())
+    if (s.space_name !== "new_space" && s.space_name !== "new_large_object_space" && s.space_name !== "read_only_space") n += s.space_used_size;
+  return n;
+}
+
+/**
+ * MemBalancer's measurements, smoothed as V8 smooths them (each an exponentially weighted pair of bytes and
+ * milliseconds whose ratio is the rate): the old generation's growth between the machine's checks of it, as V8's
+ * heartbeat samples it, and the heap each forced collection began with over the time it took; the live old
+ * generation the last collection left; and the old generation and time of the last sample.
+ */
+interface Balancer {
+  allocBytes: number;
+  allocMs: number;
+  gcBytes: number;
+  gcMs: number;
+  live: number;
+  last: number;
+  at: number;
+}
 /** Control stack cells each concurrent_and worker gets in its choicepoint's area. */
 const FIBER_S = 1 << 18;
 /** Trampoline bounces a worker runs before the next takes its turn, as the object machine's workers run SLICE goals. */
@@ -378,8 +413,8 @@ export class CellMachine {
   /** concurrent_and choicepoints whose workers still hold heap arrays, so a cut or a ball knows to look (releaseFibersAbove). */
   private fiberGroups = 0;
   /**
-   * A major collection of V8's heap, which the hosted runtime hands the machine (hosted.ts) so it can hold V8's heap
-   * to V8_GROWTH times its live size plus V8_SLACK; null leaves V8 to its own growth.
+   * A major collection of V8's heap, which the hosted runtime hands the machine (hosted.ts) so it can hold V8's old
+   * generation to MemBalancer's limit (boundV8Heap); null leaves V8 to its own growth.
    */
   majorGc: (() => void) | null = null;
   /**
@@ -388,9 +423,11 @@ export class CellMachine {
    * am[implements a-petta-next-1108.speed.cut.tier]
    */
   tierWork = TIER_WORK;
-  private v8Tick = 0;
-  /** V8's used heap after the last collection this machine asked for. */
-  private v8Live = 0;
+  /** Calls before the next check of V8's heap, and the calls since the last (boundV8Heap). */
+  private v8Countdown = V8_CHECK_CALLS;
+  private v8Interval = V8_CHECK_CALLS;
+  /** MemBalancer's measurements, from the first check of V8's heap on (boundV8Heap). */
+  private balancer: Balancer | null = null;
 
   constructor(readonly om: Machine) {
     if (om.db.cellMachine !== null) throw new Error("cell machine: a database has one cell machine, the clauses' code being bound to it");
@@ -1094,15 +1131,47 @@ export class CellMachine {
   }
 
   /**
-   * Collect V8's heap with `gc` when its size has passed V8_GROWTH times the live size the last such collection left
-   * plus V8_SLACK, and note the new live size.
-   * am[implements a-petta-cell-store.tune.v8bound]
-   * am[implements a-petta-cell-store.tune.v8bound-tight]
+   * Collect V8's heap with `gc` once its old generation has passed MemBalancer's limit (membalancerLimit) for the
+   * live size, allocation rate and collection speed measured so far. The first check collects to measure the live
+   * size and the collection speed, as V8's balancer starts from its first major collection; each later one samples
+   * the allocation. The next check comes when the old generation, growing per call as it did since this one's
+   * predecessor, would reach the limit, and after V8_CHECK_CALLS calls at most: scale grew 356 MB past the limit
+   * within 65536 calls (c-v8-check-overshoot-1108). Time: one read of V8's space statistics, and a collection when
+   * the limit is passed.
+   * am[implements a-petta-speed-general-1108.heap]
    */
   private boundV8Heap(gc: () => void): void {
-    if (getHeapStatistics().total_heap_size <= V8_GROWTH * this.v8Live + V8_SLACK) return;
+    let perCall = 0;
+    const b = this.balancer;
+    if (b === null) this.collectV8(gc);
+    else {
+      const old = oldGeneration(), now = performance.now();
+      const bytes = Math.max(0, old - b.last), ms = now - b.at;
+      perCall = bytes / this.v8Interval;
+      if (b.allocMs === 0) [b.allocBytes, b.allocMs] = [bytes, ms];
+      else [b.allocBytes, b.allocMs] = [b.allocBytes * MB_ALLOC_DECAY + bytes * (1 - MB_ALLOC_DECAY), b.allocMs * MB_ALLOC_DECAY + ms * (1 - MB_ALLOC_DECAY)];
+      b.last = old;
+      b.at = now;
+      if (old > membalancerLimit(b.live, b.allocBytes / b.allocMs, b.gcBytes / b.gcMs)) this.collectV8(gc);
+    }
+    const s = this.balancer!;
+    const room = s.allocMs === 0 ? Infinity : membalancerLimit(s.live, s.allocBytes / s.allocMs, s.gcBytes / s.gcMs) - s.last;
+    const calls = perCall > 0 ? room / perCall : V8_CHECK_CALLS;
+    this.v8Interval = this.v8Countdown = Math.max(1, Math.min(V8_CHECK_CALLS, Math.floor(calls)));
+  }
+
+  /** Collect V8's heap with `gc`, sampling the collection's speed and the live size it leaves. */
+  private collectV8(gc: () => void): void {
+    const bytes = getHeapStatistics().used_heap_size;
+    const t0 = performance.now();
     gc();
-    this.v8Live = getHeapStatistics().used_heap_size;
+    const at = performance.now(), live = oldGeneration();
+    const b = this.balancer;
+    if (b === null) this.balancer = { allocBytes: 0, allocMs: 0, gcBytes: bytes, gcMs: at - t0, live, last: live, at };
+    else {
+      [b.gcBytes, b.gcMs] = [b.gcBytes * MB_GC_DECAY + bytes * (1 - MB_GC_DECAY), b.gcMs * MB_GC_DECAY + (at - t0) * (1 - MB_GC_DECAY)];
+      [b.live, b.last, b.at] = [live, live, at];
+    }
   }
 
   /** The running computation's state, to put back with loadCtx. */
@@ -1423,7 +1492,7 @@ export class CellMachine {
     // A call port is where the collector runs: compiled code calls in tail position, so only A[0..n), the control
     // stack and the held roots hold cells.
     if (this.used() >= this.gcAt) this.collect(n);
-    if (this.majorGc !== null && (++this.v8Tick & V8_CHECK_MASK) === 0) this.boundV8Heap(this.majorGc);
+    if (this.majorGc !== null && --this.v8Countdown === 0) this.boundV8Heap(this.majorGc);
     // The catch context of the call, which a throw from inside it unwinds to (unwind).
     this.R[RCC] = cc;
     if (p.det !== undefined) {
