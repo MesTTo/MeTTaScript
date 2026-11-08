@@ -3,8 +3,9 @@
 // SPDX-License-Identifier: MIT
 
 // Purpose: build the package's import snapshots (dist/petta.imports/) at package build time, after the image:
-// for each library in lib/*.metta and each argv form a run takes (with and without --silent, plain, --strict and
-// --strict-det), import the library as the first form of a program and record the load's effect (import-snapshot.ts).
+// for each library in lib/*.metta and each argv form argvForms derives from the argv-reading directives the image
+// runs again at load, import the library as the first form of a program and record the load's effect
+// (import-snapshot.ts).
 // Each snapshot is checked three ways before it ships: the import is recorded from programs at two different paths
 // under two different working directories, which must give the same starting fingerprint, files and effect, so the
 // effect names nothing of the importing program; and the second program is run again replaying the first program's
@@ -17,12 +18,51 @@
 import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { HostedPetta, imagePaths } from "./hosted";
-import { engineHash } from "./image";
+import { argvDependence, atomsOf, Encoder, engineHash, loadImage, readImage, runArgvDirectives } from "./image";
 import { IMPORTS_DIR, installImportReplay, recordImport, snapshotFiles, snapshotList, stateLines, type Snapshot } from "./import-snapshot";
+import { copyTerm } from "./machine";
+import { mkList } from "./terms";
 import type { CellMachine } from "./cell/machine";
 
-/** The argv forms after a program's file the snapshots serve: what petta-compare and plain runs pass. */
-const ARGVS: string[][] = [["--silent"], ["--silent", "--strict"], ["--silent", "--strict-det"], [], ["--strict"], ["--strict-det"]];
+/**
+ * The argv forms after a program's file the snapshots are recorded under, from the argv-reading directives image
+ * `image` runs again at load (image.ts ArgvDependence): each directive given no atom or one of the atoms it names, an
+ * atom kept only where the directive run alone under it leaves the argv predicates in a state no atom before it left,
+ * and every combination of the directives' kept atoms. Branch atoms are left out, since a run naming one consults.
+ * Time: one run of a directive per atom it names, then the product of the directives' kept atom counts.
+ */
+function argvForms(image: Record<string, unknown>, root: string): string[][] {
+  const av = argvDependence(image, root);
+  const h = new HostedPetta({ argv: ["argv-forms"], out: () => {}, err: (s) => process.stderr.write(s), load: "none" });
+  loadImage(h.m, image, root);
+  const enc = new Encoder(root);
+  const state = (): string =>
+    JSON.stringify(
+      av.preds.map((key) => {
+        const i = key.lastIndexOf("/");
+        const p = h.m.db.get(key.slice(0, i), Number(key.slice(i + 1)));
+        return p === undefined ? [] : p.clauses.filter((c) => c.died === Infinity).map((c) => enc.term(c.head));
+      }),
+    );
+  let forms: string[][] = [[]];
+  for (const d of av.directives) {
+    const atoms = new Set<string>();
+    atomsOf(d.goal, atoms);
+    const seen = new Set<string>();
+    const kept: string[][] = [];
+    for (const tail of [[], ...[...atoms].filter((a) => !av.branchAtoms.includes(a)).sort().map((a) => [a])]) {
+      h.m.flags.set("argv", mkList(["argv-forms", ...tail]));
+      runArgvDirectives(h.m, av.preds, [{ file: d.file, goal: copyTerm(d.goal) }]);
+      const s = state();
+      if (!seen.has(s)) {
+        seen.add(s);
+        kept.push(tail);
+      }
+    }
+    forms = forms.flatMap((f) => kept.map((t) => [...f, ...t]));
+  }
+  return forms;
+}
 
 /** A program's run: the snapshot it recorded or why not, and its final state and output. */
 interface Run {
@@ -77,13 +117,16 @@ function runIn(root: string, dir: string, name: string, lib: string, argv: strin
 function main(): void {
   const p = imagePaths();
   const engine = engineHash(p.bundle);
+  const image = readImage(p.image, p.root, engine, []);
+  if (image === null) throw new Error("import snapshots: the image does not apply to this bundle; build the image first");
+  const argvs = argvForms(image, p.root);
   const work = join(p.bundle, ".import-build");
   rmSync(work, { recursive: true, force: true });
   const snapshots: Snapshot[] = [];
   const skipped: string[] = [];
   try {
     for (const lib of readdirSync(join(p.root, "lib")).filter((f) => f.endsWith(".metta")).sort()) {
-      for (const argv of ARGVS) {
+      for (const argv of argvs) {
         const form = `${lib} ${JSON.stringify(argv)}`;
         const a = runIn(p.root, join(work, "a"), "first.metta", lib, argv);
         if (typeof a.snapshot === "string") {
@@ -112,7 +155,7 @@ function main(): void {
   mkdirSync(dir);
   const files = snapshotFiles(engine, snapshots);
   for (const [name, data] of files) writeFileSync(join(dir, name), JSON.stringify(data));
-  process.stdout.write(`${dir}: ${snapshots.length} snapshots in ${files.size} files; not snapshotted:\n${skipped.map((s) => `  ${s}\n`).join("")}`);
+  process.stdout.write(`${dir}: ${snapshots.length} snapshots in ${files.size} files over ${argvs.length} argv forms (${argvs.map((a) => a.join(" ") || "none").join(", ")}); not snapshotted:\n${skipped.map((s) => `  ${s}\n`).join("")}`);
 }
 
 main();

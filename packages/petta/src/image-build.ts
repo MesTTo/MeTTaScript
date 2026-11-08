@@ -16,9 +16,8 @@
 import { writeFileSync } from "node:fs";
 import { setDirectiveHook } from "./consult";
 import { HostedPetta, imagePaths } from "./hosted";
-import { engineHash, imageData, loadImage, type ArgvDirective } from "./image";
+import { atomsOf, engineHash, imageData, loadImage, type ArgvDirective } from "./image";
 import { copyTerm, type Machine } from "./machine";
-import { Cons, Struct, deref, type Term } from "./terms";
 
 /** A directive that read argv during a consult: what it changed, and the generations its run spans. */
 interface ArgvRead extends ArgvDirective {
@@ -84,16 +83,6 @@ function differing(a: Comparable, b: Comparable): string[] {
   const out: string[] = [];
   for (const k of new Set([...a.preds.keys(), ...b.preds.keys()])) if (a.preds.get(k) !== b.preds.get(k)) out.push(k);
   return out;
-}
-
-function atomsOf(t: Term, out: Set<string>): void {
-  const d = deref(t);
-  if (typeof d === "string") out.add(d);
-  else if (d instanceof Struct) for (const a of d.args) atomsOf(a, out);
-  else if (d instanceof Cons) {
-    atomsOf(d.head, out);
-    atomsOf(d.tail, out);
-  }
 }
 
 /**

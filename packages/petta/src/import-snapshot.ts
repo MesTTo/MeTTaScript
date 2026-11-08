@@ -12,9 +12,11 @@
 // translates as before. The fingerprint leaves out the importing file's own loader bookkeeping, which names that
 // file's path, directory and line (c-import-bookkeeping-1108); the build requires the effects recorded under two
 // importers at different paths to agree, and a replay under the second to leave the state and output translating
-// left (import-build.ts). A load whose effect a snapshot cannot hold (a stream left open, an operator,
-// table or loaded file changed, a clause of the starting state removed or one put in front of it) gets no snapshot.
-// Nothing is written at run time (a-petta-next-1108.speed.imports.buildonly).
+// left (import-build.ts). The fingerprint leaves out the argv flag too: it holds what PeTTa's argv-reading directives
+// made of argv, so a run matches whatever order its flags come in and whatever program arguments follow them, and a
+// load that reads argv itself gets no snapshot. A load whose effect a snapshot cannot hold (a stream left open, an
+// operator, table or loaded file changed, a clause of the starting state removed or one put in front of it) gets no
+// snapshot. Nothing is written at run time (a-petta-next-1108.speed.imports.buildonly).
 // am[implements a-petta-next-1108.speed.imports]
 // am[implements a-petta-next-1108.speed.imports.replay]
 
@@ -28,18 +30,18 @@ import { loaderSnapshot } from "./consult";
 import { expansionSnapshot } from "./goal-expansion";
 import { Decoder, Encoder, fileHash } from "./image";
 import { Ground, type Clause } from "./db";
-import { Cons, Str, Struct, deref, listToArray, mkVar, textOf, type Term } from "./terms";
+import { Cons, Str, Struct, deref, mkVar, type Term } from "./terms";
 
 type J = unknown;
 
 /**
- * The directory the package build writes the snapshots to beside the bundle and the image: one file per library, argv
- * form and starting fingerprint (snapshotFile), so a run parses a snapshot only once its import matches it and a miss
- * costs the fingerprint and a file check.
+ * The directory the package build writes the snapshots to beside the bundle and the image: one file per library and
+ * starting fingerprint (snapshotFile), so a run parses a snapshot only once its import matches it and a miss costs the
+ * fingerprint and a file check.
  */
 export const IMPORTS_DIR = "petta.imports";
 /** The snapshot file format; a reader of another format replays nothing. */
-const FORMAT = 1;
+const FORMAT = 2;
 
 /** What a load did, as a snapshot replays it. */
 export interface Effect {
@@ -69,9 +71,8 @@ export interface Effect {
 export interface Snapshot {
   /** The library, relative to the package directory. */
   readonly lib: string;
-  /** The space it was loaded into and the run's argv after its file. */
+  /** The space it was loaded into. */
   readonly space: string;
-  readonly argv: string[];
   /** Every MeTTa file the load read, relative to the package directory, with its SHA-1. */
   readonly files: [string, string][];
   /** Every directory it read them from, relative to the package directory, with the SHA-1 of its sorted listing. */
@@ -219,12 +220,6 @@ export function fingerprint(cm: CellMachine, root: string): string | null {
   } catch {
     return null;
   }
-}
-
-/** The run's argv after its file, as strings. */
-function argvTail(cm: CellMachine): string[] {
-  const items = listToArray(cm.om.flags.get("argv") ?? "[]") ?? [];
-  return items.slice(1).map((t) => textOf(deref(t)) ?? "");
 }
 
 /** What the build reads of the state a load starts from, to tell its effect from it. */
@@ -429,7 +424,7 @@ function cellText(cm: CellMachine, c: number): string | null {
 export function installImportReplay(
   cm: CellMachine,
   root: string,
-  snapshots: (lib: string, argv: readonly string[], start: string) => readonly Snapshot[],
+  snapshots: (lib: string, start: string) => readonly Snapshot[],
   trace?: (event: string) => void,
 ): void {
   const p = cm.om.db.get("load_metta_file", 3);
@@ -440,12 +435,11 @@ export function installImportReplay(
     if (path === null || !path.startsWith(libDir)) return m.runClauses(p, cc);
     const lib = relative(root, path);
     const space = cellText(cm, m.A[2]!);
-    const argv = argvTail(cm);
     const fp = fingerprint(cm, root);
-    const started = fp === null ? [] : snapshots(lib, argv, fp).filter((s) => s.space === space && s.argv.join("\0") === argv.join("\0") && s.start === fp);
+    const started = fp === null ? [] : snapshots(lib, fp).filter((s) => s.space === space && s.start === fp);
     const s = started.find((x) => inputsHold(x, root));
     if (s === undefined) {
-      trace?.(`miss ${lib}: ${started.length === 0 ? "no snapshot starts from this state, space and argv" : "a file it read changed"}`);
+      trace?.(`miss ${lib}: ${started.length === 0 ? "no snapshot starts from this state and space" : "a file it read changed"}`);
       return m.runClauses(p, cc);
     }
     trace?.(`replay ${lib}`);
@@ -453,18 +447,17 @@ export function installImportReplay(
   };
 }
 
-/** The name of the file holding library `lib`'s snapshots for argv form `argv` from fingerprint `start`, in IMPORTS_DIR. */
-export const snapshotFile = (lib: string, argv: readonly string[], start: string): string =>
-  `${lib.replace(/[^\w.-]/g, "_")}${argv.join("")}.${start.slice(0, 16)}.json`;
+/** The name of the file holding library `lib`'s snapshots from fingerprint `start`, in IMPORTS_DIR. */
+export const snapshotFile = (lib: string, start: string): string => `${lib.replace(/[^\w.-]/g, "_")}.${start.slice(0, 16)}.json`;
 
 /**
  * A lookup of the snapshots in directory `dir` built by the bundle with hash `engine`: each file is read and parsed
  * once, at its first lookup, and a file that is absent or another bundle's gives none.
  */
-export function snapshotDir(dir: string, engine: string): (lib: string, argv: readonly string[], start: string) => readonly Snapshot[] {
+export function snapshotDir(dir: string, engine: string): (lib: string, start: string) => readonly Snapshot[] {
   const read = new Map<string, readonly Snapshot[]>();
-  return (lib, argv, start) => {
-    const name = snapshotFile(lib, argv, start);
+  return (lib, start) => {
+    const name = snapshotFile(lib, start);
     let got = read.get(name);
     if (got === undefined) {
       const f = join(dir, name);
@@ -478,7 +471,7 @@ export function snapshotDir(dir: string, engine: string): (lib: string, argv: re
 
 /** A lookup of the snapshots in `list`, for tests and the build's own check. */
 export const snapshotList =
-  (list: readonly Snapshot[]): ((lib: string, argv: readonly string[], start: string) => readonly Snapshot[]) =>
+  (list: readonly Snapshot[]): ((lib: string, start: string) => readonly Snapshot[]) =>
   (lib) =>
     list.filter((s) => s.lib === lib);
 
@@ -486,7 +479,7 @@ export const snapshotList =
 export function snapshotFiles(engine: string, snapshots: readonly Snapshot[]): Map<string, SnapshotFile> {
   const out = new Map<string, Snapshot[]>();
   for (const s of snapshots) {
-    const name = snapshotFile(s.lib, s.argv, s.start);
+    const name = snapshotFile(s.lib, s.start);
     const list = out.get(name);
     if (list === undefined) out.set(name, [s]);
     else list.push(s);
@@ -530,9 +523,11 @@ export function recordImport(cm: CellMachine, root: string, target: string, done
     started?.();
     read.add(path);
     const space = cellText(cm, m.A[2]!) ?? "";
-    const argv = argvTail(cm);
     const start = fingerprint(cm, root);
     const s0 = startOf(cm, root);
+    // The flags the load reads: one that reads argv would replay what it made of one run's argv under any other.
+    const reads0 = m0.flagReads, reads = new Map<string, number>();
+    m0.flagReads = reads;
     const output: [0 | 1, string][] = [];
     const out = m0.out, err = m0.err;
     m0.out = (t) => (output.push([0, t]), out(t));
@@ -546,9 +541,11 @@ export function recordImport(cm: CellMachine, root: string, target: string, done
       state = "after";
       m0.out = out;
       m0.err = err;
+      m0.flagReads = reads0;
       const results = globalTerm(cm, RESULTS_GLOBAL) ?? mkVar();
       cm.globalStore!.remove(RESULTS_GLOBAL);
       if (start === null) done("the starting state holds a term a snapshot cannot encode");
+      else if (reads.has("argv")) done("the load read argv");
       else {
         const effect = effectSince(cm, root, s0, results, output, backtrackable);
         if (typeof effect === "string") done(effect);
@@ -560,7 +557,6 @@ export function recordImport(cm: CellMachine, root: string, target: string, done
             done({
               lib: relative(root, target),
               space,
-              argv,
               files: files.map((f) => [relative(root, f), fileHash(f)]),
               dirs: [...new Set(files.map(dirname))].sort().map((d) => [relative(root, d), listingHash(d)]),
               start,

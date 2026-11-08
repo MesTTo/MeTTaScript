@@ -5,8 +5,9 @@
 // Purpose: tests of import snapshots (import-snapshot.ts) on PeTTa consulted from source: a snapshot of lib_he
 // (nested lib_error, clause references, backtrackable globals) and of lib_builtin_types recorded under one importer
 // replays under another to the final state and output translating gives there, and the replay never runs the
-// library's clauses; an importer that defines a function or declares a type before its import, a library file that
-// changed, and another argv each miss and translate.
+// library's clauses, also under the same flags in another order with program arguments after them; an importer that
+// defines a function or declares a type before its import, a library file that changed, and flags that change what
+// PeTTa's argv-reading directives set each miss and translate; a library whose load reads argv gets no snapshot.
 // am[verifies a-petta-next-1108.speed.imports.equivalence]
 
 import { dirname, join } from "node:path";
@@ -66,16 +67,33 @@ describe("import snapshots", () => {
     expect(replayed.final).toBe(translated.final);
   }, 60000);
 
-  it("misses and translates for an importer that defined or declared first, a changed file and another argv", () => {
+  it("replays under the same flags in another order with program arguments after them", () => {
+    const snap = record("a/first_he.metta", "lib_he.metta", ["--silent", "--strict"]);
+    const argv = ["--strict", "--silent", "extra", "42"];
+    const translated = run("b/deeper/second_he.metta", argv, () => {});
+    const replayed = replaying("b/deeper/second_he.metta", argv, [snap]);
+    expect(replayed.trace).toStrictEqual(["replay lib/lib_he.metta"]);
+    expect(replayed.output).toBe(translated.output);
+    expect(replayed.final).toBe(translated.final);
+  }, 60000);
+
+  it("records no snapshot of a load that reads argv", () => {
+    const pkg = join(FIX, "argv");
+    let got: Snapshot | string = "the program never loaded the library";
+    run("argv/main.metta", ["--silent"], (cm) => recordImport(cm, pkg, join(pkg, "lib", "reads_argv.metta"), (r) => (got = r)));
+    expect(got).toBe("the load read argv");
+  }, 60000);
+
+  it("misses and translates for an importer that defined or declared first, a changed file and other flags", () => {
     const snap = record("a/first_he.metta", "lib_he.metta", ["--silent"]);
     const lib = "lib/lib_he.metta";
     const defines = replaying("b/deeper/defines_he.metta", ["--silent"], [snap]);
-    expect(defines.trace).toStrictEqual([`miss ${lib}: no snapshot starts from this state, space and argv`, `miss lib/lib_error.metta: no snapshot starts from this state, space and argv`]);
+    expect(defines.trace).toStrictEqual([`miss ${lib}: no snapshot starts from this state and space`, `miss lib/lib_error.metta: no snapshot starts from this state and space`]);
     expect(defines.output).toBe(run("b/deeper/defines_he.metta", ["--silent"], () => {}).output);
     const declares = replaying("b/deeper/declares_he.metta", ["--silent"], [snap]);
-    expect(declares.trace[0]).toBe(`miss ${lib}: no snapshot starts from this state, space and argv`);
+    expect(declares.trace[0]).toBe(`miss ${lib}: no snapshot starts from this state and space`);
     const changed: Snapshot = { ...snap, files: snap.files.map(([f, h]) => [f, f === lib ? "0".repeat(40) : h]) };
     expect(replaying("b/deeper/second_he.metta", ["--silent"], [changed]).trace[0]).toBe(`miss ${lib}: a file it read changed`);
-    expect(replaying("b/deeper/second_he.metta", [], [snap]).trace[0]).toBe(`miss ${lib}: no snapshot starts from this state, space and argv`);
+    expect(replaying("b/deeper/second_he.metta", ["--silent", "--oracle"], [snap]).trace[0]).toBe(`miss ${lib}: no snapshot starts from this state and space`);
   }, 90000);
 });

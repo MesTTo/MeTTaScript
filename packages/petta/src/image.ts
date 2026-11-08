@@ -19,7 +19,7 @@ import { Clause, Database, Ground, Slot, type Pred } from "./db";
 import { expansionSnapshot, restoreExpansion } from "./goal-expansion";
 import { loaderSnapshot, restoreLoader, runFileDirective, type LoaderSnapshot } from "./consult";
 import type { Machine } from "./machine";
-import { Cons, Float, NIL, Str, Struct, Var, mkVar, type Term } from "./terms";
+import { Cons, Float, NIL, Str, Struct, Var, deref, mkVar, type Term } from "./terms";
 
 type J = unknown;
 
@@ -143,6 +143,38 @@ export interface ArgvDependence {
   readonly directives: ArgvDirective[];
   readonly preds: string[];
   readonly branchAtoms: string[];
+}
+
+/** Every atom term `t` holds as an argument, at any depth, into `out`: the atoms a directive can test argv for. */
+export function atomsOf(t: Term, out: Set<string>): void {
+  const d = deref(t);
+  if (typeof d === "string") out.add(d);
+  else if (d instanceof Struct) for (const a of d.args) atomsOf(a, out);
+  else if (d instanceof Cons) {
+    atomsOf(d.head, out);
+    atomsOf(d.tail, out);
+  }
+}
+
+/** Image `data`'s argv dependence, its directives' files and goals decoded. */
+export function argvDependence(data: Record<string, J>, root: string): ArgvDependence {
+  const dec = new Decoder(root);
+  const av = data.argv as { directives: [J, J][]; preds: string[]; branchAtoms: string[] };
+  return {
+    directives: av.directives.map(([file, goal]) => ({ file: dec.term(file) as string, goal: dec.term(goal) })),
+    preds: av.preds,
+    branchAtoms: av.branchAtoms,
+  };
+}
+
+/** Run argv-reading `directives` on `m` under the argv flag it holds, the clauses of `preds` retracted first. */
+export function runArgvDirectives(m: Machine, preds: readonly string[], directives: readonly ArgvDirective[]): void {
+  for (const key of preds) {
+    const i = key.lastIndexOf("/");
+    const p = m.db.get(key.slice(0, i), Number(key.slice(i + 1)));
+    if (p !== undefined) for (const c of [...p.clauses]) m.db.retractClause(c);
+  }
+  for (const d of directives) runFileDirective(m, d.file, d.goal);
 }
 
 /** SHA-1 of a file's bytes. */
@@ -294,11 +326,6 @@ export function loadImage(m: Machine, data: Record<string, J>, root: string): vo
   };
   restoreLoader(m, snap);
   restoreExpansion(m, data.expansion as { meta: [string, (number | string)[]][]; yall: boolean });
-  const av = data.argv as { directives: [J, J][]; preds: string[] };
-  for (const key of av.preds) {
-    const i = key.lastIndexOf("/");
-    const p = m.db.get(key.slice(0, i), Number(key.slice(i + 1)));
-    if (p !== undefined) for (const c of [...p.clauses]) m.db.retractClause(c);
-  }
-  for (const [file, goal] of av.directives) runFileDirective(m, text(file), dec.term(goal));
+  const av = argvDependence(data, root);
+  runArgvDirectives(m, av.preds, av.directives);
 }
