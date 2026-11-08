@@ -6,16 +6,16 @@
 // assertz and retract: the clauses a call's scan admits always include every live clause whose head is key-compatible
 // with the call, in clause order, and while the predicate is small and the call's first argument is bound, they are
 // exactly the live clauses its first-argument key admits, so a primary-key scan kept across calls never goes stale,
-// with a counterexample the property found kept as a fixed case; and an assessment's duplicate merge gives the same
-// keys, counts and speedup, to the bit, as the sort by key string and position that pl-index.c's
-// assess_remove_duplicates was ported as.
+// with a counterexample the property found kept as a fixed case; that the index's scans pass an engine's port once per
+// clause; and an assessment's duplicate merge gives the same keys, counts and speedup, to the bit, as the sort by key
+// string and position that pl-index.c's assess_remove_duplicates was ported as.
 // am[verifies a-petta-cell-store.select]
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { Ground, Slot, type Clause } from "./db";
 import { Machine } from "./machine";
-import { clauseScan, removeDuplicates, type Args, type Assessment, type Key, type KeyCount, type Scan } from "./swi-index";
+import { bindIndexPort, clauseScan, removeDuplicates, type Args, type Assessment, type Key, type KeyCount, type Scan } from "./swi-index";
 import { Cons, Float, NIL, Str, Struct, Var, mkVar, type Term } from "./terms";
 import { CellArgs } from "./cell/args";
 import { Heap } from "./cell/heap";
@@ -204,6 +204,25 @@ describe("clause selection after an asserta that a list index cannot take", () =
     call(mkVar(), 0);
     m.addClause(new Struct("p", [list(0, "a"), mkVar()]), false);
     call(mkVar(), "a");
+  });
+});
+
+// am[verifies a-petta-heap-check-bound-1108]
+describe("the index's port", () => {
+  // A call with its second argument bound on a predicate of 200 clauses assesses that argument over every clause,
+  // merges its keys and indexes them: an engine's schedule bound to the port sees each clause go by in each.
+  it("runs once per clause in the assessment, the key merge and realise", () => {
+    const m = new Machine();
+    for (let i = 0; i < 200; i++) m.addClause(new Struct("p", [i, i % 50]), true);
+    let ports = 0;
+    bindIndexPort(() => void ports++);
+    try {
+      clauseScan(m.db.preds.get("p/2")!, [mkVar(), 7]);
+    } finally {
+      bindIndexPort(() => {});
+    }
+    // The assessment's scan, the key merge (each clause's key its own run, the keys alternating) and realise.
+    expect(ports).toBe(3 * 200);
   });
 });
 

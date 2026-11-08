@@ -25,6 +25,19 @@ const PINDEX_MAYBEDEEP = -2;
 const f32 = Math.fround;
 
 /**
+ * Run once per clause by the scans over a predicate's clauses (scanAssessments, realise) and once per key by the key
+ * merge (mergeKeys), which on a large predicate run for seconds inside one call: scale's first call with a bound
+ * argument assesses and indexes its million clauses for 1.7 s, V8's old generation growing 338 MB with no call
+ * between (i-scale-heavy-membalancer-1108). An engine whose schedule must keep its time binds it (bindIndexPort):
+ * the hosted runtime binds the cell machine's heap schedule (CellMachine.port).
+ * am[implements a-petta-heap-check-bound-1108]
+ */
+let indexPort: () => void = () => {};
+export const bindIndexPort = (port: () => void): void => {
+  indexPort = port;
+};
+
+/**
  * An index key: an atom is its own string and an integer its own number (Map keys keep the types apart); floats,
  * strings, [] and compounds get "\u0001"-prefixed strings, a compound's cached per name and arity (indexOfWord,
  * argKey). Building no string per call keeps clause selection allocation-free on the hot path.
@@ -398,7 +411,7 @@ class ClauseList {
     return n > MIN_CLAUSES_FOR_INDEX && f32(n / speedup) > MIN_SPEEDUP_RATIO;
   }
 
-  /** pl-index.c first_clause_guarded: the scan for a call with argument vector `args` at index depth `depth`. */
+/** pl-index.c first_clause_guarded: the scan for a call with argument vector `args` at index depth `depth`. */
   select(args: Args, depth: number): Scan {
     if (depth === 0) this.updatePrimary();
     if (this.unindexed || this.arity === 0) return this.allScan();
@@ -579,11 +592,13 @@ class ClauseList {
     ci.lastKey = undefined;
     ci.lastSub = undefined;
     ci.size = 0;
-    for (const c of this.clauses)
+    for (const c of this.clauses) {
+      indexPort();
       if (c.died === Infinity && !this.addToIndex(ci, c, true)) {
         this.dropIndex(ci);
         return false;
       }
+    }
     ci.realised = true;
     ci.resizeAbove = ci.size * 2;
     ci.resizeBelow = Math.floor(ci.size / 4);
@@ -684,6 +699,7 @@ class ClauseList {
   /** pl-index.c assess_scan_clauses and assessAddKey: the keys of every live clause at each assessed argument set. */
   private scanAssessments(as: Assessment[]): void {
     for (const c of this.clauses) {
+      indexPort();
       if (c.died !== Infinity) continue;
       for (const a of as) {
         if (a.args.length === 1) {
@@ -994,6 +1010,7 @@ function mergeKeys(keys: KeyCount[]): KeyCount[] | null {
   const nums: string[] = [];
   for (const s of keys) {
     const k = s.key;
+    indexPort();
     const o = first.get(k);
     if (o !== undefined) {
       o.count += s.count;

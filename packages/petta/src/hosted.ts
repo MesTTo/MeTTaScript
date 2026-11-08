@@ -26,6 +26,7 @@ import { errorMessage } from "./messages";
 import { readClauses } from "./prolog-reader";
 import { Halt, PrologError, Str, Struct, deref, listToArray, mkList, mkStruct, mkVar, NIL, textOf, type Term } from "./terms";
 import { writeTerm } from "./writer";
+import { bindIndexPort } from "./swi-index";
 import { installTermBuiltins } from "./cell/builtins";
 import { compileCellClause, installInlineBuiltins } from "./cell/compile";
 import { CellMachine } from "./cell/machine";
@@ -207,6 +208,9 @@ export class HostedPetta {
       }
       gc();
     };
+    // The index's long scans over a predicate keep the heap schedule's time (i-scale-heavy-membalancer-1108).
+    // am[implements a-petta-heap-check-bound-1108]
+    bindIndexPort(() => cm.port());
     return cm.solveCell(cm.hp.encode(g, new Map()));
   }
 
