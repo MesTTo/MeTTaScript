@@ -20,7 +20,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename, dirname, join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import type { CellMachine } from "./cell/machine";
 import { RCP } from "./cell/machine";
 import { clauseRef, refClause } from "./builtins";
@@ -79,24 +79,7 @@ export interface Snapshot {
   /** The fingerprint of the state the load started from. */
   readonly start: string;
   readonly effect: Effect;
-  /**
-   * Whether the build found the same start and effect for a copy of the library directory elsewhere, its paths read
-   * as the shipped directory's: a load of a byte-identical copy may then replay it, its paths written back.
-   */
-  readonly relocatable?: boolean;
 }
-
-/** A path rewrite: a library copy's directory read as COPY, or the reverse. */
-export type Rewrite = ((s: string) => string) | null;
-/**
- * The directory a relocatable snapshot names its library copy's own directory by. A nested (library X) import of a
- * copy still resolves to the shipped lib directory, so only the copy's directory is written back, never lib's.
- */
-export const COPY = "\u0000copy";
-
-/** The rewrite reading paths under directory `from` as under `to`. */
-export const moveDir = (from: string, to: string): ((s: string) => string) => (s) =>
-  s === from ? to : s.startsWith(from + "/") ? to + s.slice(from.length) : s;
 
 export interface SnapshotFile {
   readonly format: number;
@@ -167,8 +150,8 @@ function globalTerms(cm: CellMachine): [string, Term][] {
 const clauseJson = (enc: Encoder, c: Clause): J => [enc.term(c.head), enc.term(c.body), c.nvars, c.file === null ? null : enc.text(c.file)];
 
 /** The state a snapshot cannot change: operators, tables, the loader's files and modules, goal expansion. */
-function restOf(cm: CellMachine, root: string, rw: Rewrite = null): string {
-  const m = cm.om, enc = new Encoder(root, false, null, false, rw);
+function restOf(cm: CellMachine, root: string): string {
+  const m = cm.om, enc = new Encoder(root);
   const ops: J[] = [];
   for (const [kind, map] of [["infix", m.ops.infix], ["prefix", m.ops.prefix], ["postfix", m.ops.postfix]] as const)
     for (const [name, d] of map) ops.push([kind, name, d.pri, d.type]);
@@ -192,7 +175,7 @@ function restOf(cm: CellMachine, root: string, rw: Rewrite = null): string {
  * names. Throws on a term no image encoder takes (an attributed variable, a stream). Time: the predicates' count plus
  * the listed clauses and globals.
  */
-export function stateLines(cm: CellMachine, root: string, all = false, rw: Rewrite = null): string[] {
+export function stateLines(cm: CellMachine, root: string, all = false): string[] {
   const m = cm.om;
   // A clause reference is its clause's predicate and place among that predicate's live clauses.
   const ref = (t: Struct): J => {
@@ -200,7 +183,7 @@ export function stateLines(cm: CellMachine, root: string, all = false, rw: Rewri
     if (c === undefined || c.died !== Infinity) return "dead";
     return [`${c.pred.name}/${c.pred.arity}`, c.pred.clauses.filter((x) => x.died === Infinity).indexOf(c)];
   };
-  const enc = new Encoder(root, true, ref, false, rw), venc = new Encoder(root, false, ref, true, rw);
+  const enc = new Encoder(root, true, ref), venc = new Encoder(root, false, ref, true);
   const file = all ? null : loadingFile(cm);
   const dir = file === null ? null : dirname(file);
   const lines: string[] = [];
@@ -222,7 +205,7 @@ export function stateLines(cm: CellMachine, root: string, all = false, rw: Rewri
   for (const [k, v] of m.flags) if (k !== "argv") lines.push(`f ${k} ${JSON.stringify(venc.term(v))}`);
   for (const [k, v] of m.flagValues) lines.push(`v ${k} ${JSON.stringify(venc.term(v))}`);
   lines.sort();
-  lines.push(`r ${restOf(cm, root, rw)}`, `s ${m.objectCount()}`);
+  lines.push(`r ${restOf(cm, root)}`, `s ${m.objectCount()}`);
   return lines;
 }
 
@@ -230,9 +213,9 @@ export function stateLines(cm: CellMachine, root: string, all = false, rw: Rewri
  * The fingerprint of the state a load starting now would read: the SHA-1 of its stateLines. Null when the state
  * holds a term a snapshot cannot encode. Time: stateLines', once per import of a library.
  */
-export function fingerprint(cm: CellMachine, root: string, rw: Rewrite = null): string | null {
+export function fingerprint(cm: CellMachine, root: string): string | null {
   try {
-    return sha1(stateLines(cm, root, false, rw).join("\n"));
+    return sha1(stateLines(cm, root).join("\n"));
   } catch {
     return null;
   }
@@ -258,8 +241,8 @@ interface Start {
 
 const bitsOf = (p: { dynamic: boolean; multifile: boolean }): number => +p.dynamic | (+p.multifile << 1);
 
-function startOf(cm: CellMachine, root: string, rw: Rewrite): Start {
-  const m = cm.om, enc = new Encoder(root, false, null, true, rw);
+function startOf(cm: CellMachine, root: string): Start {
+  const m = cm.om, enc = new Encoder(root);
   const bits = new Map<string, number>();
   for (const [k, p] of m.db.preds) bits.set(k, bitsOf(p));
   const json = (pairs: Iterable<[string, Term]>): Map<string, string> => new Map([...pairs].map(([k, v]) => [k, JSON.stringify(enc.term(v))]));
@@ -270,7 +253,7 @@ function startOf(cm: CellMachine, root: string, rw: Rewrite): Start {
     globals: json(globalTerms(cm)),
     flagValues: json(m.flagValues),
     flags: json([...m.flags].filter(([k]) => k !== "argv")),
-    rest: restOf(cm, root, rw),
+    rest: restOf(cm, root),
     streams: m.objectCount(),
   };
 }
@@ -279,18 +262,10 @@ function startOf(cm: CellMachine, root: string, rw: Rewrite): Start {
  * The effect of a load since `s`, or why a snapshot cannot hold it. Time: the touched predicates' clauses and the
  * globals, once per library built.
  */
-function effectSince(
-  cm: CellMachine,
-  root: string,
-  s: Start,
-  results: Term,
-  output: [0 | 1, string][],
-  backtrackable: Set<string>,
-  rw: Rewrite,
-): Effect | string {
+function effectSince(cm: CellMachine, root: string, s: Start, results: Term, output: [0 | 1, string][], backtrackable: Set<string>): Effect | string {
   const m = cm.om;
   if (m.objectCount() !== s.streams) return "the load left a stream open";
-  if (restOf(cm, root, rw) !== s.rest) return "the load changed operators, tables, loaded files or goal expansion";
+  if (restOf(cm, root) !== s.rest) return "the load changed operators, tables, loaded files or goal expansion";
   const preds: [string, number, number][] = [];
   const added: [number, Clause, 0 | 1][] = [];
   let i = 0;
@@ -340,7 +315,7 @@ function effectSince(
     if (c.born > s.gen || c.died !== Infinity || BOOKKEEPING.has(key)) throw new Error(`a reference to a clause of ${key} the load removed or the importer owns`);
     return { s: [key, c.pred.clauses.filter((x) => x.born <= s.gen && x.died === Infinity).indexOf(c)] };
   };
-  const enc = new Encoder(root, true, ref, false, rw), venc = new Encoder(root, false, ref, true, rw);
+  const enc = new Encoder(root, true, ref), venc = new Encoder(root, false, ref, true);
   const adds: [number, 0 | 1, J][] = [];
   for (const [pi, c, front] of added) {
     try {
@@ -386,18 +361,14 @@ function effectSince(
 /** The SHA-1 of directory `dir`'s sorted listing. */
 const listingHash = (dir: string): string => sha1(readdirSync(dir).sort().join("\n"));
 
-/**
- * Whether every file and directory a snapshot read still has its digest, each path under `root` written back through
- * `back` for a relocated replay. Time: those files' sizes.
- */
-function inputsHold(s: Snapshot, root: string, back: Rewrite = null): boolean {
-  const at = (rel: string): string => (rel.startsWith(COPY) && back !== null ? back(rel) : join(root, rel));
+/** Whether every file and directory a snapshot read still has its digest under `root`. Time: those files' sizes. */
+function inputsHold(s: Snapshot, root: string): boolean {
   for (const [rel, hash] of s.files) {
-    const f = at(rel);
+    const f = join(root, rel);
     if (!existsSync(f) || fileHash(f) !== hash) return false;
   }
   for (const [rel, hash] of s.dirs) {
-    const d = at(rel);
+    const d = join(root, rel);
     if (!existsSync(d) || listingHash(d) !== hash) return false;
   }
   return true;
@@ -407,7 +378,7 @@ function inputsHold(s: Snapshot, root: string, back: Rewrite = null): boolean {
  * Apply snapshot `s`'s effect, as the load would have left the state, and unify the call's results argument `a1`
  * with its results. Time: the effect's size.
  */
-function replay(cm: CellMachine, root: string, s: Snapshot, a1: number, back: Rewrite = null): boolean {
+function replay(cm: CellMachine, root: string, s: Snapshot, a1: number): boolean {
   const m = cm.om, hp = cm.hp;
   const e = s.effect;
   const gen = m.db.generation;
@@ -420,7 +391,7 @@ function replay(cm: CellMachine, root: string, s: Snapshot, a1: number, back: Re
     const p = m.db.get(key.slice(0, slash), Number(key.slice(slash + 1)))!;
     return clauseRef(p.clauses.filter((x) => x.born <= gen && x.died === Infinity)[at]!);
   };
-  const dec = new Decoder(root, ref, back);
+  const dec = new Decoder(root, ref);
   const preds = e.preds.map(([name, arity, bits]) => {
     const p = m.db.ensure(name, arity);
     p.dynamic = (bits & 1) !== 0;
@@ -452,10 +423,8 @@ function cellText(cm: CellMachine, c: number): string | null {
 /**
  * Make load_metta_file/3 on `cm` replay a snapshot when one matches the call and the state, and run its clauses
  * otherwise. `snapshots` gives the snapshots of a library and argv form that start from a fingerprint; it is asked
- * only for loads of files under the package's lib directory, or of a byte-identical copy of one elsewhere, read as the
- * shipped file through a rewrite of its directory and replayed only from a snapshot the build found relocatable; a run
- * that imports no library computes no fingerprint. `trace`, when given, hears of each library load: "replay <lib>" or
- * "miss <lib>: <why>".
+ * only for loads of files under the package's lib directory, so a run that imports no library computes no
+ * fingerprint. `trace`, when given, hears of each library load: "replay <lib>" or "miss <lib>: <why>".
  */
 export function installImportReplay(
   cm: CellMachine,
@@ -465,43 +434,22 @@ export function installImportReplay(
 ): void {
   const p = cm.om.db.get("load_metta_file", 3);
   if (p === undefined) return;
-  const shippedDir = join(root, "lib");
-  const libDir = shippedDir + "/";
-  // Whether file `f` is a byte-identical copy of the shipped library `shipped`, once per file.
-  const copies = new Map<string, boolean>();
-  const copyOf = (f: string, shipped: string): boolean => {
-    let same = copies.get(f);
-    if (same === undefined) copies.set(f, (same = existsSync(shipped) && fileHash(f) === fileHash(shipped)));
-    return same;
-  };
+  const libDir = join(root, "lib") + "/";
   cm.proc("load_metta_file", 3).ctl = (m, _n, cc) => {
     const path = cellText(cm, m.A[0]!);
-    if (path === null) return m.runClauses(p, cc);
-    let lib: string, rw: Rewrite = null, back: Rewrite = null;
-    if (path.startsWith(libDir)) lib = relative(root, path);
-    else {
-      const shipped = join(shippedDir, basename(path));
-      if (!path.endsWith(".metta") || !copyOf(path, shipped)) return m.runClauses(p, cc);
-      lib = relative(root, shipped);
-      rw = moveDir(dirname(path), COPY);
-      back = moveDir(COPY, dirname(path));
-    }
+    if (path === null || !path.startsWith(libDir)) return m.runClauses(p, cc);
+    const lib = relative(root, path);
     const space = cellText(cm, m.A[2]!);
     const argv = argvTail(cm);
-    const fp = fingerprint(cm, root, rw);
-    const started =
-      fp === null
-        ? []
-        : snapshots(lib, argv, fp).filter(
-            (s) => s.space === space && s.argv.join("\0") === argv.join("\0") && s.start === fp && (rw === null || s.relocatable === true),
-          );
-    const s = started.find((x) => inputsHold(x, root, back));
+    const fp = fingerprint(cm, root);
+    const started = fp === null ? [] : snapshots(lib, argv, fp).filter((s) => s.space === space && s.argv.join("\0") === argv.join("\0") && s.start === fp);
+    const s = started.find((x) => inputsHold(x, root));
     if (s === undefined) {
       trace?.(`miss ${lib}: ${started.length === 0 ? "no snapshot starts from this state, space and argv" : "a file it read changed"}`);
       return m.runClauses(p, cc);
     }
-    trace?.(`replay ${lib}${rw === null ? "" : ` from ${dirname(path)}`}`);
-    return m.answer(replay(cm, root, s, m.A[1]!, back), cc);
+    trace?.(`replay ${lib}`);
+    return m.answer(replay(cm, root, s, m.A[1]!), cc);
   };
 }
 
@@ -550,23 +498,10 @@ export function snapshotFiles(engine: string, snapshots: readonly Snapshot[]): M
  * Make load_metta_file/3 on `cm` record a snapshot of its first load of `target` (an absolute path) for the build,
  * calling `started` when that load begins and `done` with the snapshot or with why it cannot be one once it returns
  * (a load that fails or throws never returns); other loads, nested ones included, run their clauses and are part of
- * the recorded effect. `rw`, when given, reads a library copy's directory as the shipped one in what is recorded. The load's return is caught by giving it a continuation of its own, which records the
+ * the recorded effect. The load's return is caught by giving it a continuation of its own, which records the
  * effect and goes on with the call's own.
  */
-export function recordImport(
-  cm: CellMachine,
-  root: string,
-  target: string,
-  done: (r: Snapshot | string) => void,
-  started?: () => void,
-  rw: Rewrite = null,
-): void {
-  const moved = (f: string): string => (rw === null ? f : rw(f));
-  // A file's path as a snapshot keeps it: under the package relative to it, a copy's under COPY as it is.
-  const kept = (f: string): string => {
-    const r = moved(f);
-    return r.startsWith(COPY) ? r : relative(root, r);
-  };
+export function recordImport(cm: CellMachine, root: string, target: string, done: (r: Snapshot | string) => void, started?: () => void): void {
   const p = cm.om.db.get("load_metta_file", 3);
   if (p === undefined) throw new Error("import snapshots: no load_metta_file/3");
   const m0 = cm.om;
@@ -596,8 +531,8 @@ export function recordImport(
     read.add(path);
     const space = cellText(cm, m.A[2]!) ?? "";
     const argv = argvTail(cm);
-    const start = fingerprint(cm, root, rw);
-    const s0 = startOf(cm, root, rw);
+    const start = fingerprint(cm, root);
+    const s0 = startOf(cm, root);
     const output: [0 | 1, string][] = [];
     const out = m0.out, err = m0.err;
     m0.out = (t) => (output.push([0, t]), out(t));
@@ -615,19 +550,19 @@ export function recordImport(
       cm.globalStore!.remove(RESULTS_GLOBAL);
       if (start === null) done("the starting state holds a term a snapshot cannot encode");
       else {
-        const effect = effectSince(cm, root, s0, results, output, backtrackable, rw);
+        const effect = effectSince(cm, root, s0, results, output, backtrackable);
         if (typeof effect === "string") done(effect);
         else {
           const files = [...read].sort();
-          const outside = files.find((f) => kept(f).startsWith(".."));
+          const outside = files.find((f) => relative(root, f).startsWith(".."));
           if (outside !== undefined) done(`the load read ${outside}, outside the package`);
           else
             done({
-              lib: rw === null ? relative(root, target) : join("lib", basename(target)),
+              lib: relative(root, target),
               space,
               argv,
-              files: files.map((f) => [kept(f), fileHash(f)]),
-              dirs: [...new Set(files.map(dirname))].sort().map((d) => [kept(d), listingHash(d)]),
+              files: files.map((f) => [relative(root, f), fileHash(f)]),
+              dirs: [...new Set(files.map(dirname))].sort().map((d) => [relative(root, d), listingHash(d)]),
               start,
               effect,
             });
