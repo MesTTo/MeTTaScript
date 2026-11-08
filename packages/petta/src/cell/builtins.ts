@@ -6,9 +6,9 @@
 // bindings and errors (builtins.ts, library.ts) without decoding its arguments: the standard order (compare/3, @</2 and
 // the rest, ==/2), variance (=@=/2), subsumes_term/2, functor/3, arg/3, =../2, copy_term/2, cyclic_term/1,
 // term_variables/2,3, length/2, the sorts, memberchk/2 and code_type/2 of a code and a plain class; b_setval/2,
-// nb_setval/2 and their readers; put_attr/3, get_attr/3, del_attr/2 and the rest. A mode that needs a generator (arg/3
-// with an unbound index, length/2 of a partial list with an unbound length) goes to the object builtin's generator
-// through the bridge.
+// nb_setval/2 and their readers; put_attr/3, get_attr/3, del_attr/2 and the rest; phrase/2,3 of a nonterminal; and,
+// through text.ts, the text conversions. A mode that needs a generator (arg/3 with an unbound index, length/2 of a
+// partial list with an unbound length) goes to the object builtin's generator through the bridge.
 // am[implements a-petta-cell-store.builtins.terms]
 
 import { compareNum, type Num } from "../arith";
@@ -21,6 +21,7 @@ import type { Term } from "../terms";
 import { onObjects, bridgeBuiltin } from "./bridge";
 import { cellArgHashes, storedClause } from "./clause";
 import type { CellMachine } from "./machine";
+import { installTextBuiltins } from "./text";
 
 const isVarTag = (c: number): boolean => (c & 7) === REF || (c & 7) === ATV;
 
@@ -641,6 +642,36 @@ export function installTermBuiltins(cm: CellMachine): void {
       return run === null ? m.callNondet(key, b, n, cc) : m.answer(run(m, n), cc);
     };
   };
+  installTextBuiltins(cm, detOr);
+  // phrase(+Body, ?List) and phrase(+Body, ?List, ?Rest) of a nonterminal: the goal Body with List and Rest added
+  // (consult.ts dcgExtend), run next with its cut local as the object builtin's pushed goal is. A grammar control
+  // construct, a list, a string, an unbound or a non-callable body goes to the object builtin's translation (dcgBody).
+  // Time: Body's arity, where the bridge decoded List and encoded it again.
+  // am[implements a-petta-speed-general-1108.load.phrase]
+  const DCG_CONTROL = new Set(([[",", 2], [";", 2], ["|", 2], ["->", 2], ["*->", 2], ["\\+", 1], ["{}", 1], [":", 2]] as const).map(([name, n]) => hp.functor(name, n)));
+  const CURLY = hp.atom("{}"), CUT = hp.atom("!");
+  const phrase = (rest: () => number) => (): number | null => {
+    const g = hp.deref(A[0]!), h = hp.h;
+    let a: number, n: number;
+    if ((g & 7) === ATM) {
+      if (g === hp.NIL || g === CURLY || g === CUT) return null;
+      n = 0;
+      a = hp.alloc(3);
+      h[a] = hp.functor(hp.atomNames[g >> 3]!, 2);
+    } else if ((g & 7) === STR) {
+      const p = g >> 3, f = h[p]!;
+      if (DCG_CONTROL.has(f)) return null;
+      n = hp.funArity[f >> 3]!;
+      a = hp.alloc(n + 3);
+      h[a] = hp.functor(hp.funNames[f >> 3]!, n + 2);
+      for (let i = 1; i <= n; i++) h[a + i] = h[p + i]!;
+    } else return null;
+    h[a + n + 1] = A[1]!;
+    h[a + n + 2] = rest();
+    return (a << 3) | STR;
+  };
+  detOr("phrase", 2, phrase(() => hp.NIL));
+  detOr("phrase", 3, phrase(() => A[2]!));
   const unify = (x: number, y: number): boolean => hp.unify(x, y);
   const cmp = (): number => compareCells(hp, A[0]!, A[1]!);
 

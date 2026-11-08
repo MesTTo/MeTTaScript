@@ -284,6 +284,38 @@ function atomicText(t: Term, type = "atomic"): string {
   return textOf(d)!;
 }
 
+/**
+ * split_string/4's substrings of `str`: split at each character of `sepText` (one field when it has none), each field
+ * stripped of `padText`'s characters at both ends. The cell engine's split_string/4 calls it too (cell/text.ts).
+ * Time: |str| + |sepText| + |padText| characters.
+ * am[implements a-petta-speed-general-1108.load.text]
+ */
+export function splitFields(str: string, sepText: string, padText: string): string[] {
+  const seps = new Set([...sepText]);
+  const pad = new Set([...padText]);
+  const fields: string[] = [];
+  if (seps.size === 0) fields.push(str);
+  else {
+    let cur = "";
+    for (const ch of str) {
+      if (seps.has(ch)) {
+        fields.push(cur);
+        cur = "";
+      } else cur += ch;
+    }
+    fields.push(cur);
+  }
+  const strip = (f: string): string => {
+    const cs = [...f];
+    let i = 0;
+    let j = cs.length;
+    while (i < j && pad.has(cs[i]!)) i++;
+    while (j > i && pad.has(cs[j - 1]!)) j--;
+    return cs.slice(i, j).join("");
+  };
+  return fields.map(strip);
+}
+
 // ---- format/2 ----
 
 /** SWI format/2 directives used by PeTTa and typical libraries: ~w ~p ~q ~a ~d ~s ~e ~f ~g ~n ~t ~| ~+ ~c ~r ~8| ~i ~*. */
@@ -1003,30 +1035,8 @@ export function installBuiltins(m: Machine): void {
     return m2.unify(l!, mkList(whole.split(s)));
   }));
   def("split_string", 4, det((m2, [s, sepT, padT, out]) => {
-    const str = textArg(s!);
-    const seps = new Set([...textArg(sepT!)]);
-    const pad = new Set([...textArg(padT!)]);
-    const fields: string[] = [];
-    if (seps.size === 0) fields.push(str);
-    else {
-      let cur = "";
-      for (const ch of str) {
-        if (seps.has(ch)) {
-          fields.push(cur);
-          cur = "";
-        } else cur += ch;
-      }
-      fields.push(cur);
-    }
-    const strip = (f: string): string => {
-      const cs = [...f];
-      let i = 0;
-      let j = cs.length;
-      while (i < j && pad.has(cs[i]!)) i++;
-      while (j > i && pad.has(cs[j - 1]!)) j--;
-      return cs.slice(i, j).join("");
-    };
-    return m2.unify(out!, mkList(fields.map((f) => new Str(strip(f)))));
+    const str = textArg(s!), sepText = textArg(sepT!), padText = textArg(padT!);
+    return m2.unify(out!, mkList(splitFields(str, sepText, padText).map((f) => new Str(f))));
   }));
   def("sub_atom", 5, nondet(function* (m2, [a, b, l, af, sub]) {
     return yield* subText(m2, atomicText(a!, "atom"), b!, l!, af!, sub!, (x) => x, "atom");

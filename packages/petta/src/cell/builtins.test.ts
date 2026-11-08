@@ -2,13 +2,16 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Purpose: differential property test of the native term builtins on cells (builtins.ts), and of the text builtins
-// through the bridge (bridge.ts), against the object machine's builtins: random arguments over shared and attributed variables, small and big integers, floats with -0.0 and NaN,
-// strings, atoms with '[]' and [], compounds, proper and partial lists and pairs, each call run on both engines, its
-// answers compared in order with the arguments' bindings and, when it throws, the error term. A call the cell engine
-// can only answer with a generator it does not have yet is skipped. Every case runs under the collector's own
-// schedule and again collecting at every call port, so each call's arguments are moved before it runs.
+// Purpose: differential property test of the native term builtins on cells (builtins.ts), the native text
+// conversions, string/1 and phrase/2,3 (text.ts, compile.ts, builtins.ts), and the text builtins left to the bridge
+// (bridge.ts), against the object machine's builtins: random arguments over shared and attributed variables, small and
+// big integers, floats with -0.0 and NaN, strings, atoms with '[]' and [], characters past the Basic Multilingual
+// Plane, codes past Unicode, compounds, proper and partial lists and pairs, each call run on both engines, its answers
+// compared in order with the arguments' bindings and, when it throws, the error term. A call the cell engine can only
+// answer with a generator it does not have yet is skipped. Every case runs under the collector's own schedule and
+// again collecting at every call port, so each call's arguments are moved before it runs.
 // am[verifies a-petta-cell-store.builtins.terms]
+// am[verifies a-petta-speed-general-1108.load.text]
 
 import fc from "fast-check";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -199,13 +202,16 @@ const CASES: [string, (vs: Var[]) => fc.Arbitrary<Term>[]][] = [
   ["msort", (vs) => [fc.oneof(list(term(vs, 1), vs), term(vs, 1)), term(vs, 1)]],
   ["sort", (vs) => [fc.oneof(list(term(vs, 1), vs), term(vs, 1)), term(vs, 1)]],
   ["keysort", (vs) => [fc.oneof(list(term(vs, 1), vs), list(fc.tuple(term(vs, 1), term(vs, 1)).map(([k, v]) => new Struct("-", [k, v]) as Term), vs)), term(vs, 1)]],
-  // Text builtins run through the bridge (bridge.ts): their results must come back as the object builtin gives them.
+  // Text builtins: the conversions run on cells (text.ts) and the rest through the bridge (bridge.ts), each answering
+  // as the object builtin does, a mode the cell version hands to the bridge included.
   ["atom_length", (vs) => [fc.oneof(text(vs), term(vs, 1)), fc.oneof(fc.integer({ min: -1, max: 4 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs), atomic())]],
   ["atom_chars", (vs) => [fc.oneof(text(vs), fc.constantFrom<Term>(...vs)), fc.oneof(chars(vs), fc.constantFrom<Term>(...vs))]],
   ["atom_codes", (vs) => [fc.oneof(text(vs), fc.constantFrom<Term>(...vs)), fc.oneof(codes(vs), fc.constantFrom<Term>(...vs))]],
   ["char_code", (vs) => [fc.oneof(fc.constantFrom<Term>("a", "é", "ab"), fc.constantFrom<Term>(...vs)), fc.oneof(fc.integer({ min: 96, max: 99 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs))]],
   ["atom_number", (vs) => [fc.oneof(fc.constantFrom<Term>("12", "1.5", "x", "0x1f", "-3"), fc.constantFrom<Term>(...vs)), fc.oneof(fc.integer({ min: -3, max: 12 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs))]],
   ["number_codes", (vs) => [fc.oneof(fc.integer({ min: -3, max: 30 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs)), fc.oneof(codes(vs), fc.constantFrom<Term>(...vs))]],
+  ["number_chars", (vs) => [fc.oneof(fc.integer({ min: -3, max: 30 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(2 ** 40, 2n ** 70n, new Float(1.5), "a", NIL, ...vs)), fc.oneof(chars(vs), numberChars(vs), fc.constantFrom<Term>(...vs))]],
+  ["number_codes", (vs) => [fc.constantFrom<Term>(...vs), numberChars(vs).map((l) => mapList(l, (x) => (typeof x === "string" ? x.codePointAt(0)! : x)))]],
   // Deterministic modes: the first two arguments bound (splitting an atom needs the generator).
   ["atom_concat", (vs) => [text(vs), text(vs), fc.oneof(text(vs), fc.constantFrom<Term>(...vs))]],
   // A part unbound: the whole split by the other part (a-petta-cell-store.tune.introspect).
@@ -214,6 +220,16 @@ const CASES: [string, (vs: Var[]) => fc.Arbitrary<Term>[]][] = [
   ["string_concat", (vs) => [text(vs), text(vs), fc.oneof(text(vs), fc.constantFrom<Term>(...vs))]],
   ["string_chars", (vs) => [fc.oneof(text(vs), fc.constantFrom<Term>(...vs)), fc.oneof(chars(vs), fc.constantFrom<Term>(...vs))]],
   ["string_codes", (vs) => [fc.oneof(text(vs), fc.constantFrom<Term>(...vs)), fc.oneof(codes(vs), fc.constantFrom<Term>(...vs))]],
+  ["string_to_atom", (vs) => [fc.oneof(text(vs), codes(vs), fc.constantFrom<Term>(...vs)), fc.oneof(text(vs), chars(vs), fc.constantFrom<Term>(...vs))]],
+  ["split_string", (vs) => [fc.oneof(text(vs), codes(vs), fc.constantFrom<Term>(...vs)), fc.oneof(fc.constantFrom<Term>("", " ", ",", " ,", new Str("/")), fc.constantFrom<Term>(...vs)), fc.oneof(fc.constantFrom<Term>("", " ", "a", new Str(" ")), fc.constantFrom<Term>(...vs)), fc.oneof(fc.constantFrom<Term>(...vs), term(vs, 1))]],
+  // am[verifies a-petta-speed-general-1108.load.string]
+  ["string", (vs) => [fc.oneof(text(vs), term(vs, 1))]],
+  // A nonterminal runs on cells, any other body through the object builtin's translation; append/3, =/2 and msort/2
+  // are on both engines, foo/2 on neither. An unbound body has the object builtin call phrase/3 again forever, so a
+  // body is bound.
+  // am[verifies a-petta-speed-general-1108.load.phrase]
+  ["phrase", (vs) => [dcgBody(vs), fc.oneof(list(term(vs, 1), vs), fc.constantFrom<Term>(...vs))]],
+  ["phrase", (vs) => [dcgBody(vs), fc.oneof(list(term(vs, 1), vs), fc.constantFrom<Term>(...vs)), fc.oneof(list(term(vs, 1), vs), fc.constantFrom<Term>(...vs))]],
   ["upcase_atom", (vs) => [fc.oneof(text(vs), fc.constantFrom<Term>(...vs)), fc.oneof(text(vs), fc.constantFrom<Term>(...vs))]],
   // Deterministic modes: the start and the length given.
   ["sub_atom", (vs) => [text(vs), fc.integer({ min: 0, max: 3 }) as fc.Arbitrary<Term>, fc.integer({ min: 0, max: 3 }) as fc.Arbitrary<Term>, fc.oneof(fc.integer({ min: 0, max: 3 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs)), fc.oneof(text(vs), fc.constantFrom<Term>(...vs))]],
@@ -242,16 +258,48 @@ function lambdaBody(vs: Var[]): fc.Arbitrary<Term> {
     term(vs, 1).map((t) => new Struct("atom", [t]) as Term),
   );
 }
-/** Text arguments: atoms with letters, digits, spaces and accents, strings, numbers. */
+/**
+ * Text arguments: atoms with letters, digits, spaces, accents and a character past the Basic Multilingual Plane,
+ * strings, small and big integers and floats.
+ */
 function text(_vs: Var[]): fc.Arbitrary<Term> {
-  return fc.oneof(fc.constantFrom<Term>("", "a", "ab", "abc", "a b", "é", "12", "x1", "[]", NIL), fc.constantFrom<Term>(new Str(""), new Str("ab"), new Str("é z")), fc.integer({ min: -3, max: 30 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(new Float(1.5)));
+  return fc.oneof(
+    fc.constantFrom<Term>("", "a", "ab", "abc", "a b", "é", "12", "x1", "[]", NIL, "𝄞", "a𝄞b", " 12", "0x1f", "1.0e10"),
+    fc.constantFrom<Term>(new Str(""), new Str("ab"), new Str("é z"), new Str("𝄞"), new Str("a,b c"), new Str(" 7")),
+    fc.integer({ min: -3, max: 30 }) as fc.Arbitrary<Term>,
+    fc.constantFrom<Term>(new Float(1.5), new Float(-0), new Float(1e22), new Float(NaN), 2 ** 40, 2n ** 70n),
+  );
 }
-/** Character and code lists, some partial or with a wrong element. */
+/** Character and code lists, some partial or with a wrong element: a long atom, [], a code past Unicode, a boxed one. */
 function chars(vs: Var[]): fc.Arbitrary<Term> {
-  return list(fc.oneof(fc.constantFrom<Term>("a", "b", "é", " ", "1"), fc.constantFrom<Term>(...vs), fc.constantFrom<Term>("ab", 3)), vs);
+  return list(fc.oneof(fc.constantFrom<Term>("a", "b", "é", " ", "1", "𝄞"), fc.constantFrom<Term>(...vs), fc.constantFrom<Term>("ab", 3, NIL)), vs);
 }
 function codes(vs: Var[]): fc.Arbitrary<Term> {
-  return list(fc.oneof(fc.integer({ min: 48, max: 122 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs), fc.constantFrom<Term>("a", -1)), vs);
+  return list(fc.oneof(fc.integer({ min: 48, max: 122 }) as fc.Arbitrary<Term>, fc.constantFrom<Term>(...vs), fc.constantFrom<Term>("a", -1, 0x1d11e, 0x110000, 2 ** 40)), vs);
+}
+/** The characters of number texts, with leading layout, signs, a float and text that is no number. */
+function numberChars(vs: Var[]): fc.Arbitrary<Term> {
+  return fc.constantFrom("12", " 12", "-3", "+4", "1.5", "1.0e10", "0x1f", "0'a", "12 ", "x", "", "1_000").map((s) => [...s].reduceRight<Term>((t, ch) => new Cons(ch, t), vs.length > 0 && s === "x" ? vs[0]! : NIL));
+}
+/** The list `l` with each element mapped by `f`, its tail kept. */
+function mapList(l: Term, f: (x: Term) => Term): Term {
+  const d = deref(l);
+  return d instanceof Cons ? new Cons(f(deref(d.head)), mapList(d.tail, f)) : d;
+}
+/** Grammar bodies: nonterminals with and without arguments, control constructs, proper lists, strings, non-callables. */
+function dcgBody(vs: Var[]): fc.Arbitrary<Term> {
+  // append/3 with a partial first list can search forever without an answer, so its lists are proper.
+  const sub = fc.array(term(vs, 1), { maxLength: 3 }).map((items) => items.reduceRight<Term>((t, x) => new Cons(x, t), NIL));
+  return fc.oneof(
+    { weight: 3, arbitrary: sub.map((x) => new Struct("append", [x]) as Term) },
+    { weight: 1, arbitrary: fc.constantFrom<Term>("=", "msort", "foo", "!", "{}", NIL, 3, new Str("ab"), new Float(1)) },
+    { weight: 1, arbitrary: sub },
+    { weight: 1, arbitrary: fc.tuple(sub, sub).map(([x, y]) => new Struct(",", [new Struct("append", [x]), new Struct("append", [y])]) as Term) },
+    { weight: 1, arbitrary: fc.tuple(sub, sub).map(([x, y]) => new Struct(";", [x, new Struct("append", [y])]) as Term) },
+    { weight: 1, arbitrary: term(vs, 1).map((t) => new Struct("{}", [new Struct("atom", [t])]) as Term) },
+    { weight: 1, arbitrary: sub.map((x) => new Struct("\\+", [new Struct("append", [x])]) as Term) },
+    { weight: 1, arbitrary: sub.map((x) => new Struct(":", ["user", new Struct("append", [x])]) as Term) },
+  );
 }
 
 // am[verifies a-petta-cell-store.gc.test]

@@ -10,8 +10,9 @@
 // dropped; the object machine's trail is cut back to where it was; goals it pushed come back as one goal cell to run
 // next; a loading builtin, whose file's goals run on the cell machine, has the decoded variables' cells held across
 // them. A builtin whose effect a decoded copy cannot carry (setarg/3, b_setval/2) is refused as not built yet. The
-// frequent builtins run natively instead (builtins.ts, c-builtin-calls-1106); the text builtins stay here, their text
-// work outweighing the bridge's.
+// frequent builtins run natively instead (builtins.ts, c-builtin-calls-1106), the text conversions and phrase/2,3
+// among them, whose decoding and encoding of short texts and whole input lists cost more than their own work
+// (text.ts, c-load-gap-bridge-1108).
 // am[implements a-petta-cell-store.gate2]
 
 import { AttrUndo, type Builtin, type Machine } from "../machine";

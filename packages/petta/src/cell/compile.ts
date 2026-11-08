@@ -53,6 +53,7 @@ const TESTS: Readonly<Record<string, string>> = {
   "compound/1": "ISCOMPOUND",
   "callable/1": "ISCALLABLE",
   "is_list/1": "ISLIST",
+  "string/1": "ISSTRING",
   "ground/1": "GROUND",
   "==/2": "IDENT",
   "\\==/2": "!IDENT",
@@ -214,6 +215,12 @@ function runtime(cm: CellMachine): Runtime {
       while ((c & 7) === LIS) c = hp.deref(hp.h[(c >> 3) + 1]!);
       return c === hp.NIL;
     },
+    // string/1, which PeTTa's reader and writer test on every token and form, decoded its argument through the bridge
+    // (c-load-gap-bridge-1108). am[implements a-petta-speed-general-1108.load.string]
+    ISSTRING: (c0: number): boolean => {
+      const c = hp.deref(c0);
+      return (c & 7) === BOX && hp.boxed(c) instanceof Str;
+    },
     GROUND: (c0: number): boolean => {
       const st = [c0];
       while (st.length > 0) {
@@ -301,7 +308,12 @@ function runtime(cm: CellMachine): Runtime {
   runtimes.set(cm, rt);
   return rt;
 }
-const RT_NAMES = ["E", "NUM", "CMP", "ISVAR", "ISATOM", "ISNUM", "ISINT", "ISFLOAT", "ISATOMIC", "ISCOMPOUND", "ISCALLABLE", "ISLIST", "GROUND", "IDENT", "NUNIFY", "GC", "GB", "GSTR", "GLIS", "UV", "UVAL", "UVOID", "UC", "UB", "USTR", "ULIS", "OVF", "MATCH", "BUILD"];
+/**
+ * The names generated code calls the runtime's functions by, its parameters: the runtime's own keys, so a function
+ * added to it, a type test of TESTS included, is in scope without a second list to keep.
+ * am[implements a-petta-speed-general-1108.load.string]
+ */
+const rtNames = (rt: object): string[] => Object.keys(rt);
 
 /**
  * Make the goals compiled code runs inline also run natively when called through a procedure, as a meta-call or
@@ -991,8 +1003,8 @@ export function compileCellClause(cm: CellMachine, c: Clause, hot: boolean): Cla
     const src = `return [(function fact(b0, cc, pc) { ${count} const H = hp.h; ${locals} ${headCode} if (hp.wakeups.length !== 0) return cm.wake(cc); return CODE[R[1]]; })];`;
     if (DUMP !== undefined) appendFileSync(DUMP, `// ${c.pred.name}/${c.pred.arity} clause ${c.seq}\n${src}\n\n`);
     const rt = runtime(cm);
-    const factory = new Function("cm", "hp", "A", "S", "R", "CODE", "K", "HF", "P", ...RT_NAMES, src) as (...a: unknown[]) => ClauseFn[];
-    return factory(cm, hp, cm.A, cm.S, cm.R, cm.CODE, bc.consts, HEADFAIL, [], ...RT_NAMES.map((k) => rt[k]))[0]!;
+    const factory = new Function("cm", "hp", "A", "S", "R", "CODE", "K", "HF", "P", ...rtNames(rt), src) as (...a: unknown[]) => ClauseFn[];
+    return factory(cm, hp, cm.A, cm.S, cm.R, cm.CODE, bc.consts, HEADFAIL, [], ...Object.values(rt))[0]!;
   }
   const nparts = partOf[n - 1]! + 1;
   const declare = nslots > 0 ? `let ${Array.from({ length: nslots }, (_, i) => `v${i}`).join(", ")};` : "";
@@ -1030,10 +1042,10 @@ export function compileCellClause(cm: CellMachine, c: Clause, hot: boolean): Cla
   if (DUMP !== undefined) appendFileSync(DUMP, `// ${c.pred.name}/${c.pred.arity} clause ${c.seq}\n${parts.join(",\n")}\n\n`);
   const rt = runtime(cm);
   const P: ClauseFn[] = [];
-  const factory = new Function("cm", "hp", "A", "S", "R", "CODE", "K", "HF", "P", ...RT_NAMES, `return [${parts.join(",\n")}];`) as (
+  const factory = new Function("cm", "hp", "A", "S", "R", "CODE", "K", "HF", "P", ...rtNames(rt), `return [${parts.join(",\n")}];`) as (
     ...a: unknown[]
   ) => ClauseFn[];
-  P.push(...factory(cm, hp, cm.A, cm.S, cm.R, cm.CODE, bc.consts, HEADFAIL, P, ...RT_NAMES.map((k) => rt[k])));
+  P.push(...factory(cm, hp, cm.A, cm.S, cm.R, cm.CODE, bc.consts, HEADFAIL, P, ...Object.values(rt)));
   for (const [pc, id] of ids) {
     const f = P[partOf[pc]!]!;
     cm.CODE[id] = () => f(0, 0, pc);
