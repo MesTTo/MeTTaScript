@@ -4,7 +4,9 @@
 
 // Purpose: measure what a clause costs the cell engine cold, compiled and to compile, on synthetic facts and rules of
 // varied size, as rows of nanoseconds per try over runs of consecutive tries; and derive from those rows, by the
-// cost-benefit rule, the tries a clause of each kind and size should run cold before it is compiled.
+// cost-benefit rule, the tries a clause of each kind and size should run cold before it is compiled, the F + W / cells
+// fit of those tries per kind of code that cell/machine.ts TIERS holds, and the AIC and AICc of that fit beside the
+// forms nested in it and the clamp it replaced.
 // Usage:
 //   node --expose-gc --import tsx packages/petta/bench/tier-costs.ts measure [--preds=N] [--sets=R] [--repeats=K] > rows.tsv
 //   node --import tsx packages/petta/bench/tier-costs.ts derive rows.tsv
@@ -20,10 +22,11 @@ import { installConsult } from "../src/consult";
 import { consultLibrary, installLibrary } from "../src/library";
 import { Machine } from "../src/machine";
 import { readClauses } from "../src/prolog-reader";
+import { Struct } from "../src/terms";
 import { installTermBuiltins } from "../src/cell/builtins";
 import { compileCellClause, installInlineBuiltins } from "../src/cell/compile";
-import { CellMachine } from "../src/cell/machine";
-import { clauseCells, headProgram } from "../src/cell/headprog";
+import { CellMachine, compileAfter } from "../src/cell/machine";
+import { clauseCells, headProgram, large } from "../src/cell/headprog";
 import type { Clause } from "../src/db";
 
 const arg = (name: string, dflt: number): number => {
@@ -39,7 +42,7 @@ const CONFIGS: [Kind, number][] = [
 ];
 /**
  * Runs of consecutive tries each phase times, after the clause's first try: the cold tries up to the compiling one
- * (COMPILE_AFTER, the 32nd, under tierWork 0), that try alone, then doubling runs of compiled tries to the 8192nd, over
+ * (COMPILE_AFTER, the 32nd, with tiering off), that try alone, then doubling runs of compiled tries to the 8192nd, over
  * which V8 takes the generated code from its interpreter to optimised code and a fact is recompiled with an inline head
  * (compile.ts HOT_AFTER).
  */
@@ -119,7 +122,7 @@ function timeRun(cm: CellMachine, calls: string, n: number): number {
  */
 function measureOne(kind: Kind, m: number, preds: number, sets: number, tag: string): void {
   const cm = machine();
-  cm.tierWork = 0;
+  cm.tiered = false;
   consult(cm, "e(_, ok).\nh(_, ok).\nloop(N, G) :- N > 0, !, (call(G), fail ; true), N1 is N - 1, loop(N1, G).\nloop(_, _).");
   timeRun(cm, "e(1, _), h(1, _)", 20000);
   const make = (u: string, cold: boolean): { calls: string; cells: number } => {
@@ -202,6 +205,129 @@ function measure(): void {
 type Row = { kind: Kind; cells: number; curve: string; first: number; last: number; ns: number };
 
 /**
+ * The kinds of code TIERS (cell/machine.ts) fits apart, in its order: rules, facts whose head is generated node by
+ * node, and facts whose head runs through the term-program matcher.
+ * am[implements a-petta-speed-general-1108.tier-derive]
+ */
+const REGIMES = ["rule", "inlineFact", "matchedFact"] as const;
+type Regime = (typeof REGIMES)[number];
+
+/** A model of a kind's break-even tries n at s cells, fitted to ln n: its parameters and residual sum of squares. */
+type Fit = { model: string; k: number; params: Record<string, number>; rss: number };
+
+/** The mean of `xs` and the sum of their squared deviations from it. */
+const centred = (xs: number[]): { mean: number; ss: number } => {
+  const mean = xs.reduce((a, x) => a + x, 0) / xs.length;
+  return { mean, ss: xs.reduce((a, x) => a + (x - mean) ** 2, 0) };
+};
+
+/**
+ * n = F and n = W / s fitted to ln n at sizes `s`: ln F is the mean of ln n, ln W the mean of ln n + ln s.
+ * am[implements a-petta-speed-general-1108.tier-derive]
+ */
+const fitF = (y: number[]): Fit => {
+  const c = centred(y);
+  return { model: "F", k: 1, params: { F: Math.exp(c.mean) }, rss: c.ss };
+};
+const fitW = (s: number[], y: number[]): Fit => {
+  const c = centred(y.map((v, i) => v + Math.log(s[i]!)));
+  return { model: "W / s", k: 1, params: { W: Math.exp(c.mean) }, rss: c.ss };
+};
+
+/**
+ * n = F + W / s, F and W at least 0, fitted to ln n at sizes `s`. As W (φ + 1 / s) with φ = F / W, the best ln W for a
+ * given φ is the mean of ln n - ln(φ + 1 / s), so the fit searches φ alone: a scan of ln φ from 1e-8 / max s to
+ * 1e8 / min s, a golden-section search between the best scan point's neighbours, and the bounds φ = 0 (n = W / s) and
+ * W = 0 (n = F). Time: 2100 evaluations of |s| terms.
+ * am[implements a-petta-speed-general-1108.tier-derive]
+ */
+function fitFW(s: number[], y: number[]): Fit {
+  const at = (phi: number): { mean: number; ss: number } => centred(y.map((v, i) => v - Math.log(phi + 1 / s[i]!)));
+  const ss = (x: number): number => at(Math.exp(x)).ss;
+  const lo = Math.log(1e-8 / Math.max(...s)), hi = Math.log(1e8 / Math.min(...s)), steps = 2000;
+  const u = (i: number): number => lo + ((hi - lo) * i) / steps;
+  let bi = 0, bss = Infinity;
+  for (let i = 0; i <= steps; i++) {
+    const r = ss(u(i));
+    if (r < bss) [bi, bss] = [i, r];
+  }
+  const g = (Math.sqrt(5) - 1) / 2;
+  let a = u(Math.max(0, bi - 1)), b = u(Math.min(steps, bi + 1));
+  let x1 = b - g * (b - a), x2 = a + g * (b - a), f1 = ss(x1), f2 = ss(x2);
+  for (let i = 0; i < 100; i++) {
+    if (f1 < f2) {
+      b = x2, x2 = x1, f2 = f1;
+      x1 = b - g * (b - a), f1 = ss(x1);
+    } else {
+      a = x1, x1 = x2, f1 = f2;
+      x2 = a + g * (b - a), f2 = ss(x2);
+    }
+  }
+  const phi = Math.exp((a + b) / 2), inner = at(phi), slope = at(0), flat = centred(y);
+  const fits: [number, number, number][] = [
+    [phi * Math.exp(inner.mean), Math.exp(inner.mean), inner.ss],
+    [0, Math.exp(slope.mean), slope.ss],
+    [Math.exp(flat.mean), 0, flat.ss],
+  ];
+  const [F, W, rss] = fits.reduce((p, q) => (q[2] < p[2] ? q : p));
+  return { model: "F + W / s", k: 2, params: { F, W }, rss };
+}
+
+/**
+ * n = max(F, min(M, W / s)), the clamp the tier rule had before, fitted to ln n at ascending sizes `s`. It is
+ * W / clip(s, W / M, W / F), so ln n = w - clip(ln s, b1, b2) with w = ln W, b1 = w - ln M and b2 = w - ln F, b1 ≤ b2;
+ * for given b1 and b2 the best w is the mean of ln n + clip(ln s, b1, b2), and the residual sum of squares is a convex
+ * quadratic in (b1, b2) on each cell between consecutive ln s, so its least is exact: on each cell, the quadratic's
+ * stationary point where the cell holds it, or the least on one of the cell's edges, where it is a parabola in the
+ * edge's parameter. Where no size is held at M, M is W / the least size, the least M that fits the same, and where
+ * none is held at F, F is W / the greatest size. Null with fewer than two sizes. Time: |s|^2 / 2 cells of 13
+ * evaluations of |s| terms.
+ * am[implements a-petta-speed-general-1108.tier-derive]
+ */
+function fitClamp(s: number[], y: number[]): Fit | null {
+  const l = s.map(Math.log), n = l.length;
+  const at = (b1: number, b2: number): { mean: number; ss: number } => centred(y.map((v, i) => v + Math.min(b2, Math.max(b1, l[i]!))));
+  const best = { b1: 0, b2: 0, rss: Infinity };
+  const consider = ([b1, b2]: [number, number]): void => {
+    const r = at(b1, b2).ss;
+    if (r < best.rss) Object.assign(best, { b1, b2, rss: r });
+  };
+  const centre = (xs: number[]): number[] => {
+    const m = centred(xs).mean;
+    return xs.map((x) => x - m);
+  };
+  const dot = (p: number[], q: number[]): number => p.reduce((acc, x, i) => acc + x * q[i]!, 0);
+  for (let j = 0; j + 1 < n; j++)
+    for (let k = j; k + 1 < n; k++) {
+      // The cell b1 in [l_j, l_j+1], b2 in [l_k, l_k+1], b1 ≤ b2: a rectangle, or a triangle where both share an
+      // interval.
+      const [lj, lj1, lk, lk1] = [l[j]!, l[j + 1]!, l[k]!, l[k + 1]!];
+      const cell: [number, number][] = j < k ? [[lj, lk], [lj1, lk], [lj1, lk1], [lj, lk1]] : [[lj, lj], [lj, lj1], [lj1, lj1]];
+      for (let e = 0; e < cell.length; e++) {
+        const [p, q] = [cell[e]!, cell[(e + 1) % cell.length]!];
+        const along = (t: number): [number, number] => [p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])];
+        const [q0, qh, q1] = [0, 0.5, 1].map((t) => at(...along(t)).ss) as [number, number, number];
+        const curve = 2 * (q0 - 2 * qh + q1), rise = 4 * qh - 3 * q0 - q1;
+        consider(along(0));
+        if (curve > 0) consider(along(Math.min(1, Math.max(0, -rise / (2 * curve)))));
+      }
+      // In the cell, clip(ln s, b1, b2) is b1 at sizes 0 to j, b2 past k and ln s between, so the centred
+      // ln n + clip(ln s, b1, b2) is r + b1 a + b2 c, a and c the centred indicators of the two clipped groups.
+      const a = centre(l.map((_, i) => (i <= j ? 1 : 0))), c = centre(l.map((_, i) => (i > k ? 1 : 0)));
+      const r = centre(y.map((v, i) => (i <= j || i > k ? v : v + l[i]!)));
+      const [haa, hac, hcc, ga, gc] = [dot(a, a), dot(a, c), dot(c, c), dot(a, r), dot(c, r)];
+      const det = haa * hcc - hac * hac;
+      if (det > 1e-12) {
+        const b1 = (gc * hac - ga * hcc) / det, b2 = (ga * hac - gc * haa) / det;
+        if (b1 >= lj && b1 <= lj1 && b2 >= lk && b2 <= lk1 && b1 <= b2) consider([b1, b2]);
+      }
+    }
+  if (best.rss === Infinity) return null;
+  const w = at(best.b1, best.b2).mean;
+  return { model: "max(F, min(M, W / s))", k: 3, params: { F: Math.exp(w - best.b2), M: Math.exp(w - best.b1), W: Math.exp(w) }, rss: best.rss };
+}
+
+/**
  * The cold tries a clause should run before it is compiled, from the measured rows, by Arnold et al.'s rule for
  * adaptive optimisation (Jalapeño, OOPSLA 2000), which is also the rent-or-buy break-even (Karlin et al. 1988): a clause
  * tried n times is taken to be tried n times more, so it is compiled at the least n where the compiling try and the
@@ -209,6 +335,13 @@ type Row = { kind: Kind; cells: number; curve: string; first: number; last: numb
  * each run. Prints kind, cells, cold ns per try (tries 2 to 31; the cold control's last run beside it), the compiling
  * try's ns, compiled ns per try over each run, the break-even tries within the runs measured, and the break-even
  * projected past them at the last run's cost per try.
+ * Then, per kind of code a clause compiles to by compileAfter's dispatch (cell/machine.ts), it fits the finite
+ * break-evens in log space by least squares as F, W / s, F + W / s (F and W at least 0) and the clamp
+ * max(F, min(M, W / s)) the tier rule had before, each with its AIC, n ln(RSS / n) + 2k over n sizes and k
+ * parameters, and its AICc, AIC + 2k(k + 1) / (n - k - 1) where n > k + 1, the correction for few sizes (Hurvich and
+ * Tsai 1989); prints the F + W / s fits in whole tries, bounded to the sizes they were fitted on, as TIERS; and checks
+ * compileAfter against them at every configuration, exiting 1 where it differs.
+ * am[implements a-petta-speed-general-1108.tier-derive]
  */
 function derive(file: string): void {
   const rows: Row[] = [];
@@ -224,11 +357,25 @@ function derive(file: string): void {
   }
   const get = (kind: Kind, cells: number, curve: string, first: number, last: number): number => best.get([kind, cells, curve, first, last].join(" ")) ?? NaN;
   const configs = [...new Set(rows.map((r) => `${r.kind} ${r.cells}`))].map((s) => s.split(" ")).map(([k, c]) => [k as Kind, Number(c)] as const);
+  // Each configuration's clause, consulted as measureOne consults it: the kind of code it compiles to, by
+  // compileAfter's dispatch, and the tries compileAfter gives it.
+  const cm = machine();
+  const clauses = new Map<string, Clause>();
+  for (const [kind, m] of CONFIGS) {
+    const u = `d${kind[0]}${m}`;
+    consult(cm, clauseOf(kind, u, 0, m).text);
+    const c = cm.om.db.get(`t${u}_0`, 2)!.clauses[0]!;
+    clauses.set(`${kind} ${clauseCells(c, 1 << 20)}`, c);
+  }
+  const regimeOf = (c: Clause): Regime => (c.body !== "true" ? "rule" : c.head instanceof Struct && c.head.args.some(large) ? "matchedFact" : "inlineFact");
+  const points: { kind: Kind; cells: number; regime: Regime; tries: number; c: Clause }[] = [];
   const spans: [number, number][] = [];
   for (let first = 1, i = 0; i < RUNS.length; first += RUNS[i]!, i++) spans.push([first, first + RUNS[i]! - 1]);
   const compiledSpans = spans.slice(3);
   console.log(["kind", "cells", "cold_ns", "cold_ctl_ns", "compile_try_ns", ...compiledSpans.map(([a, b]) => `ns_${a}_${b}`), "break_even", "projected"].join("\t"));
   for (const [kind, cells] of configs.sort((a, b) => a[0].localeCompare(b[0]) || a[1] - b[1])) {
+    const c = clauses.get(`${kind} ${cells}`);
+    if (c === undefined) throw new Error(`${file}: the ${kind} rows at ${cells} cells match no configuration in CONFIGS`);
     const cold = get(kind, cells, "tiered", 2, 31);
     const coldCtl = get(kind, cells, "cold", spans[8]![0], spans[8]![1]);
     const compileTry = get(kind, cells, "tiered", 32, 32);
@@ -247,7 +394,34 @@ function derive(file: string): void {
     const h = hot[hot.length - 1]!;
     const projected = breakEven > 0 ? breakEven : h < cold ? Math.ceil((cost - n * h) / (cold - h)) : Infinity;
     console.log([kind, cells, cold.toFixed(0), coldCtl.toFixed(0), compileTry.toFixed(0), ...hot.map((x) => x.toFixed(0)), breakEven > 0 ? breakEven : "never", projected].join("\t"));
+    points.push({ kind, cells, regime: regimeOf(c), tries: projected, c });
   }
+  console.log(`\n${["tier", "sizes", "cells", "model", "k", "rss", "aic", "aicc", "fit"].join("\t")}`);
+  const tiers = new Map<Regime, { floor: number; work: number; cells: [number, number] }>();
+  for (const regime of REGIMES) {
+    const pts = points.filter((p) => p.regime === regime && Number.isFinite(p.tries)).sort((p, q) => p.cells - q.cells);
+    if (pts.length === 0) continue;
+    const s = pts.map((p) => p.cells), y = pts.map((p) => Math.log(p.tries));
+    const fw = fitFW(s, y);
+    for (const f of [fitF(y), fitW(s, y), fw, fitClamp(s, y)]) {
+      if (f === null) continue;
+      const n = s.length, aic = n * Math.log(f.rss / n) + 2 * f.k;
+      const aicc = n > f.k + 1 ? (aic + (2 * f.k * (f.k + 1)) / (n - f.k - 1)).toFixed(2) : "-";
+      const fit = Object.entries(f.params).map(([p, v]) => `${p} ${v.toFixed(1)}`).join(" ");
+      console.log([regime, n, `${s[0]}-${s[n - 1]}`, f.model, f.k, f.rss.toFixed(4), aic.toFixed(2), aicc, fit].join("\t"));
+    }
+    tiers.set(regime, { floor: Math.round(fw.params.F!), work: Math.round(fw.params.W!), cells: [s[0]!, s[s.length - 1]!] });
+  }
+  console.log("\n# TIERS (cell/machine.ts): each kind's F + W / s in whole tries, bounded to the sizes it was fitted on");
+  for (const [regime, t] of tiers) console.log(`  ${regime}: { floor: ${t.floor}, work: ${t.work}, cells: [${t.cells.join(", ")}] },`);
+  const differ = points.filter((p) => {
+    const t = tiers.get(p.regime);
+    return t === undefined || compileAfter(p.c, true) !== Math.round(t.floor + t.work / Math.max(t.cells[0], Math.min(t.cells[1], p.cells)));
+  });
+  for (const p of differ) console.log(`# ${p.kind} at ${p.cells} cells: compileAfter gives ${compileAfter(p.c, true)} tries, these TIERS another`);
+  const verdict = differ.length === 0 ? "gives every configuration these TIERS' tries" : `differs from these TIERS at ${differ.length} configurations`;
+  console.log(`# compileAfter ${verdict}`);
+  if (differ.length > 0) process.exitCode = 1;
 }
 
 const [mode, ...rest] = process.argv.slice(2).filter((a) => !a.startsWith("--"));
