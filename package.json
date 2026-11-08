@@ -12,7 +12,7 @@
     "release": "node scripts/release.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "pnpm -r --filter \"./packages/*\" --filter \"./compat/*\" exec tsc --noEmit",
+    "typecheck": "pnpm -r --filter \"./packages/*\" --filter \"./compat/*\" exec tsc --noEmit && tsc --noEmit -p packages/petta/bench",
     "lint": "eslint \"packages/*/src/**/*.ts\" \"compat/*/src/**/*.ts\"",
     "format": "prettier --write \"packages/*/src/**/*.ts\" \"compat/*/src/**/*.ts\" \"*.{json,md}\"",
     "format:check": "prettier --check \"packages/*/src/**/*.ts\" \"compat/*/src/**/*.ts\" \"*.{json,md}\"",
