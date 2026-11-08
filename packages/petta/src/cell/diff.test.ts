@@ -8,7 +8,8 @@
 // once into the object machine's database, which both engines read; each query's answers must come in the same order
 // with the same bindings, up to the first 40, and the query must throw on both or neither. Fixed recursive programs
 // (naive reverse, member, a counting loop) check recursion and backtracking through it; database, global variable and
-// attribute programs run on fresh machine pairs, attributes also against SWI-Prolog's measured answers.
+// attribute programs run on fresh machine pairs, attributes also against SWI-Prolog's measured answers. The spec table's
+// answers to special_builtin_form/3 on cells match its clauses' answers and the choicepoints they leave.
 // Every test runs under the collector's own schedule and again collecting at every call port, where a collection
 // meets each root a program holds at that point and a freed atom reads as a poison; a freed atom's id taken by another
 // atom calls the other's procedure. A machine and its workers' heaps add no external memory to the isolate.
@@ -20,12 +21,13 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { ATTR_PROGRAMS, ATTR_SWI } from "../attr-fixture";
 import { installBuiltins } from "../builtins";
 import { consultClpfd, installClpfd } from "../clpfd";
-import { installConsult } from "../consult";
+import { consultText, installConsult } from "../consult";
 import { consultLibrary, installLibrary } from "../library";
 import { Machine } from "../machine";
 import { readClauses } from "../prolog-reader";
 import { Ground, clauseArgHash, groundHash } from "../db";
 import { Cons, Float, NIL, Str, Struct, Var, deref, listToArray, mkList, mkVar, type Term } from "../terms";
+import { installSpecCache, installSpecCacheOnCells, type SpecMemo } from "../spec-cache";
 import { installTermBuiltins } from "./builtins";
 import { compileCellClause, installInlineBuiltins } from "./compile";
 import { Heap } from "./heap";
@@ -887,5 +889,70 @@ describe("cell engine code_type", () => {
       }),
       { numRuns: 600 },
     );
+  });
+});
+
+describe("cell engine special_builtin_form table", () => {
+  // PeTTa's clause (builtin_registry.pl) over specs giving no row, one row, a variadic row, two rows for one key, a row
+  // from each branch, a hook with a variable in it, a variable hook and an integer hook; q/4 binds D to det when the call
+  // exits leaving no choicepoint.
+  const PROGRAM = `
+special_builtin_form(F, Args, Hook) :-
+    atom(F),
+    length(Args, N),
+    ( builtin_spec(F/N, _, _, evaluation(special), _, lowering(special(Hook)))
+    ; builtin_spec(F/variadic, _, _, evaluation(special), _, lowering(special(Hook))) ).
+builtin_spec(if/3, i, t, evaluation(special), c, lowering(special(lower_if))).
+builtin_spec(plus/2, i, t, evaluation(eager), c, lowering(special(arith))).
+builtin_spec(progn/variadic, i, t, evaluation(special), c, lowering(special(lower_progn))).
+builtin_spec(two/1, i, t, evaluation(special), c, lowering(special(first_two))).
+builtin_spec(two/1, i, t, evaluation(special), c, lowering(special(second_two))).
+builtin_spec(both/2, i, t, evaluation(special), c, lowering(special(both_fixed))).
+builtin_spec(both/variadic, i, t, evaluation(special), c, lowering(special(both_variadic))).
+builtin_spec(hooked/1, i, t, evaluation(special), c, lowering(special(h(_, k)))).
+builtin_spec(anyhook/1, i, t, evaluation(special), c, lowering(special(_))).
+builtin_spec(numhook/1, i, t, evaluation(special), c, lowering(special(7))).
+q(F, Args, H, D) :- call_cleanup(special_builtin_form(F, Args, H), D = det).
+`;
+  // am[verifies a-petta-next-1108.speed.spec]
+  it("answers with the clauses' hooks, in order, leaving their choicepoints, and runs the clauses for calls it does not take", () => {
+    gcEvery = null;
+    const { m, cm } = machines();
+    // Consulted from a file, as PeTTa's are, so the predicates are static and the table installs.
+    consultText(m, PROGRAM, "/spec-fixture.pl");
+    installSpecCache(m);
+    installSpecCacheOnCells(cm);
+    const p = m.db.get("special_builtin_form", 3)!;
+    const memo = p.memo as SpecMemo;
+    expect(memo).not.toBeNull();
+    let taken = 0;
+    const rows = memo.rows;
+    memo.rows = (f, n) => (taken++, rows(f, n));
+    const names: Term[] = ["if", "plus", "progn", "two", "both", "hooked", "anyhook", "numhook", "missing", NIL, "[]", 42, "VAR"];
+    const lists: Term[] = [NIL, mkList(["a"]), mkList(["a", "b"]), mkList(["a", "b", "c"]), "PARTIAL", new Cons("a", "b")];
+    const hooks: Term[] = ["VAR", "lower_if", "first_two", "second_two", "other", 7, "HVAR"];
+    for (const f0 of names)
+      for (const l0 of lists)
+        for (const h0 of hooks) {
+          // A partial list makes length/2 enumerate lengths without end: only a variadic name with an unbound hook answers
+          // each, which the harness stops at its answer cap; any other call searches forever, in the clauses as anywhere.
+          if (l0 === "PARTIAL" && (f0 !== "progn" || h0 !== "VAR")) continue;
+          const goal = (): Term[] => {
+            const f = f0 === "VAR" ? mkVar() : f0;
+            const l = l0 === "PARTIAL" ? new Cons("a", mkVar()) : l0;
+            const h = h0 === "VAR" ? mkVar() : h0 === "HVAR" ? new Struct("h", [mkVar(), mkVar()]) : h0;
+            return [f, l, h, mkVar()];
+          };
+          const label = `${canon([f0, l0, h0])}`;
+          const got = onCells(cm, "q", goal());
+          p.memo = null;
+          const want = onCells(cm, "q", goal());
+          p.memo = memo;
+          expect(got, label).toStrictEqual(want);
+          expect(got, label).toStrictEqual(onObjects(m, "q", goal()));
+        }
+    // The table read its rows for every call whose name is an atom other than [], list proper and hook unbound, an atom
+    // or a small integer: 10 names x 4 lists x 6 hooks, h(_, _) going to the clauses.
+    expect(taken).toBe(10 * 4 * 6);
   });
 });

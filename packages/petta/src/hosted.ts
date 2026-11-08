@@ -20,7 +20,7 @@ import { installJanus } from "./janus";
 import { consultFile, installConsult, mainGoalOf, markLoaded } from "./consult";
 import { engineHash, loadImage, readImage } from "./image";
 import { IMPORTS_DIR, installImportReplay, snapshotDir } from "./import-snapshot";
-import { installSpecCache } from "./spec-cache";
+import { installSpecCache, installSpecCacheOnCells } from "./spec-cache";
 import { consultLibrary, installLibrary } from "./library";
 import { Machine, profileReport } from "./machine";
 import { errorMessage } from "./messages";
@@ -190,6 +190,9 @@ export class HostedPetta {
     cm.compile = compileCellClause;
     installInlineBuiltins(cm);
     installTermBuiltins(cm);
+    // special_builtin_form/3 answers from the spec table on cells as on the object machine (a-petta-next-1108.speed.spec).
+    // am[implements a-petta-next-1108.speed.spec]
+    installSpecCacheOnCells(cm);
     // A shipped library's import replays its snapshot when one matches, on the state an image gives
     // (a-petta-next-1108.speed.imports.replay).
     // am[implements a-petta-next-1108.speed.imports.replay]
