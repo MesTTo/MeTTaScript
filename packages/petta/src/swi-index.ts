@@ -450,6 +450,10 @@ class ClauseList {
             continue;
           }
         }
+        // An index an asserta left unrealised can fail to realise (a list index meeting a clause with a variable in
+        // its argument drops itself); the loop then assesses the call again rather than scan what the drop emptied.
+        // am[implements a-petta-speed-general-1108.index-realise]
+        if (!best.realised && !this.realise(best)) continue;
         return this.bucketScan(best, bestKey!, args, depth);
       }
       if (this.fixedIndexes) return this.keyScan(pindex, args);
@@ -533,9 +537,8 @@ class ClauseList {
     this.primaryOther = null;
   }
 
-  /** pl-index.c nextClauseFromBucket and nextClauseFromList. */
+  /** pl-index.c nextClauseFromBucket and nextClauseFromList, on realised index `ci`. */
   private bucketScan(ci: ClauseIndex, key: Key, args: Args, depth: number): Scan {
-    if (!ci.realised) this.realise(ci);
     if (!ci.list) {
       const b = ci.buckets.get(key);
       if (b === undefined) return (ci.varScan ??= { list: ci.varClauses, start: 0, key: null, keyAt: null });

@@ -5,9 +5,10 @@
 // Purpose: property test of swi-index.ts's clause selection on dynamic predicates changed between calls by asserta,
 // assertz and retract: the clauses a call's scan admits always include every live clause whose head is key-compatible
 // with the call, in clause order, and while the predicate is small and the call's first argument is bound, they are
-// exactly the live clauses its first-argument key admits, so a primary-key scan kept across calls never goes stale;
-// and an assessment's duplicate merge gives the same keys, counts and speedup, to the bit, as the sort by key string
-// and position that pl-index.c's assess_remove_duplicates was ported as.
+// exactly the live clauses its first-argument key admits, so a primary-key scan kept across calls never goes stale,
+// with a counterexample the property found kept as a fixed case; and an assessment's duplicate merge gives the same
+// keys, counts and speedup, to the bit, as the sort by key string and position that pl-index.c's
+// assess_remove_duplicates was ported as.
 // am[verifies a-petta-cell-store.select]
 
 import fc from "fast-check";
@@ -179,6 +180,32 @@ const keyPool: Key[] = ["a", "b", "1", "", "ab", "\u0001n", "\u0001c[|]/2", "\u0
 const plainPool = keyPool.filter((k) => typeof k !== "bigint" && !Number.isNaN(k));
 const entries = (pool: Key[]): fc.Arbitrary<KeyCount[]> =>
   fc.array(fc.tuple(fc.constantFrom(...pool), fc.integer({ min: 1, max: 4 }), fc.nat(2)).map(([key, count, nv]) => ({ key, count, nvcomp: Math.min(nv, count) })), { maxLength: 60 });
+
+// am[verifies a-petta-speed-general-1108.index-realise]
+describe("clause selection after an asserta that a list index cannot take", () => {
+  // The property test's counterexample (seed -243311762), fixed: p(_,0) makes a list index on argument 2, the asserta
+  // of p([0,a],_) leaves it unrealised and its variable argument keeps it from realising again, and p(_,a) must still
+  // admit every compatible clause.
+  it("admits every compatible live clause with term and cell arguments", () => {
+    const list = (...xs: Term[]): Term => xs.reduceRight<Term>((t, x) => new Cons(x, t), NIL);
+    const m = new Machine(), hp = new Heap();
+    m.addClause(new Struct("p", [new Struct("f", [mkVar()]), list("a", 0)]), false);
+    m.addClause(new Struct("p", [new Struct("g", [0, mkVar()]), list(mkVar(), "a")]), false);
+    const pred = m.db.preds.get("p/2")!;
+    const call = (x: Term, y: Term): void => {
+      const vars = new Map();
+      for (const args of [[x, y], new CellArgs(hp, new Int32Array([hp.encode(x, vars), hp.encode(y, vars)]), 0)] as Args[]) {
+        const live = pred.clauses.filter((c) => c.died === Infinity);
+        const want = live.filter((c) => headArgs(c).every((h, i) => compatible(h, i === 0 ? x : y)));
+        const got = admitted(clauseScan(pred, args));
+        for (const c of want) expect(got).toContain(c);
+      }
+    };
+    call(mkVar(), 0);
+    m.addClause(new Struct("p", [list(0, "a"), mkVar()]), false);
+    call(mkVar(), "a");
+  });
+});
 
 describe("assessment duplicate merge", () => {
   // am[verifies a-petta-next-1108.speed.index]
