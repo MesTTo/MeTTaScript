@@ -1,0 +1,58 @@
+# Held-out MeTTa programs for petta's timing rows: programs from outside PeTTa's example corpus, which no speed
+# change was tuned on. Every timing result reports rows over these beside the corpus rows.
+#
+# Candidates: every .metta file in trueagi-io/metta-examples at 799ad9d (101) and trueagi-io/hyperon-experimental at
+# 3f76dc4 (67), 168 in all, listed before any program ran
+# (sha256 of that list, one path a line in the audit's order: 2a26145cf1a41488de61bf567f2aed49c8406c75223ad840182312a678ead05f).
+# Kept: each candidate PeTTa ee5cacb runs twice to exit 0 within 60 s with the same non-empty output both times:
+# 47 programs (30 and 17). Paths are relative to a directory holding both checkouts under those names.
+# Run: node scripts/petta-compare.mjs --examples=DIR --list=packages/petta/bench/heldout-programs.txt
+#        --petta=<PeTTa ee5cacb checkout> --jobs=1 --repeat=3 --rows=FILE
+# am[implements a-petta-speed-general-1108.heldout]
+hyperon-experimental/python/hyperon/exts/agents/tests/test_4_agent1.metta
+hyperon-experimental/python/hyperon/exts/agents/tests/test_4_agent2.metta
+hyperon-experimental/python/hyperon/exts/snet_io/snet/naint/text-generation.metta
+hyperon-experimental/python/tests/scripts/a1_symbols.metta
+hyperon-experimental/python/tests/scripts/a2_opencoggy.metta
+hyperon-experimental/python/tests/scripts/a3_twoside.metta
+hyperon-experimental/python/tests/scripts/b0_chaining_prelim.metta
+hyperon-experimental/python/tests/scripts/b1_equal_chain.metta
+hyperon-experimental/python/tests/scripts/b2_backchain.metta
+hyperon-experimental/python/tests/scripts/b3_direct.metta
+hyperon-experimental/python/tests/scripts/c2_spaces.metta
+hyperon-experimental/python/tests/scripts/e1_kb_write.metta
+hyperon-experimental/python/tests/scripts/f1_moduleA.metta
+hyperon-experimental/python/tests/scripts/f1_moduleB.metta
+hyperon-experimental/python/tests/scripts/g1_docs.metta
+hyperon-experimental/python/tests/test_include.metta
+hyperon-experimental/repl/src/repl.default.metta
+metta-examples/aunt-kg/baseline_formulation.metta
+metta-examples/aunt-kg/introduction.metta
+metta-examples/aunt-kg/sergey_rodionov_formulation.metta
+metta-examples/aunt-kg/simple_conversion.metta
+metta-examples/collatz/classical.metta
+metta-examples/collatz/peano.metta
+metta-examples/deontic_logic/functional_examples/cd_dts_example_4.metta
+metta-examples/deontic_logic/maker_atlas_examples/endgame_mip_amendment.metta
+metta-examples/deontic_logic/maker_atlas_examples/governance_scope.metta
+metta-examples/deontic_logic/maker_atlas_examples/sky_primitives/asc_rules/asc_rules.metta
+metta-examples/deontic_logic/maker_atlas_examples/sky_primitives/spark_artifact/spark_artifact_edits.metta
+metta-examples/deontic_logic/maker_atlas_examples/sky_primitives/spark_artifact/token_emissions.metta
+metta-examples/deontic_logic/maker_atlas_examples/support_advisory_council_membership_management.metta
+metta-examples/deontic_logic/sparql2metta/bind.metta
+metta-examples/deontic_logic/sparql2metta/construct.metta
+metta-examples/deontic_logic/sparql2metta/filter.metta
+metta-examples/deontic_logic/sparql2metta/union.metta
+metta-examples/edges-to-edges/nte.metta
+metta-examples/fizzbuzz/classical.metta
+metta-examples/fizzbuzz/simple.metta
+metta-examples/metta_amr/metta_to_amr/amr-connect.metta
+metta-examples/metta_amr/metta_to_amr/dep-types.metta
+metta-examples/metta_amr/metta_to_amr/user.metta
+metta-examples/perfect-numbers/basic.metta
+metta-examples/recursion-schemes/src/examples/benchmark.metta
+metta-examples/recursion-schemes/src/examples/expression.metta
+metta-examples/recursion-schemes/src/schemes.metta
+metta-examples/red-black-lambda/red-black.metta
+metta-examples/stack-based/interpreter.metta
+metta-examples/strips/strips-to-metta-flat/queries_flat.metta

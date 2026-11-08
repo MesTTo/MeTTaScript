@@ -5,12 +5,14 @@
 // Purpose: score the petta engine against PeTTa's own results: run each vendored ee5cacb example through
 // packages/petta's CLI the way test.sh runs it and compare with its oracle record, writing a per-example table;
 // with --petta, also run PeTTa itself on SWI-Prolog beside it and measure both engines' wall time and peak
-// resident set per example, on a quiet host, against g-petta-speed-1105.
+// resident set per example, on a quiet host, against g-petta-speed-1105; with --examples, do the same for programs
+// from outside the corpus, judged against PeTTa's own run of each.
 // am[implements a-mettascript-petta-1104.oracle]
 //
 // Usage: node scripts/petta-compare.mjs [--jobs=N] [--timeout=S] [--filter=substr] [--names=a,b]
 //          [--class=normal,strict,fail] [--out=file.json]
 //          [--petta=<PeTTa ee5cacb checkout> [--repeat=N] [--rows=file.tsv]]
+//          [--examples=DIR [--list=FILE]]
 // Verdicts: match, mismatch (stdout or exit class differs), error (engine crash), timeout. Rules:
 //  - normal and strict examples match when stdout is byte-identical and the exit class (0, non-zero, timeout)
 //    agrees; test_datetime's clock readings are masked on both sides, since PeTTa's own runs differ there;
@@ -26,6 +28,12 @@
 // QUIET_CORES or more over the example's window (the busy time of every core less the runs' own CPU time), the example
 // runs again once the host is quiet, so no row times a neighbour's gate; each row keeps the other work its window saw.
 // The examples PeTTa itself runs unbounded run to a 10 s cap on both and stay out of the totals.
+// --examples=DIR takes its programs from DIR instead of the corpus: the paths --list=FILE gives relative to DIR, one a
+// line (blank lines and # comments skipped), or else every .metta file under DIR. Such a program has no oracle, so
+// --petta is required and PeTTa's first run of it is the reference: ours must print the same stdout with the same
+// exit class, and each later PeTTa run is judged against that first one (a disagreement marks the row, without stopping
+// the sweep). Ours runs each program by its absolute path from the program's own directory, PeTTa from its checkout,
+// both with --silent.
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -53,6 +61,8 @@ const OUT = args.out ? resolve(args.out) : null;
 const PETTA = args.petta ? resolve(args.petta) : null;
 const REPEAT = Number(args.repeat ?? 1);
 const ROWS = args.rows ? resolve(args.rows) : null;
+// am[implements a-petta-speed-general-1108.heldout]
+const EXAMPLES = args.examples ? resolve(args.examples) : null;
 const CAP = 65536;
 // GNU time's -q leaves its one format line as the last line of stderr, whatever the command's exit: /usr/bin/time on
 // Linux, Homebrew's gtime where /usr/bin/time is BSD's (macOS, c-measure-hosts-1107).
@@ -61,6 +71,7 @@ const TIME = ["/usr/bin/time", "gtime"].find((t) => spawnSync(t, ["-q", "-f", "%
 const MEASURE = PETTA !== null;
 if (MEASURE && spawnSync(TIME, ["-q", "-f", "%M", "true"]).status !== 0) throw new Error(`${TIME} is not GNU time with -q`);
 if (ROWS && !MEASURE) throw new Error("--rows needs --petta");
+if (EXAMPLES !== null && !MEASURE) throw new Error("--examples needs --petta: its programs have no oracle, so PeTTa's own run is the reference");
 
 // Other work on the host while a measured example runs, in cores: the CPU time all cores spent busy (os.cpus()'s
 // tick counters), less what this process and the example's runs took (GNU time's %U + %S over each run's process
@@ -106,9 +117,21 @@ const NORMALIZE = {
 };
 
 const classOf = (n) => (n.startsWith("fail_") ? "fail" : /^(strict|strictdet)_/.test(n) ? "strict" : "normal");
-const names = readdirSync(join(corpus, "examples"))
-  .filter((f) => f.endsWith(".metta"))
-  .map((f) => f.slice(0, -6))
+/** The programs --examples and --list name, as paths relative to EXAMPLES. */
+const listed = () =>
+  args.list
+    ? readFileSync(resolve(args.list), "utf8")
+        .split("\n")
+        .map((l) => l.trim())
+        .filter((l) => l !== "" && !l.startsWith("#"))
+    : readdirSync(EXAMPLES, { recursive: true }).filter((f) => String(f).endsWith(".metta")).map(String);
+const names = (
+  EXAMPLES !== null
+    ? listed()
+    : readdirSync(join(corpus, "examples"))
+        .filter((f) => f.endsWith(".metta"))
+        .map((f) => f.slice(0, -6))
+)
   .filter((n) => n.includes(FILTER) && (NAMES === null || NAMES.has(n)) && CLASSES.has(classOf(n)))
   .sort();
 // git_import's oracle run found its repository already cloned under repos/ (its stdout has no "Cloning ..."
@@ -169,9 +192,15 @@ function run(argv, cwd, env, capMs) {
   });
 }
 
-const ours = (name, mode, capMs) => run([process.execPath, cli, `./examples/${name}.metta`, "--silent", ...(mode ? [mode] : [])], corpus, process.env, capMs);
+/** A program's path as both engines are given it, and the directory ours runs it from. */
+const programOf = (name) =>
+  EXAMPLES !== null ? { arg: join(EXAMPLES, name), cwd: dirname(join(EXAMPLES, name)) } : { arg: `./examples/${name}.metta`, cwd: corpus };
+const ours = (name, mode, capMs) => {
+  const p = programOf(name);
+  return run([process.execPath, cli, p.arg, "--silent", ...(mode ? [mode] : [])], p.cwd, process.env, capMs);
+};
 const petta = (name, mode, capMs) =>
-  run(["sh", "run.sh", `./examples/${name}.metta`, "--silent", ...(mode ? [mode] : [])], PETTA, { ...process.env, PETTA_STACK_LIMIT: "3g" }, capMs);
+  run(["sh", "run.sh", programOf(name).arg, "--silent", ...(mode ? [mode] : [])], PETTA, { ...process.env, PETTA_STACK_LIMIT: "3g" }, capMs);
 
 function judge(name, oracle, r) {
   const cls = (st) => (st === "timeout" ? "timeout" : st === 0 ? "0" : "nonzero");
@@ -213,8 +242,10 @@ let pettaBroken = null;
 async function worker() {
   while (next < names.length && pettaBroken === null) {
     const name = names[next++];
-    const oracle = JSON.parse(readFileSync(join(corpus, "oracle", name + ".json"), "utf8"));
-    const unbounded = oracle.status === "timeout";
+    // A corpus example's oracle record; an --examples program has none until PeTTa's first run gives it.
+    // am[implements a-petta-speed-general-1108.heldout]
+    let oracle = EXAMPLES !== null ? null : JSON.parse(readFileSync(join(corpus, "oracle", name + ".json"), "utf8"));
+    const unbounded = oracle !== null && oracle.status === "timeout";
     const capMs = MEASURE && unbounded ? UNBOUNDED_MS : TIMEOUT_MS;
     let o, p, other;
     // A window holding a run killed at its cap has no CPU account, so it is kept unchecked: such rows are untimed
@@ -225,15 +256,16 @@ async function worker() {
       let accounted = true;
       for (let i = 0; i < REPEAT; i++) {
         if (PETTA) {
-          const r = await petta(name, oracle.mode, capMs);
+          const r = await petta(name, oracle?.mode, capMs);
           accounted &&= r.cpuMs !== null;
+          oracle ??= { status: r.timedOut ? "timeout" : r.status, stdout: r.stdout };
           p = fold(p, judge(name, oracle, r), r);
-          if (p.verdict !== "match") {
+          if (p.verdict !== "match" && EXAMPLES === null) {
             pettaBroken ??= { name, verdict: p.verdict, stderr: r.stderr.slice(0, 1000) };
             return;
           }
         }
-        const r = await ours(name, oracle.mode, capMs);
+        const r = await ours(name, oracle?.mode, capMs);
         accounted &&= r.cpuMs !== null;
         o = fold(o, judge(name, oracle, r), r);
       }
