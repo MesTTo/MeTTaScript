@@ -81,6 +81,25 @@ export class CellGround implements GroundCells {
     return this.term(this.rootCell());
   }
 
+  /** The term's compound nodes, counted up to `limit` as headprog.ts large counts an object term's, from its cells. */
+  compounds(limit: number): number {
+    const s = this.s, hp = this.hp, st = [this.rootCell()];
+    let n = 0;
+    while (st.length > 0 && n < limit) {
+      const c = st.pop()!, tag = c & 7;
+      if (tag === LIS) {
+        n++;
+        st.push(cellAt(s, c >> 3), cellAt(s, (c >> 3) + 1));
+      } else if (tag === STR) {
+        const p = c >> 3, k = hp.funArity[cellAt(s, p) >> 3]!;
+        if (k === 0) continue;
+        n++;
+        for (let i = 1; i <= k; i++) st.push(cellAt(s, p + i));
+      }
+    }
+    return n;
+  }
+
   args(): Term[] {
     const c = this.rootCell(), p = c >> 3, n = (c & 7) === LIS ? 2 : this.arity, first = (c & 7) === LIS ? p : p + 1;
     const out: Term[] = new Array(n);

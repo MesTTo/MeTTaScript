@@ -79,6 +79,8 @@ export interface GroundCells {
   readonly arity: number;
   /** The root's arguments as stored terms: atomic ones as terms, compound ones as Ground holders over the same cells. */
   args(): Term[];
+  /** The term's compound nodes, counted up to `limit` without decoding it. Time: at most `limit` nodes. */
+  compounds(limit: number): number;
 }
 
 /**

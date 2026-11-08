@@ -16,6 +16,40 @@ import { Ground, Slot, type Clause } from "../db";
 import { CellGround } from "./ground";
 import { ATV, BOX, LIS, REF, STR, type Heap } from "./heap";
 
+/**
+ * Compound nodes a template may have for its head or building code to be generated node by node; a larger one runs as
+ * a head program (termProgram) through MATCH and BUILD, as the object compiler routes templates past its BUILD_NODES
+ * (24) through unifyHead and inst. Code per node made each of peano's depth-300 numeral facts hundreds of kilobytes of
+ * JavaScript, 29% of a depth-100 run compiling it (i-cell-peano-slow-1106).
+ * am[addresses i-cell-peano-slow-1106]
+ */
+const BUILD_NODES = 24;
+
+/**
+ * Whether template t0 is a compound of more than BUILD_NODES compound nodes, so its code runs as a head program (the
+ * compiler, compile.ts, and the tier rule, machine.ts compileAfter). A ground subterm stored as cells is counted from
+ * its cells, never decoded: the tier rule asks on a fact's first try, and decoding every stored head there doubled
+ * peanofast's peak memory (c-tier-decode-heads-1108). Time: at most BUILD_NODES + 1 nodes.
+ */
+export function large(t0: Term): boolean {
+  let n = 0;
+  const st: Term[] = [t0];
+  while (st.length > 0) {
+    const x = st.pop()!;
+    if (x instanceof Ground && x.cells !== null) {
+      n += x.cells.compounds(BUILD_NODES + 1 - n);
+      if (n > BUILD_NODES) return true;
+      continue;
+    }
+    const t = x instanceof Ground ? x.t : x;
+    if (t instanceof Cons) st.push(t.head, t.tail);
+    else if (t instanceof Struct && t.args.length > 0) st.push(...t.args);
+    else continue;
+    if (++n > BUILD_NODES) return true;
+  }
+  return false;
+}
+
 /** [VAR1, i]: slot i's first occurrence takes the cell. */
 const VAR1 = 0;
 /** [VARN, i]: a later occurrence of slot i unifies with the cell. */

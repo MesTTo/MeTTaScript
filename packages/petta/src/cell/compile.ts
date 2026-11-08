@@ -20,7 +20,7 @@ import { Ground, Slot, type Clause } from "../db";
 import { Cons, Float, NIL, Str, Struct, type Term } from "../terms";
 import { compareCells } from "./builtins";
 import { ATM, ATV, BOX, HEAP_CELLS, INT, LIS, REF, STR, type Heap } from "./heap";
-import { build, matchTerm, termProgram } from "./headprog";
+import { build, large, matchTerm, termProgram } from "./headprog";
 import { ENV, HEADFAIL, K_ALT, type CellMachine, type ClauseFn } from "./machine";
 
 /**
@@ -39,14 +39,6 @@ const HOT_AFTER = 1024;
  * below HEAP_CELLS minus it cannot write past the heap; the check at the step's start makes a full heap a hard error.
  */
 const STEP_CELLS = 1 << 20;
-/**
- * Compound nodes a template may have for its head or building code to be generated node by node; a larger one runs as
- * a head program (headprog.ts termProgram) through MATCH and BUILD, as the object compiler routes templates past its
- * BUILD_NODES (24) through unifyHead and inst. Code per node made each of peano's depth-300 numeral facts hundreds of
- * kilobytes of JavaScript, 29% of a depth-100 run compiling it (i-cell-peano-slow-1106).
- * am[addresses i-cell-peano-slow-1106]
- */
-const BUILD_NODES = 24;
 /** A file each compiled clause's source is appended to (PETTA_CELL_DUMP), for reading what was generated. */
 const DUMP = process.env.PETTA_CELL_DUMP;
 /** Goals that only test their arguments: they bind nothing and leave no choicepoint, so a condition of them needs none. */
@@ -102,21 +94,6 @@ function slotsOf(t: Term): number[] {
     else if (x instanceof Cons) st.push(x.head, x.tail);
   }
   return out;
-}
-
-/** Whether template t0 is a compound of more than BUILD_NODES compound nodes. Time: at most BUILD_NODES + 1 nodes. */
-function large(t0: Term): boolean {
-  let n = 0;
-  const st: Term[] = [t0];
-  while (st.length > 0) {
-    const x = st.pop()!;
-    const t = x instanceof Ground ? x.t : x;
-    if (t instanceof Cons) st.push(t.head, t.tail);
-    else if (t instanceof Struct && t.args.length > 0) st.push(...t.args);
-    else continue;
-    if (++n > BUILD_NODES) return true;
-  }
-  return false;
 }
 
 /** The cell of an atomic template, a constant the code keeps (Heap.constant), so no collection frees its box. */

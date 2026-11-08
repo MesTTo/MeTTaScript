@@ -5,7 +5,8 @@
 // Purpose: property tests of the cell snapshot a clause asserted on cells keeps its ground subterms in (ground.ts):
 // decoding it, and copying it back onto the heap and decoding that, give the term the heap held; its root's name,
 // arity and arguments read without decoding agree with the decoded term; an atom a run made and a runtime box keep
-// their value after a collection frees the heap's own; and a term holding a variable is refused.
+// their value after a collection frees the heap's own; a term holding a variable is refused; and its compound nodes,
+// counted from its cells, are the decoded term's, so headprog.ts large reads a stored head without decoding it.
 // am[verifies a-petta-next-1108.speed.cut.ground]
 
 import fc from "fast-check";
@@ -13,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import { Ground } from "../db";
 import { Cons, Float, NIL, Str, Struct, Var, deref, mkVar, type Term } from "../terms";
 import { CellGround, isNotGround, snapshot } from "./ground";
+import { large } from "./headprog";
 import { Heap } from "./heap";
 
 /** A term's text with its variables numbered in order of appearance, Ground holders opened. */
@@ -59,6 +61,25 @@ function heap(): Heap {
 const none = (): void => {};
 
 describe("cell ground snapshots", () => {
+  // am[verifies a-petta-speed-general-1108.tier]
+  it("count their compound nodes from their cells as the decoded term counts them, leaving them undecoded", () => {
+    const nodes = (t0: Term): number => {
+      const t = deref(t0);
+      if (t instanceof Cons) return 1 + nodes(t.head) + nodes(t.tail);
+      return t instanceof Struct && t.args.length > 0 ? 1 + t.args.reduce((n: number, a) => n + nodes(a), 0) : 0;
+    };
+    const deep = (n: number): Term => (n === 0 ? "z" : new Struct("s", [deep(n - 1)]));
+    fc.assert(
+      fc.property(fc.oneof(compound, fc.integer({ min: 1, max: 60 }).map(deep)), fc.integer({ min: 1, max: 80 }), (t, limit) => {
+        const hp = heap(), g = snapshot(hp, hp.encode(t, new Map()), none), want = nodes(g.decode());
+        expect(g.compounds(limit)).toBe(Math.min(want, limit));
+        const held = new Ground(null, g);
+        expect(large(held as unknown as Term)).toBe(want > 24);
+        expect((held as unknown as { term: Term | null }).term).toBe(null);
+      }),
+    );
+  });
+
   it("decode and copy back to the term the heap held, its root read without decoding", () => {
     fc.assert(
       fc.property(compound, (t) => {

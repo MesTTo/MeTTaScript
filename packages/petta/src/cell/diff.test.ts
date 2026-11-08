@@ -31,7 +31,7 @@ import { Cons, Float, NIL, Str, Struct, Var, deref, listToArray, mkList, mkVar, 
 import { installTermBuiltins } from "./builtins";
 import { compileCellClause, installInlineBuiltins } from "./compile";
 import { Heap } from "./heap";
-import { CellMachine } from "./machine";
+import { CellMachine, compileAfter } from "./machine";
 import { bridgeBuiltin } from "./bridge";
 import type { Builtin } from "../machine";
 
@@ -98,7 +98,7 @@ function machines(): { m: Machine; cm: CellMachine } {
   installTermBuiltins(cm);
   if (gcEvery !== null) cm.collectEvery(gcEvery);
   // Every clause compiles at its 32nd try, so a program run 40 times runs its clauses cold and then compiled.
-  cm.tierWork = 0;
+  cm.tiered = false;
   return { m, cm };
 }
 
@@ -735,23 +735,32 @@ describe("cell engine memory", () => {
   });
 });
 
-// am[verifies a-petta-next-1108.speed.cut.tier]
+// am[verifies a-petta-speed-general-1108.tier]
 describe("cell engine tiers", () => {
-  it("compiles a large clause at its 32nd try and a small one only after more, as its size sets", () => {
+  it("compiles each clause at its break-even: a fact whose head runs through the matcher within a few tries, a rule and a small fact only after thousands", () => {
     gcEvery = null;
     const { m, cm } = machines();
-    cm.tierWork = 8000;
+    cm.tiered = true;
     const deep = Array.from({ length: 150 }, (_, i) => `n${i}`).join(", ");
     for (const c of readClauses(`sm(1).\nbg(f(${deep}), [${deep}]).\nrun(0) :- !.\nrun(N) :- sm(_), bg(_, _), N1 is N - 1, run(N1).`)) m.addClause(c, true);
-    const compiled = (name: string, arity: number): boolean => typeof m.db.get(name, arity)!.clauses[0]!.cell === "function";
-    expect(onCells(cm, "run", [31]).threw).toBe(false);
-    expect([compiled("sm", 1), compiled("bg", 2)]).toEqual([false, false]);
+    const clause = (name: string, arity: number, i: number) => m.db.get(name, arity)!.clauses[i]!;
+    const compiled = (name: string, arity: number, i = 0): boolean => typeof clause(name, arity, i).cell === "function";
+    // bg's list argument is past BUILD_NODES, so its head runs through the matcher: 885 / 260 cells, the largest such
+    // fact measured, gives 3 tries. sm's head is generated node by node: 6847 + 41813 / 8 cells, the smallest measured.
+    // run's second clause is a rule: 136 + 67061 / its cells.
+    const [bgAfter, smAfter, runAfter] = [compileAfter(clause("bg", 2, 0), true), compileAfter(clause("sm", 1, 0), true), compileAfter(clause("run", 1, 1), true)];
+    expect(bgAfter).toBe(3);
+    expect(smAfter).toBe(12074);
+    expect(runAfter).toBeGreaterThan(1000);
+    expect(onCells(cm, "run", [2]).threw).toBe(false);
+    expect(compiled("bg", 2)).toBe(false);
     expect(onCells(cm, "run", [1]).threw).toBe(false);
-    // bg's size, 454, gives 8000 / 454 = 18 tries, so the 32 floor holds and its 32nd try compiled it; sm's 3 give
-    // 2667, past the 256 ceiling, so it stays cold until then.
-    expect([compiled("sm", 1), compiled("bg", 2)]).toEqual([false, true]);
-    expect(onCells(cm, "run", [1000]).threw).toBe(false);
-    expect(compiled("sm", 1)).toBe(true);
+    expect(compiled("bg", 2)).toBe(true);
+    // The rule has run three times; it compiles on its runAfter'th try and not before, and sm stays cold through all of them.
+    expect(onCells(cm, "run", [runAfter - 4]).threw).toBe(false);
+    expect([compiled("run", 1, 1), compiled("sm", 1)]).toEqual([false, false]);
+    expect(onCells(cm, "run", [1]).threw).toBe(false);
+    expect([compiled("run", 1, 1), compiled("sm", 1)]).toEqual([true, false]);
   });
 });
 

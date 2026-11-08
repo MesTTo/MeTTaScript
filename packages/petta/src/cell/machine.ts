@@ -20,7 +20,7 @@ import { Halt, NIL, PrologError, Struct, existenceError, instantiationError, typ
 import { CellArgs } from "./args";
 import { Bag } from "./bag";
 import { bridgeBuiltin, nextSolution, objectTrailMark, startNondet, takeSolution, type BridgeRun } from "./bridge";
-import { build, clauseCells, headProgram, matchHead, runHead, type HeadProgram } from "./headprog";
+import { build, clauseCells, headProgram, large, matchHead, runHead, type HeadProgram } from "./headprog";
 import { ATM, ATV, BOX, GLOBAL_SLOTS, HEAP_CELLS, Heap, INT, REF, STR, noWakeups, reserved, stackExhausted, type TrailState, type Wakeup } from "./heap";
 
 /** Code the trampoline runs: the code to run next, or null at a run's exit. */
@@ -72,28 +72,44 @@ export const CPH = 11;
  */
 const NEST = 4;
 /**
- * The fewest tries a clause runs cold before it gets generated code; until then its head runs from its head program,
- * which V8 need not compile (c-cold-plan-facts-1106). The object engine compiles a clause on the same try (machine.ts
- * COMPILE_AFTER).
+ * The try at which every clause is compiled when tiering is off (CellMachine.tiered), as the object engine compiles a
+ * clause on the same try (machine.ts COMPILE_AFTER): the differential tests run each program's clauses both cold and
+ * compiled that way.
  */
 const COMPILE_AFTER = 32;
 /**
- * Tries a clause runs cold before it is compiled: TIER_WORK over its size (headprog.ts clauseCells), no fewer than
- * COMPILE_AFTER and no more than TIER_MAX. A cold try costs about the clause's size and compiling it its size plus a
- * cost each generated function pays (new Function, its inline caches warming), so a small clause earns its code back
- * only after more tries. On the Mac mini this takes the library-loading examples 10 to 21 percent faster than
- * compiling every clause at its 32nd try, peano's large facts still compiling at 32; a ceiling of 1024 made
- * he_minimalmetta 14 percent slower where 256 leaves it as it was (c-tier-sweep-1108, c-tier-mac-1108).
- * am[implements a-petta-next-1108.speed.cut.tier]
+ * The tries a clause runs cold before it is compiled, F + W / s for a clause of s cells (headprog.ts clauseCells): the
+ * break-even of Arnold et al.'s cost-benefit rule for adaptive optimisation (Jalapeño, OOPSLA 2000), a clause tried n
+ * times being taken to be tried n times more, so it is compiled once its compiling try and the compiled tries after it
+ * cost no more than as many cold ones. A compile cost of K0 + K1 s against a saving per try proportional to s gives
+ * that form. F and W are fitted to the break-evens measured on synthetic clauses of 6 to 560 cells (bench/tier-costs.ts,
+ * rows bench/tier-costs-macmini.tsv, c-tier-costs-mac-1108), per kind of code the clause compiles to, the generated
+ * code's first few hundred calls running slower than a cold try while V8 brings it up: a rule's break-even fell from
+ * 4519 tries at 14 cells to 237 at 560; a fact whose head is generated node by node pays its compact code and its
+ * inline recompile (compile.ts HOT_AFTER) back only after 8281 to 14118 tries, and never at 6 cells; one whose head
+ * runs through the term-program matcher (an argument past headprog.ts BUILD_NODES) after 3 to 11. The sizes each fit
+ * was measured on bound it, a clause past them taking the value at the nearer end: extrapolated, the matched facts'
+ * fit fell to one try past 885 cells, compiling peanofast's thousands of large facts on the one try each gets and
+ * doubling its instructions and memory (c-tier-extrapolation-1108). The clamped max(32, min(256, 8000 / s)) this
+ * replaces was chosen on corpus timings and fitted the rules' break-evens worse.
+ * am[implements a-petta-speed-general-1108.tier]
  */
-const TIER_WORK = 8000;
-const TIER_MAX = 256;
+const TIERS = {
+  rule: { floor: 136, work: 67061, cells: [14, 560] },
+  inlineFact: { floor: 6847, work: 41813, cells: [8, 36] },
+  matchedFact: { floor: 0, work: 885, cells: [68, 260] },
+} as const;
 /**
- * The tries clause `c` runs cold before it is compiled, for a budget of `work` cells (TIER_WORK). Time: at most
- * work / COMPILE_AFTER nodes.
+ * The tries clause `c` runs cold before it is compiled: its kind's F + W / cells (TIERS), its cells held to the sizes
+ * the kind was measured on, when `tiered`, and COMPILE_AFTER otherwise. Time: the head's arguments up to BUILD_NODES
+ * compound nodes each, and at most the kind's largest measured size in nodes.
+ * am[implements a-petta-speed-general-1108.tier]
  */
-const compileAfter = (c: Clause, work: number): number =>
-  work <= 0 ? COMPILE_AFTER : Math.max(COMPILE_AFTER, Math.min(TIER_MAX, Math.round(work / clauseCells(c, Math.ceil(work / COMPILE_AFTER)))));
+export const compileAfter = (c: Clause, tiered: boolean): number => {
+  if (!tiered) return COMPILE_AFTER;
+  const t = c.body !== "true" ? TIERS.rule : c.head instanceof Struct && c.head.args.some(large) ? TIERS.matchedFact : TIERS.inlineFact;
+  return Math.round(t.floor + t.work / Math.max(t.cells[0], clauseCells(c, t.cells[1])));
+};
 /**
  * Control stack cells: environments and choicepoints. A frame that would pass the end raises SWI's stack limit error
  * (Heap's stackExhausted), where a typed array would drop the writes (i-cell-bounds-unchecked-1106). PeTTa runs SWI
@@ -418,11 +434,11 @@ export class CellMachine {
    */
   majorGc: (() => void) | null = null;
   /**
-   * The cold work a clause's tries make up before it is compiled (TIER_WORK); 0 compiles every clause at its
-   * COMPILE_AFTER'th try, which the differential tests use to run each program's clauses both cold and compiled.
-   * am[implements a-petta-next-1108.speed.cut.tier]
+   * Whether a clause is compiled at its break-even (compileAfter); false compiles every clause at its COMPILE_AFTER'th
+   * try, which the differential tests use to run each program's clauses both cold and compiled.
+   * am[implements a-petta-speed-general-1108.tier]
    */
-  tierWork = TIER_WORK;
+  tiered = true;
   /** Calls before the next check of V8's heap, and the calls since the last (boundV8Heap). */
   private v8Countdown = V8_CHECK_CALLS;
   private v8Interval = V8_CHECK_CALLS;
@@ -1813,7 +1829,7 @@ export class CellMachine {
     // a plain number: one tried once never pays for a program (c-msf-cell-profile-1107), and a database of facts holds
     // no program or state object per fact (i-cell-tilepuzzle-memory-1107; scale asserts a million).
     if (!rule) {
-      const left = c.cell === null ? compileAfter(c, this.tierWork) - 1 : (c.cell as number) - 1;
+      const left = c.cell === null ? compileAfter(c, this.tiered) - 1 : (c.cell as number) - 1;
       if (left <= 0) {
         const fn = this.compile!(this, c, false);
         c.cell = fn;
@@ -1833,7 +1849,7 @@ export class CellMachine {
       c.cell = fn;
       return fn(h, cc, 0);
     }
-    if (st === null) c.cell = st = { prog: headProgram(this.hp, c), left: compileAfter(c, this.tierWork) - 1 };
+    if (st === null) c.cell = st = { prog: headProgram(this.hp, c), left: compileAfter(c, this.tiered) - 1 };
     if (!runHead(this.hp, st.prog, this.A, this.vals, this.next)) return HEADFAIL;
     const woke = this.hp.wakeups.length !== 0;
     // The hooks the head woke run before the body, which they are put in front of.
