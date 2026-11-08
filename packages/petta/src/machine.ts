@@ -1015,21 +1015,6 @@ export class Machine {
     let p = cell.pred ?? (cell.pred = this.db.preds.get(key));
     if (p === undefined && this.autoload !== null && this.autoload(cell.name, cell.arity)) p = cell.pred = this.db.preds.get(key);
     if (p !== undefined) {
-      // A predicate with an answer table that takes this call answers from it, as a nondeterministic builtin would.
-      // am[implements a-petta-spec-cache]
-      if (p.memo !== null && p.memo.accepts(args)) {
-        const next = r === null ? f.next : new Frame(r, f.next, f.cb, f.cc, f.vars);
-        const h = this.cps.length;
-        const cp = this.pushCP(K.Redo, next, f.cb, f.cc);
-        cp.iter = p.memo.answers(this, args);
-        const res = cp.iter.next();
-        if (res.done) {
-          this.cutTo(h);
-          if (res.value !== true) return 0;
-        }
-        this.goals = next;
-        return 2;
-      }
       const scan = clauseScan(p, args);
       return this.tryClauses(scan, scan.start, this.db.generation, args, null, f.cc, null, f, r);
     }
@@ -1718,18 +1703,6 @@ export class Machine {
     if (this.tabled.size > 0 && this.tabled.has(key)) return this.callTabled(name, args, f.next, f.cb, f.cc);
     const p = this.db.preds.get(key);
     if (p !== undefined) {
-      // am[implements a-petta-spec-cache]
-      if (p.memo !== null && p.memo.accepts(args)) {
-        const h = this.cps.length;
-        const cp = this.pushCP(K.Redo, f.next, f.cb, f.cc);
-        cp.iter = p.memo.answers(this, args);
-        const r = cp.iter.next();
-        if (r.done) {
-          this.cutTo(h);
-          return r.value === true;
-        }
-        return true;
-      }
       const scan = clauseScan(p, args);
       return this.tryClauses(scan, scan.start, this.db.generation, args, f.next, f.cc) !== 0;
     }
