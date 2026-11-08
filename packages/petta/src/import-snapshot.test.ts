@@ -7,15 +7,18 @@
 // replays under another to the final state and output translating gives there, and the replay never runs the
 // library's clauses, also under the same flags in another order with program arguments after them; an importer that
 // defines a function or declares a type before its import, a library file that changed, and flags that change what
-// PeTTa's argv-reading directives set each miss and translate; a library whose load reads argv gets no snapshot.
+// PeTTa's argv-reading directives set each miss and translate; a library whose load reads argv gets no snapshot; a
+// snapshot directory the build writes reads back the same snapshots, and none for another bundle or fingerprint.
 // am[verifies a-petta-next-1108.speed.imports.equivalence]
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import type { CellMachine } from "./cell/machine";
 import { HostedPetta } from "./hosted";
-import { installImportReplay, recordImport, snapshotList, stateLines, type Snapshot } from "./import-snapshot";
+import { installImportReplay, recordImport, snapshotDir, snapshotList, stateLines, writeSnapshotDir, type Snapshot } from "./import-snapshot";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -82,6 +85,19 @@ describe("import snapshots", () => {
     let got: Snapshot | string = "the program never loaded the library";
     run("argv/main.metta", ["--silent"], (cm) => recordImport(cm, pkg, join(pkg, "lib", "reads_argv.metta"), (r) => (got = r)));
     expect(got).toBe("the load read argv");
+  }, 60000);
+
+  it("reads back from a snapshot directory what the build wrote there, for its own bundle only", () => {
+    const snap = record("a/first_types.metta", "lib_builtin_types.metta", ["--silent"]);
+    const dir = mkdtempSync(join(tmpdir(), "petta-snapshots-"));
+    try {
+      expect(writeSnapshotDir(dir, "engine-a", [snap])).toBe(1);
+      expect(snapshotDir(dir, "engine-a")(snap.lib, snap.start)).toStrictEqual([snap]);
+      expect(snapshotDir(dir, "engine-b")(snap.lib, snap.start)).toStrictEqual([]);
+      expect(snapshotDir(dir, "engine-a")(snap.lib, "0".repeat(40))).toStrictEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }, 60000);
 
   it("misses and translates for an importer that defined or declared first, a changed file and other flags", () => {

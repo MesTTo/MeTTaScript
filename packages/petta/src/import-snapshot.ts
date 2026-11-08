@@ -21,8 +21,9 @@
 // am[implements a-petta-next-1108.speed.imports.replay]
 
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
 import type { CellMachine } from "./cell/machine";
 import { RCP } from "./cell/machine";
 import { clauseRef, refClause } from "./builtins";
@@ -447,8 +448,12 @@ export function installImportReplay(
   };
 }
 
-/** The name of the file holding library `lib`'s snapshots from fingerprint `start`, in IMPORTS_DIR. */
-export const snapshotFile = (lib: string, start: string): string => `${lib.replace(/[^\w.-]/g, "_")}.${start.slice(0, 16)}.json`;
+/**
+ * The name of the file holding library `lib`'s snapshots from fingerprint `start`, in IMPORTS_DIR: gzip-compressed
+ * JSON, which takes the 222 snapshots of the 14 argv forms from 31 MB to 1.9 MB, and its largest file's read from a
+ * 6.1 ms parse to that plus a 1.4 ms inflate (c-snapshot-gzip-1108).
+ */
+export const snapshotFile = (lib: string, start: string): string => `${lib.replace(/[^\w.-]/g, "_")}.${start.slice(0, 16)}.json.gz`;
 
 /**
  * A lookup of the snapshots in directory `dir` built by the bundle with hash `engine`: each file is read and parsed
@@ -461,7 +466,7 @@ export function snapshotDir(dir: string, engine: string): (lib: string, start: s
     let got = read.get(name);
     if (got === undefined) {
       const f = join(dir, name);
-      const data = existsSync(f) ? (JSON.parse(readFileSync(f, "utf8")) as SnapshotFile) : null;
+      const data = existsSync(f) ? (JSON.parse(gunzipSync(readFileSync(f)).toString("utf8")) as SnapshotFile) : null;
       got = data !== null && data.format === FORMAT && data.engine === engine ? data.snapshots : [];
       read.set(name, got);
     }
@@ -475,8 +480,8 @@ export const snapshotList =
   (lib) =>
     list.filter((s) => s.lib === lib);
 
-/** The snapshot files for `snapshots`: each file name with its content. */
-export function snapshotFiles(engine: string, snapshots: readonly Snapshot[]): Map<string, SnapshotFile> {
+/** Make `dir` hold `snapshots` of the bundle with hash `engine`, one file per library and fingerprint; the file count. */
+export function writeSnapshotDir(dir: string, engine: string, snapshots: readonly Snapshot[]): number {
   const out = new Map<string, Snapshot[]>();
   for (const s of snapshots) {
     const name = snapshotFile(s.lib, s.start);
@@ -484,7 +489,10 @@ export function snapshotFiles(engine: string, snapshots: readonly Snapshot[]): M
     if (list === undefined) out.set(name, [s]);
     else list.push(s);
   }
-  return new Map([...out].map(([k, v]) => [k, { format: FORMAT, engine, snapshots: v }]));
+  rmSync(dir, { recursive: true, force: true });
+  mkdirSync(dir, { recursive: true });
+  for (const [name, list] of out) writeFileSync(join(dir, name), gzipSync(JSON.stringify({ format: FORMAT, engine, snapshots: list } satisfies SnapshotFile)));
+  return out.size;
 }
 
 /**

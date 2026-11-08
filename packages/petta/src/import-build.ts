@@ -19,7 +19,7 @@ import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { HostedPetta, imagePaths } from "./hosted";
 import { argvDependence, atomsOf, Encoder, engineHash, loadImage, readImage, runArgvDirectives } from "./image";
-import { IMPORTS_DIR, installImportReplay, recordImport, snapshotFiles, snapshotList, stateLines, type Snapshot } from "./import-snapshot";
+import { IMPORTS_DIR, installImportReplay, recordImport, snapshotList, stateLines, writeSnapshotDir, type Snapshot } from "./import-snapshot";
 import { copyTerm } from "./machine";
 import { mkList } from "./terms";
 import type { CellMachine } from "./cell/machine";
@@ -151,11 +151,8 @@ function main(): void {
     rmSync(work, { recursive: true, force: true });
   }
   const dir = join(p.bundle, IMPORTS_DIR);
-  rmSync(dir, { recursive: true, force: true });
-  mkdirSync(dir);
-  const files = snapshotFiles(engine, snapshots);
-  for (const [name, data] of files) writeFileSync(join(dir, name), JSON.stringify(data));
-  process.stdout.write(`${dir}: ${snapshots.length} snapshots in ${files.size} files over ${argvs.length} argv forms (${argvs.map((a) => a.join(" ") || "none").join(", ")}); not snapshotted:\n${skipped.map((s) => `  ${s}\n`).join("")}`);
+  const files = writeSnapshotDir(dir, engine, snapshots);
+  process.stdout.write(`${dir}: ${snapshots.length} snapshots in ${files} files over ${argvs.length} argv forms (${argvs.map((a) => a.join(" ") || "none").join(", ")}); not snapshotted:\n${skipped.map((s) => `  ${s}\n`).join("")}`);
 }
 
 main();
