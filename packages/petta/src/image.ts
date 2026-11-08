@@ -30,7 +30,8 @@ const FORMAT = 2;
  * Encodes terms for the image: atoms as strings, other kinds tagged, variables numbered across the whole image. An
  * encoder for clauses (`clauses` true) refuses a variable, since each predicate's clauses decode alone. A clause
  * reference is refused unless `ref` encodes it (an import snapshot keeps it as its clause's place, import-snapshot.ts),
- * and an attributed variable unless `attrs` is set, when its attributes go with its number.
+ * and an attributed variable unless `attrs` is set, when its attributes go with its number. `rw`, when given, rewrites
+ * every atom and string first (a relocated import snapshot names a library copy's directory as the shipped one's).
  * am[rests-on c-image-clauses-alone-1108]
  */
 export class Encoder {
@@ -40,9 +41,11 @@ export class Encoder {
     private readonly clauses = false,
     private readonly ref: ((t: Struct) => J) | null = null,
     private readonly attrs = false,
+    private readonly rw: ((s: string) => string) | null = null,
   ) {}
 
-  text(s: string): J {
+  text(s0: string): J {
+    const s = this.rw === null ? s0 : this.rw(s0);
     return s.startsWith(this.root + "/") ? { p: s.slice(this.root.length + 1) } : s;
   }
 
@@ -53,7 +56,10 @@ export class Encoder {
     if (t instanceof Slot) return { v: t.i };
     if (t instanceof Ground) return { g: this.term(t.t) };
     if (t instanceof Float) return { f: Object.is(t.v, -0) ? "-0" : String(t.v) };
-    if (t instanceof Str) return t.s.startsWith(this.root + "/") ? { sp: t.s.slice(this.root.length + 1) } : { s: t.s };
+    if (t instanceof Str) {
+      const s = this.rw === null ? t.s : this.rw(t.s);
+      return s.startsWith(this.root + "/") ? { sp: s.slice(this.root.length + 1) } : { s };
+    }
     if (t === NIL) return { n: 1 };
     if (t instanceof Var) {
       if (t.ref !== null) return this.term(t.ref);
@@ -86,13 +92,15 @@ export class Encoder {
 
 export class Decoder {
   private readonly vars = new Map<number, Var>();
+  /** `rw`, when given, rewrites every atom and string decoded, the inverse of an encoder's. */
   constructor(
     private readonly root: string,
     private readonly ref: ((j: J) => Term) | null = null,
+    private readonly rw: ((s: string) => string) | null = null,
   ) {}
 
   term(j: J): Term {
-    if (typeof j === "string") return j;
+    if (typeof j === "string") return this.rw === null ? j : this.rw(j);
     if (typeof j === "number") return j;
     if (Array.isArray(j)) {
       const args = new Array<Term>(j.length - 1);
@@ -100,7 +108,7 @@ export class Decoder {
       return new Struct(j[0] as string, args);
     }
     const o = j as Record<string, J>;
-    if ("p" in o) return this.root + "/" + (o.p as string);
+    if ("p" in o) return this.rw === null ? this.root + "/" + (o.p as string) : this.rw(this.root + "/" + (o.p as string));
     if ("v" in o) return new Slot(o.v as number) as unknown as Term;
     if ("g" in o) return new Ground(this.term(o.g)) as unknown as Term;
     if ("l" in o) {
@@ -119,8 +127,8 @@ export class Decoder {
     }
     if ("i" in o) return BigInt(o.i as string);
     if ("f" in o) return new Float(o.f === "-0" ? -0 : Number(o.f));
-    if ("s" in o) return new Str(o.s as string);
-    if ("sp" in o) return new Str(this.root + "/" + (o.sp as string));
+    if ("s" in o) return new Str(this.rw === null ? (o.s as string) : this.rw(o.s as string));
+    if ("sp" in o) return new Str(this.rw === null ? this.root + "/" + (o.sp as string) : this.rw(this.root + "/" + (o.sp as string)));
     if ("z" in o) return -0;
     if ("r" in o && this.ref !== null) return this.ref(o.r);
     throw new Error("image: unknown term encoding");
