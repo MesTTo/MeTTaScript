@@ -171,9 +171,16 @@ interface ArgInfo {
 }
 
 /** One assessment of a candidate index (pl-index.c hash_assessment): its distinct keys with counts, variables. */
-interface Assessment {
+/** One key's run in an assessment: the key, the clauses carrying it and how many of those hold a compound with a non-variable argument. */
+export interface KeyCount {
+  key: Key;
+  count: number;
+  nvcomp: number;
+}
+
+export interface Assessment {
   readonly args: number[];
-  keys: { key: Key; count: number; nvcomp: number }[];
+  keys: KeyCount[];
   allocated: number;
   varCount: number;
   speedup: number;
@@ -749,10 +756,13 @@ class ClauseList {
     // dynamic predicate with no good index asks this on every call (permutations spent 4% sorting).
     // am[implements a-petta-speed-1105.goal]
     if (this.jitiTried > this.arity) return null;
-    const sorted = this.sortBySpeedup(inst);
+    // The arguments beating MIN_SPEEDUP lead the sorted list, so their count is the sorted prefix's: with fewer than
+    // two there is no pair and the sort is skipped (tilepuzzle spent 2.6 % of its engine thread sorting for none).
+    // am[implements a-petta-next-1108.speed.index]
     let ok = 0;
-    while (ok < sorted.length && this.argInfo[sorted[ok]!]!.speedup > MIN_SPEEDUP) ok++;
-    if (ok < 2 || this.jitiTried > this.arity) return null;
+    for (const a of inst) if (this.argInfo[a]!.speedup > MIN_SPEEDUP) ok++;
+    if (ok < 2) return null;
+    const sorted = this.sortBySpeedup(inst);
     this.jitiTried++;
     const as: Assessment[] = [];
     for (let m = 1; m < ok; m++) for (let k = 0; k < m; k++) as.push(newAssessment(canonical([sorted[k]!, sorted[m]!])));
@@ -924,42 +934,26 @@ function addKey(a: Assessment, key: Key, nvcomp: boolean): void {
  * pl-index.c assess_remove_duplicates: merge equal keys and, given the clause count, the expected speedup
  * N*K/(N-V+V*K), lowered by the spread of keys over clauses, in single-precision arithmetic as SWI computes it.
  * A merged key keeps the compound count of its first run only, as SWI's does.
- * Time: K log K comparisons for K key runs.
+ * Time: K hash lookups for K key runs and D log D string comparisons for D distinct keys.
  */
-function removeDuplicates(a: Assessment, n: number): boolean {
+export function removeDuplicates(a: Assessment, n: number): boolean {
   a.speedup = 0;
   a.list = false;
   if (a.keys.length === 0 && a.allocated === 0) return false;
-  // Key order (cmpKeyOrder, keyString's), then position; each run's first entry takes the run's counts in place.
-  // am[implements a-petta-speed-1105.memory.per-clause]
-  const keys = a.keys;
-  const order = new Int32Array(keys.length);
-  for (let j = 0; j < order.length; j++) order[j] = j;
-  order.sort((x, y) => cmpKeyOrder(keys[x]!.key, keys[y]!.key) || x - y);
-  const out: { key: Key; count: number; nvcomp: number }[] = [];
+  const out = mergeKeys(a.keys) ?? mergeKeysBySort(a.keys);
   let fc = 0;
-  let i = 0;
   let A = 0;
   let Q = 0;
-  let o: { key: Key; count: number; nvcomp: number } | null = null;
-  for (let j = 0; j < order.length; j++) {
-    const s = keys[order[j]!]!;
-    if (o === null || s.key !== o.key) {
-      if (i++ > 0 && n) {
-        const A0 = A;
-        A = f32(A + f32(f32(o!.count - A) / (i - 1)));
-        Q = f32(Q + f32(f32(o!.count - A0) * f32(o!.count - A)));
-        if (o!.nvcomp) fc += o!.nvcomp - 1;
-      }
-      o = s;
-      out.push(o);
-    } else o.count += s.count;
-  }
+  const i = out.length;
   if (i > 0 && n) {
-    const A0 = A;
-    A = f32(A + f32(f32(o!.count - A) / i));
-    Q = f32(Q + f32(f32(o!.count - A0) * f32(o!.count - A)));
-    if (o!.nvcomp) fc += o!.nvcomp - 1;
+    // The running mean and spread of the keys' clause counts, in key order (Welford, as SWI accumulates them).
+    for (let j = 1; j <= i; j++) {
+      const o = out[j - 1]!;
+      const A0 = A;
+      A = f32(A + f32(f32(o.count - A) / j));
+      Q = f32(Q + f32(f32(o.count - A0) * f32(o.count - A)));
+      if (o.nvcomp) fc += o.nvcomp - 1;
+    }
     a.functCount = fc;
   }
   a.keys = out;
@@ -977,6 +971,67 @@ function removeDuplicates(a: Assessment, n: number): boolean {
     }
   }
   return true;
+}
+
+/**
+ * The runs of `keys` with equal keys merged into the first, in key order (cmpKeyOrder, the order of keyString): tagged
+ * keys, then atoms, then numbers, each kind sorted by its strings, which is keyString's order within a kind. Distinct
+ * keys then never compare equal, so the result is what sorting the runs by key and position gives; null when a bigint
+ * or NaN is among the keys, where that no longer holds (1 and 1n share a string; NaN never equals itself).
+ * am[implements a-petta-next-1108.speed.index]
+ */
+function mergeKeys(keys: KeyCount[]): KeyCount[] | null {
+  for (const s of keys) {
+    const k = s.key;
+    if (typeof k === "bigint" || k !== k) return null;
+  }
+  const first = new Map<Key, KeyCount>();
+  const tagged: string[] = [];
+  const atoms: string[] = [];
+  const nums: string[] = [];
+  for (const s of keys) {
+    const k = s.key;
+    const o = first.get(k);
+    if (o !== undefined) {
+      o.count += s.count;
+      continue;
+    }
+    first.set(k, s);
+    if (typeof k === "number") nums.push(String(k));
+    else if ((k as string).charCodeAt(0) === 1) tagged.push(k as string);
+    else atoms.push(k as string);
+  }
+  // Array.prototype.sort without a comparator orders strings by code unit, as < does.
+  tagged.sort();
+  atoms.sort();
+  nums.sort();
+  const out = new Array<KeyCount>(first.size);
+  let j = 0;
+  for (const k of tagged) out[j++] = first.get(k)!;
+  for (const k of atoms) out[j++] = first.get(k)!;
+  for (const s of nums) out[j++] = first.get(Number(s))!;
+  return out;
+}
+
+/**
+ * The runs of `keys` sorted by key order, then position, each run of equal neighbours merged into its first entry:
+ * the general merge, which keeps keys apart that compare equal yet differ (1 and 1n) as mergeKeys cannot.
+ * am[implements a-petta-speed-1105.memory.per-clause]
+ */
+function mergeKeysBySort(keys: KeyCount[]): KeyCount[] {
+  const order = new Int32Array(keys.length);
+  for (let j = 0; j < order.length; j++) order[j] = j;
+  order.sort((x, y) => cmpKeyOrder(keys[x]!.key, keys[y]!.key) || x - y);
+  const out: KeyCount[] = [];
+  let o: KeyCount | null = null;
+  for (let j = 0; j < order.length; j++) {
+    const s = keys[order[j]!]!;
+    if (o === null || s.key !== o.key) {
+      o = s;
+      out.push(o);
+    } else o.count += s.count;
+  }
+  return out;
 }
 
 /**

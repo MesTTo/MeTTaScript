@@ -5,14 +5,16 @@
 // Purpose: property test of swi-index.ts's clause selection on dynamic predicates changed between calls by asserta,
 // assertz and retract: the clauses a call's scan admits always include every live clause whose head is key-compatible
 // with the call, in clause order, and while the predicate is small and the call's first argument is bound, they are
-// exactly the live clauses its first-argument key admits, so a primary-key scan kept across calls never goes stale.
+// exactly the live clauses its first-argument key admits, so a primary-key scan kept across calls never goes stale;
+// and an assessment's duplicate merge gives the same keys, counts and speedup, to the bit, as the sort by key string
+// and position that pl-index.c's assess_remove_duplicates was ported as.
 // am[verifies a-petta-cell-store.select]
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { Ground, Slot, type Clause } from "./db";
 import { Machine } from "./machine";
-import { clauseScan, type Args, type Scan } from "./swi-index";
+import { clauseScan, removeDuplicates, type Args, type Assessment, type Key, type KeyCount, type Scan } from "./swi-index";
 import { Cons, Float, NIL, Str, Struct, Var, mkVar, type Term } from "./terms";
 import { CellArgs } from "./cell/args";
 import { Heap } from "./cell/heap";
@@ -112,6 +114,88 @@ describe("clause selection on a changing dynamic predicate", () => {
         }
       }),
       { numRuns: 400 },
+    );
+  });
+});
+
+// The merge as it was before mergeKeys (swi-index.ts at 9873fae): every run sorted by its key's string (keyString),
+// then position, each run of equal neighbours merged into its first entry, the statistics taken run by run.
+const keyStr = (k: Key): string => (typeof k === "string" ? (k.charCodeAt(0) === 1 ? k : "a" + k) : "i" + k.toString());
+function sortedMerge(a: Assessment, n: number): boolean {
+  const f32 = Math.fround;
+  a.speedup = 0;
+  a.list = false;
+  if (a.keys.length === 0 && a.allocated === 0) return false;
+  const keys = a.keys;
+  const order = keys.map((_, j) => j);
+  order.sort((x, y) => {
+    const p = keyStr(keys[x]!.key), q = keyStr(keys[y]!.key);
+    return p < q ? -1 : p > q ? 1 : x - y;
+  });
+  const out: KeyCount[] = [];
+  let fc = 0, i = 0, A = 0, Q = 0;
+  let o: KeyCount | null = null;
+  for (const j of order) {
+    const s = keys[j]!;
+    if (o === null || s.key !== o.key) {
+      if (i++ > 0 && n) {
+        const A0 = A;
+        A = f32(A + f32(f32(o!.count - A) / (i - 1)));
+        Q = f32(Q + f32(f32(o!.count - A0) * f32(o!.count - A)));
+        if (o!.nvcomp) fc += o!.nvcomp - 1;
+      }
+      o = s;
+      out.push(o);
+    } else o.count += s.count;
+  }
+  if (i > 0 && n) {
+    const A0 = A;
+    A = f32(A + f32(f32(o!.count - A) / i));
+    Q = f32(Q + f32(f32(o!.count - A0) * f32(o!.count - A)));
+    if (o!.nvcomp) fc += o!.nvcomp - 1;
+    a.functCount = fc;
+  }
+  a.keys = out;
+  a.size = i;
+  if (n) {
+    const stdev = f32(Math.sqrt(f32(Q / i)));
+    const functor = (k: Key) => typeof k === "string" && k.charCodeAt(0) === 1 && k.charCodeAt(1) === 99;
+    if (a.size === 1 && !functor(out[0]!.key)) return false;
+    const v = a.varCount;
+    a.speedup = f32(f32(n * a.size) / f32(n - v + v * a.size));
+    a.speedup = f32(a.speedup / f32(1 + f32(f32(stdev * a.size) / n)));
+    if (a.speedup < f32(n / 1.5) && a.functCount > 0 && v === 0) a.list = true;
+    if (f32(v / a.size) > Math.fround(0.1)) {
+      a.speedup = 0;
+      return false;
+    }
+  }
+  return true;
+}
+
+// Keys of every kind, with the cases the hashing merge hands to the sort: a bigint sharing an integer's digits, NaN.
+const keyPool: Key[] = ["a", "b", "1", "", "ab", "\u0001n", "\u0001c[|]/2", "\u0001cf/1", "\u0001cf/2", "\u0001f1.5", "\u0001sx",
+  -12, -3, -0, 0, 1, 2, 3, 10, 12, 100, 2 ** 53 + 2, 1e21, 2n ** 70n, 1n, NaN];
+const plainPool = keyPool.filter((k) => typeof k !== "bigint" && !Number.isNaN(k));
+const entries = (pool: Key[]): fc.Arbitrary<KeyCount[]> =>
+  fc.array(fc.tuple(fc.constantFrom(...pool), fc.integer({ min: 1, max: 4 }), fc.nat(2)).map(([key, count, nv]) => ({ key, count, nvcomp: Math.min(nv, count) })), { maxLength: 60 });
+
+describe("assessment duplicate merge", () => {
+  // am[verifies a-petta-next-1108.speed.index]
+  it.each([["keys without bigints or NaN", plainPool], ["every kind of key", keyPool]])("matches the sort by key string and position on %s", (_, pool) => {
+    fc.assert(
+      fc.property(entries(pool as Key[]), fc.nat(5), fc.boolean(), fc.boolean(), (keys, varCount, allocated, compaction) => {
+        const total = keys.reduce((s, k) => s + k.count, 0) + varCount;
+        const n = compaction ? 0 : total;
+        const make = (): Assessment => ({ args: [0], keys: keys.map((k) => ({ ...k })), allocated: allocated ? 512 : 0, varCount, speedup: 0, list: false, size: 0, functCount: 7 });
+        const got = make(), want = make();
+        const r = removeDuplicates(got, n), w = sortedMerge(want, n);
+        const view = (a: Assessment) => ({ ...a, keys: a.keys.map((k) => [typeof k.key === "number" && Number.isNaN(k.key) ? "NaN" : k.key, k.count, k.nvcomp]) });
+        expect(r).toBe(w);
+        expect(Object.is(got.speedup, want.speedup)).toBe(true);
+        expect(view(got)).toStrictEqual(view(want));
+      }),
+      { numRuns: 3000 },
     );
   });
 });
