@@ -147,9 +147,12 @@ const FIBER_S = 1 << 18;
 const SLICE = 2000;
 
 /**
- * A computation's state beyond its stack frames: registers, the arguments of a call left pending for the trampoline
- * (callLater), which a slice can end on, heap array, trail, queue, and where its stack must end.
+ * A computation's state beyond its stack frames: registers, every argument register (a slice can end on a call left
+ * pending for the trampoline, callLater, or on a clause retry the fail loop has put the arguments back for, RETRY),
+ * the choicepoint a retry popped for its alternative's code (lastAlt, which DISJ reads), heap array, trail, queue, and
+ * where its stack must end.
  * am[implements a-cell-fiber-args-1107]
+ * am[implements a-petta-next-1108.speed.spec.answergoal]
  */
 interface Ctx {
   readonly R: Int32Array;
@@ -171,6 +174,7 @@ interface Ctx {
   readonly inFiber: boolean;
   readonly roots: number[];
   readonly gcAt: number;
+  readonly lastAlt: number;
 }
 
 /**
@@ -1106,7 +1110,7 @@ export class CellMachine {
     const hp = this.hp;
     return {
       R: this.R.slice(),
-      A: this.A.slice(0, this.pendN),
+      A: this.A.slice(),
       h: hp.h,
       boxes: hp.boxes,
       top: hp.top,
@@ -1124,6 +1128,7 @@ export class CellMachine {
       inFiber: this.inFiber,
       roots: this.roots,
       gcAt: this.gcAt,
+      lastAlt: this.lastAlt,
     };
   }
 
@@ -1149,6 +1154,7 @@ export class CellMachine {
     this.inFiber = c.inFiber;
     this.roots = c.roots;
     this.gcAt = c.gcAt;
+    this.lastAlt = c.lastAlt;
   }
 
   /**

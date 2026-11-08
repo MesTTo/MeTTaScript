@@ -956,3 +956,49 @@ q(F, Args, H, D) :- call_cleanup(special_builtin_form(F, Args, H), D = det).
     expect(taken).toBe(10 * 4 * 6);
   });
 });
+
+describe("cell engine workers and interpreted disjunctions", () => {
+  // Each worker retries a disjunction built at run time, so call/1 interprets it (CellMachine.goal), thousands of times,
+  // its alternative binding Y to the worker's own N: a retry resumed in another worker's slice with the other's
+  // choicepoint would bind the other's cell.
+  const PROGRAM = `
+w(N, R) :- w(N, N, 0, R).
+w(_, 0, A, A) :- !.
+w(N, K, A0, A) :- G =.. [;, fail, Y = N], call(G), ( Y == N -> true ; throw(wrong(N, Y)) ), A1 is A0 + 1, K1 is K - 1, w(N, K1, A1, A).
+t(L) :- findall(N-R, concurrent_and(member(N, [3000, 3001, 3002]), w(N, R)), L0), msort(L0, L).
+`;
+  // am[verifies a-petta-next-1108.speed.spec.answergoal]
+  it("resumes each worker's disjunction from its own choicepoint across slice switches", () => {
+    gcEvery = null;
+    const { m, cm } = machines();
+    for (const c of readClauses(PROGRAM)) m.addClause(c, true);
+    const want = { answers: ['["-"(3000,3000)|["-"(3001,3001)|["-"(3002,3002)|[]]]]'], threw: false };
+    expect(onObjects(m, "t", [mkVar()])).toStrictEqual(want);
+    expect(onCells(cm, "t", [mkVar()])).toStrictEqual(want);
+  });
+
+  // s/4's first clause fails at q/1, a call of one argument, and its retry reads all four argument registers back from
+  // the choicepoint: a slice switch between the failure and the retry must keep them, not only the pending call's one.
+  // Each worker pads its heap differently first, so a register read from another worker names another cell, and makes a
+  // different number of calls first, so slices end at every phase of the loop.
+  const RETRY = `
+r(N, R) :- M is (N - 2999) * 7, length(Pad, M), D is N - 3000, d(D), r(N, N, 0, R), Pad = [_|_].
+d(0) :- !.
+d(D) :- D1 is D - 1, d(D1).
+r(_, 0, A, A) :- !.
+r(N, K, A0, A) :- s(N, K, A0, X), ( X == N -> true ; throw(wrong(N, X)) ), A1 is A0 + 1, K1 is K - 1, r(N, K1, A1, A).
+s(_, K, _, bad) :- q(K).
+s(N, _, _, N).
+q(-1).
+u(L) :- findall(N-R, concurrent_and(member(N, [3000, 3001, 3002, 3003, 3004, 3005]), r(N, R)), L0), msort(L0, L).
+`;
+  // am[verifies a-petta-next-1108.speed.spec.answergoal]
+  it("retries a worker's clauses with its own argument registers across slice switches", () => {
+    gcEvery = null;
+    const { m, cm } = machines();
+    for (const c of readClauses(RETRY)) m.addClause(c, true);
+    const want = { answers: ['["-"(3000,3000)|["-"(3001,3001)|["-"(3002,3002)|["-"(3003,3003)|["-"(3004,3004)|["-"(3005,3005)|[]]]]]]]'], threw: false };
+    expect(onObjects(m, "u", [mkVar()])).toStrictEqual(want);
+    expect(onCells(cm, "u", [mkVar()])).toStrictEqual(want);
+  });
+});
